@@ -33,6 +33,8 @@ public class AFKVerifyMod implements ModInitializer {
 
         ServerTickEvents.END_SERVER_TICK.register(AFKPlayerTracker::tick);
 
+        AFKVerifyCommand.register();
+
         LOGGER.info("[AFKVerify] All events registered.");
     }
 }
