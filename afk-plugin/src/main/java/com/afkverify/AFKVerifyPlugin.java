@@ -12,6 +12,9 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 
+import java.io.FileWriter;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /**
@@ -29,6 +32,10 @@ import java.util.*;
  *
  * All thresholds are in config.yml and reloadable via /afkverify reload.
  *
+ * Every popup also writes an afkverify_events.jsonl record (same schema as
+ * the Fabric/Forge mods: popup_id join key, confirm_row/col, clicked_row/col)
+ * so it can be joined against mc_farm.sh's attempts.jsonl by join_training_data.py.
+ *
  * Tested against: Spigot/Paper 1.20.x (API level 1.13+)
  */
 public class AFKVerifyPlugin extends JavaPlugin implements Listener {
@@ -38,6 +45,34 @@ public class AFKVerifyPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, Long>      idleSince      = new HashMap<>();  // System.currentTimeMillis
     private final Map<UUID, Inventory> openGuis       = new HashMap<>();  // player → open GUI
     private final Map<UUID, BukkitRunnable> kickTasks = new HashMap<>();  // pending kick timers
+    private final Map<UUID, Integer>   confirmSlotMap = new HashMap<>();  // player → correct slot this popup
+    private final Map<UUID, Long>      guiOpenAt      = new HashMap<>();  // player → popup open time (ms)
+    private final Map<UUID, String>    popupIdMap     = new HashMap<>();  // player → popup_id (join key)
+
+    private static final DateTimeFormatter ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+    private static final String EVENT_LOG = "afkverify_events.jsonl";
+    private static final String PLATFORM  = "paper";
+
+    // ── JSON event writer — mirrors afk-fabric/afk-forge AFKPlayerTracker ──
+    private static synchronized void writeEvent(String json) {
+        try (FileWriter fw = new FileWriter(EVENT_LOG, true)) {
+            fw.write(json + "\n");
+        } catch (Exception ignored) {
+            // Non-fatal: training-data logging must never break AFK verification itself.
+        }
+    }
+
+    private static String nowIso() {
+        return LocalDateTime.now().format(ISO);
+    }
+
+    private static double nowEpoch() {
+        return System.currentTimeMillis() / 1000.0;
+    }
+
+    private static String esc(String s) {
+        return s == null ? "null" : "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
 
     // ── config cache ──────────────────────────────────────────────────────
     private double afkDistance;   // blocks (3D distance)
@@ -142,7 +177,29 @@ public class AFKVerifyPlugin extends JavaPlugin implements Listener {
             for (int i = denySlots; i < 26; i++) gui.setItem(denyIndices.get(i), new ItemStack(Material.AIR));
         }
 
-        openGuis.put(p.getUniqueId(), gui);
+        UUID id = p.getUniqueId();
+        openGuis.put(id, gui);
+        confirmSlotMap.put(id, confirmSlot);
+        long openedEpoch = System.currentTimeMillis();
+        guiOpenAt.put(id, openedEpoch);
+        String pid = UUID.randomUUID().toString();
+        popupIdMap.put(id, pid);
+
+        // Log popup_shown so this can be joined against mc_farm.sh's attempts.jsonl
+        // (see join_training_data.py). popup_id is the primary join key.
+        writeEvent(String.format(
+            "{\"schema\":\"afkverify_event_v1\",\"event\":\"popup_shown\",\"platform\":%s,"
+            + "\"popup_id\":%s,"
+            + "\"timestamp_iso\":%s,\"timestamp_epoch\":%.3f,"
+            + "\"player_name\":%s,\"player_uuid\":%s,"
+            + "\"confirm_slot\":%d,\"confirm_row\":%d,\"confirm_col\":%d,"
+            + "\"deny_slots\":%d,\"total_slots\":27}",
+            esc(PLATFORM), esc(pid),
+            esc(nowIso()), openedEpoch / 1000.0,
+            esc(p.getName()), esc(id.toString()),
+            confirmSlot, confirmSlot / 9, confirmSlot % 9, denySlots
+        ));
+
         p.openInventory(gui);
         p.sendMessage("§e[AFK] §fVerification required — click the §a§lgreen §fitem!");
 
@@ -189,8 +246,29 @@ public class AFKVerifyPlugin extends JavaPlugin implements Listener {
             @Override public void run() {
                 Player online = Bukkit.getPlayer(id);
                 if (online != null && openGuis.containsKey(id)) {
+                    int correct = confirmSlotMap.getOrDefault(id, -1);
+                    long openedAt = guiOpenAt.getOrDefault(id, System.currentTimeMillis());
+                    long elapsedMs = System.currentTimeMillis() - openedAt;
+                    String pid = popupIdMap.get(id);
+
+                    writeEvent(String.format(
+                        "{\"schema\":\"afkverify_event_v1\",\"event\":\"timeout\",\"platform\":%s,"
+                        + "\"popup_id\":%s,"
+                        + "\"timestamp_iso\":%s,\"timestamp_epoch\":%.3f,"
+                        + "\"player_name\":%s,\"player_uuid\":%s,"
+                        + "\"confirm_slot\":%d,\"confirm_row\":%d,\"confirm_col\":%d,"
+                        + "\"elapsed_ms\":%d}",
+                        esc(PLATFORM), esc(pid),
+                        esc(nowIso()), nowEpoch(),
+                        esc(online.getName()), esc(id.toString()),
+                        correct, correct / 9, correct % 9, elapsedMs
+                    ));
+
                     online.closeInventory();
                     openGuis.remove(id);
+                    confirmSlotMap.remove(id);
+                    guiOpenAt.remove(id);
+                    popupIdMap.remove(id);
                     online.kickPlayer("§cAFK verification timed out.\n§7Please reconnect.");
                 }
                 kickTasks.remove(id);
@@ -227,19 +305,63 @@ public class AFKVerifyPlugin extends JavaPlugin implements Listener {
         if (meta == null) return;
         String name = meta.getDisplayName();
 
+        int clickedSlot = e.getSlot();
+        int correct = confirmSlotMap.getOrDefault(id, -1);
+        long openedAt = guiOpenAt.getOrDefault(id, System.currentTimeMillis());
+        long elapsedMs = System.currentTimeMillis() - openedAt;
+        String pid = popupIdMap.get(id);
+
         if (name.contains("Click to Confirm")) {
             // ── Correct click ────────────────────────────────────────────
+            writeEvent(String.format(
+                "{\"schema\":\"afkverify_event_v1\",\"event\":\"passed\",\"platform\":%s,"
+                + "\"popup_id\":%s,"
+                + "\"timestamp_iso\":%s,\"timestamp_epoch\":%.3f,"
+                + "\"player_name\":%s,\"player_uuid\":%s,"
+                + "\"slot_clicked\":%d,\"clicked_row\":%d,\"clicked_col\":%d,"
+                + "\"confirm_slot\":%d,\"confirm_row\":%d,\"confirm_col\":%d,"
+                + "\"elapsed_ms\":%d,\"correct\":%b}",
+                esc(PLATFORM), esc(pid),
+                esc(nowIso()), nowEpoch(),
+                esc(p.getName()), esc(id.toString()),
+                clickedSlot, clickedSlot / 9, clickedSlot % 9,
+                correct, correct / 9, correct % 9,
+                elapsedMs, true
+            ));
+
             p.closeInventory();
             openGuis.remove(id);
+            confirmSlotMap.remove(id);
+            guiOpenAt.remove(id);
+            popupIdMap.remove(id);
             cancelKickTimer(id);
             idleSince.put(id, System.currentTimeMillis());
             p.sendMessage("§a[AFK] §fVerification passed! Welcome back.");
 
         } else if (name.contains("Do not click")) {
             // ── Wrong click ──────────────────────────────────────────────
+            writeEvent(String.format(
+                "{\"schema\":\"afkverify_event_v1\",\"event\":\"failed\",\"platform\":%s,"
+                + "\"popup_id\":%s,"
+                + "\"timestamp_iso\":%s,\"timestamp_epoch\":%.3f,"
+                + "\"player_name\":%s,\"player_uuid\":%s,"
+                + "\"slot_clicked\":%d,\"clicked_row\":%d,\"clicked_col\":%d,"
+                + "\"confirm_slot\":%d,\"confirm_row\":%d,\"confirm_col\":%d,"
+                + "\"elapsed_ms\":%d,\"correct\":%b}",
+                esc(PLATFORM), esc(pid),
+                esc(nowIso()), nowEpoch(),
+                esc(p.getName()), esc(id.toString()),
+                clickedSlot, clickedSlot / 9, clickedSlot % 9,
+                correct, correct / 9, correct % 9,
+                elapsedMs, false
+            ));
+
             cancelKickTimer(id);
             p.closeInventory();
             openGuis.remove(id);
+            confirmSlotMap.remove(id);
+            guiOpenAt.remove(id);
+            popupIdMap.remove(id);
             if (kickOnFail) {
                 p.kickPlayer("§cYou clicked the wrong item!\n§7Please reconnect.");
             } else {
@@ -273,6 +395,9 @@ public class AFKVerifyPlugin extends JavaPlugin implements Listener {
         openGuis.remove(id);
         lastLoc.remove(id);
         idleSince.remove(id);
+        confirmSlotMap.remove(id);
+        guiOpenAt.remove(id);
+        popupIdMap.remove(id);
         cancelKickTimer(id);
     }
 
