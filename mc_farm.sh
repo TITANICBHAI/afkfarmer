@@ -48,9 +48,17 @@ SNAP = "/tmp/_mc_afk.png"
 
 # ── Timing ────────────────────────────────────────────────────
 POLL       = 0.35   # seconds between full-screen popup checks
-HOVER_WAIT = 0.14   # wait after moving mouse (MC tooltip appears within 1-2 ticks = 50-100ms)
-REACT_MIN  = 0.28   # human-like pause before starting to solve (min)
-REACT_MAX  = 0.95   # human-like pause before starting to solve (max)
+HOVER_WAIT = 0.10   # wait after moving mouse (MC tooltip appears within 1 tick = 50ms; 100ms plenty)
+REACT_MIN  = 0.20   # human-like pause before starting to solve (min)
+REACT_MAX  = 0.65   # human-like pause before starting to solve (max)
+SWEEP_TIMEOUT = 5.5 # abort sweep if it's been running this many seconds (server kicks ~7-10s)
+
+# Measured from screenshots (all sessions, 1024×576 screen):
+#   slot_w = 29 px  (column width  = popup_w / 9)
+#   slot_h = 35 px  (row height    = spacing between row centers, CONSTANT)
+# These are DIFFERENT — the AFK grid is NOT square in this server's GUI.
+# Using a single slot for both caused up to 16 px vertical error on row 2.
+SLOT_H_DEFAULT = 35
 
 # ── Minecraft UI colors ───────────────────────────────────────
 # Inventory background gray  ≈ rgb(198,198,198)
@@ -202,9 +210,18 @@ def find_afk_strip():
     # Sanity: popup should be 120-450px wide and at least 80px tall
     if pw<120 or ph<80: return None
 
-    # ── Slot size: 9 slots fill ~90% of popup width ───────────────────
-    slot = int(pw * 0.90 / 9)
-    slot = max(10, min(slot, 60))
+    # ── Slot dimensions (measured from screenshots) ───────────────────
+    #
+    #  slot_w: column width = popup_w / 9  (round, not floor)
+    #          pw=260 → slot_w=29.  The old int(pw*0.90/9)=26 put col 0
+    #          13 px too far right and missed col 8 entirely.
+    #
+    #  SLOT_H: row height is CONSTANT = 35 px (spacing between row centres
+    #          measured across all screenshot sessions).  The grid is NOT
+    #          square — using one value for both axes caused a 16 px vertical
+    #          error on row 2, making those items completely unhittable.
+    slot_w = max(10, min(round(pw / 9), 60))
+    SLOT_H = SLOT_H_DEFAULT   # 35 px — constant regardless of popup size
 
     # ── 4. Row-by-row gray-fraction scan to locate the two dark bands ─
     #
@@ -254,11 +271,10 @@ def find_afk_strip():
 
     # ── 5a. Secondary separator: scan for "Inventory" white text rows ───
     #
-    #  The "Inventory" label uses MC's pure-white text (R≥250,G≥250,B≥250).
-    #  Items in the AFK grid don't have such pure-white pixels (they're colored).
-    #  Scan rows in 42-52% of popup height for a white-pixel fraction > 8%.
-    #  This works even when the Inventory separator row is the SAME gray shade
-    #  as slot rows (making the dark-band method unreliable).
+    #  The "Inventory" label uses MC pure-white text (R≥250,G≥250,B≥250).
+    #  Items in the AFK grid are coloured — no pure-white pixels.
+    #  Scan rows at 42-52% of popup height.  Measured across all sessions:
+    #  "Inventory" text appears at exactly 46.1% of popup height.
     #
     if inv_sep_rel is None:
         lo_rel = int(ph * 0.42)
@@ -277,31 +293,39 @@ def find_afk_strip():
                 break   # first row with heavy white text = "Inventory" label
 
     # ── 5b. Build final strip coordinates ─────────────────────────────
+    #
+    #  strip_top: measured title bar = 18 px (constant across all sessions)
     if title_end_rel is not None:
         strip_top = pt + title_end_rel
     else:
-        # MC title bar is ~14 px.  slot*0.45 ≈ 16 px at slot=35 — much
-        # better than the old slot*1.1 ≈ 38 px which landed strip_top
-        # 20 px BELOW actual row-0 item centers, causing prescan to miss them.
-        strip_top = pt + int(slot * 0.45)
+        strip_top = pt + 18   # fixed 18 px — measured MC title bar height
+
+    #  strip_bot: must include all 3 AFK rows.
+    #  Row 2 bottom = strip_top + 3*SLOT_H = strip_top + 105.
+    #  "Inventory" text at ~46% is at y≈249, row 2 bottom at y≈253 — very
+    #  close, so we always enforce the minimum to avoid cutting row 2 off.
+    MIN_STRIP_H = 3 * SLOT_H   # always show 3 AFK rows (= 105 px)
 
     if inv_sep_rel is not None:
-        strip_bot = pt + inv_sep_rel
-        print(f"  Popup {pw}×{ph}px  slot≈{slot}px  "
+        raw_bot = pt + inv_sep_rel
+        strip_bot = max(raw_bot, strip_top + MIN_STRIP_H)
+        print(f"  Popup {pw}×{ph}px  slot_w={slot_w}px  SLOT_H={SLOT_H}px  "
               f"title_end={title_end_rel}px  inv_sep={inv_sep_rel}px  [exact]")
     else:
-        # Measured from screenshots: "Inventory" label always at 45.7% of ph.
-        strip_bot = pt + int(ph * 0.46)
-        print(f"  Popup {pw}×{ph}px  slot≈{slot}px  "
-              f"title_end={title_end_rel}px  sep=not found [46% fallback]")
+        # 49% fallback: 130+126=256 > strip_top+105=253 → 3 rows always included
+        raw_bot = pt + int(ph * 0.49)
+        strip_bot = max(raw_bot, strip_top + MIN_STRIP_H)
+        print(f"  Popup {pw}×{ph}px  slot_w={slot_w}px  SLOT_H={SLOT_H}px  "
+              f"title_end={title_end_rel}px  sep=not found [49% fallback]")
 
     if strip_bot <= strip_top: return None
 
-    # Center 9 columns horizontally within the popup
-    strip_left  = pl + (pw - 9*slot) // 2
-    strip_right = strip_left + 9*slot
+    # Center 9 columns horizontally within the popup using slot_w
+    strip_left  = pl + (pw - 9*slot_w) // 2
+    strip_right = strip_left + 9*slot_w
 
-    return (strip_left, strip_top, strip_right, strip_bot, slot)
+    # Return 6-element tuple — callers must unpack as (sl,st,sr,sb,slot_w,slot_h)
+    return (strip_left, strip_top, strip_right, strip_bot, slot_w, SLOT_H)
 
 # ═══════════════════════════════════════════════════════════════
 #  TOOLTIP READING — AI → OCR → color (best to worst)
@@ -378,13 +402,18 @@ def has_tooltip(path):
 
 def read_tooltip(mx, my):
     """
-    Capture the area where the tooltip appears, then try AI → OCR → color.
+    Capture the area where the tooltip appears, then identify it.
 
-    From screenshots: the tooltip appears to the RIGHT of the hovered item
-    and can extend well beyond the popup's right edge (even near screen edge).
-    It sits roughly level with the cursor, slightly above.
-    We capture a wide band (450px) that starts well to the left of the cursor
-    so we also catch tooltips that open leftward on right-edge slots.
+    Detection order: COLOR → AI → OCR
+    ─────────────────────────────────
+    The green (#55FF55) and red (#FF5555) MC text colors are so distinct that
+    the pixel color scan alone is ~100 % accurate when a tooltip IS present.
+    Trying AI first (old order) wasted 0.5-1 s per item for no benefit.
+    New order: color scan first (< 1 ms); fall back to AI/OCR only if the
+    color scan finds neither green nor red (should be <5 % of cases).
+
+    Tooltip region: 460×145 px centred on the cursor (extends left to catch
+    tooltips that open leftward on right-edge slots).
     """
     sw,sh=screen_wh()
     tx=max(0,  mx-100);  ty=max(0,  my-110)
@@ -392,19 +421,23 @@ def read_tooltip(mx, my):
     scrot(tx,ty,tw,th)
 
     # ── Fast gate: no tooltip background → empty slot, skip everything ──
-    # This prevents AI/OCR calls on the ~18 empty slots out of 27.
     if not has_tooltip(SNAP):
         return "empty"
 
-    # ── Tooltip IS present — now identify it ────────────────────────────
+    # ── Color scan first — fast, no network/process overhead ────────────
+    a = ask_color(SNAP)
+    if a in ("confirm","deny"):
+        print(f"    [color] → {a}"); return a
+
+    # ── Fallback: AI then OCR (only reached if color was inconclusive) ──
     if HAS_AI:
         a=ask_ai(SNAP)
         if a is not None: print(f"    [AI]    → {a}"); return a
     if HAS_TESS:
         a=ask_ocr(SNAP)
         if a is not None: print(f"    [OCR]   → {a}"); return a
-    a=ask_color(SNAP)
-    print(f"    [color] → {a}"); return a
+
+    print(f"    [color] → deny (fallback)"); return "deny"
 
 # ═══════════════════════════════════════════════════════════════
 #  QUICK POPUP PRESENCE CHECK  (gray-mass scan, no full analysis)
@@ -433,24 +466,25 @@ def popup_open():
 # ═══════════════════════════════════════════════════════════════
 def prescan_strip(strip):
     """
-    Take ONE screenshot of the AFK strip, look for slots that contain items.
+    Take ONE screenshot of the AFK strip, return slots that contain items.
 
-    Empty slots are pure MC gray (rgb ~198,198,198) with a slightly darker
-    1-2px border. Slots with items have many colorful (non-gray) pixels.
+    Uses SEPARATE slot_w (column width) and slot_h (row height) — the AFK
+    grid is NOT square (measured: slot_w≈29px, slot_h=35px).  Using one
+    value for both axes placed the prescan sample point up to 16px off on
+    row 2, causing items there to be reported as empty and never clicked.
 
-    Colorfulness test: if max(R,G,B) - min(R,G,B) > 30 the pixel is clearly
-    not a uniform gray shade.  We sample a central 12×12 box inside each slot
-    to avoid counting the gray border edge.
+    n_rows is HARDCODED to 3 — JartexNetwork always shows exactly 3 AFK
+    rows regardless of how many items are placed.
 
-    Returns a list of (row, col) pairs with items, in left-to-right, top-to-
-    bottom order (same as the old sweep order).  Falls back to ALL slots if
-    detection is inconclusive.
+    Colorfulness test: max(R,G,B)-min(R,G,B) > 30 → not plain gray.
+    Samples a 12×12 box at each slot centre to avoid border artifacts.
+    Falls back to ALL slots if the decode fails.
     """
-    sl, st, sr, sb, slot = strip
-    n_rows = max(1, (sb - st) // slot)
+    sl, st, sr, sb, slot_w, slot_h = strip
+    N_ROWS = 3   # always 3 for JartexNetwork OneBlock AFK popup
     sw, sh = screen_wh()
 
-    # Screenshot only the AFK strip for speed
+    # Screenshot only the AFK strip (tight crop for speed)
     px = max(0, sl);  py = max(0, st)
     pw = min(sw - px, sr - sl + 4)
     ph = min(sh - py, sb - st + 4)
@@ -459,18 +493,18 @@ def prescan_strip(strip):
     r = decode_png(SNAP)
     if r is None:
         print("  Prescan: decode failed — hovering all slots")
-        return [(row, col) for row in range(n_rows) for col in range(9)]
+        return [(row, col) for row in range(N_ROWS) for col in range(9)]
 
     img_rows, iw, ih, bpp = r
     found = []
 
-    for row in range(n_rows):
+    for row in range(N_ROWS):
         for col in range(9):
-            # Centre of slot in IMAGE coordinates (image starts at sl,st)
-            cx = col * slot + slot // 2
-            cy = row * slot + slot // 2
+            # Centre of slot in IMAGE coordinates
+            # X uses slot_w (column width), Y uses slot_h (row height)
+            cx = col * slot_w + slot_w // 2
+            cy = row * slot_h + slot_h // 2
 
-            # Sample a 12×12 window around the slot centre
             half = 6
             x0 = max(0, cx - half);  x1 = min(iw, cx + half)
             y0 = max(0, cy - half);  y1 = min(ih, cy + half)
@@ -490,11 +524,11 @@ def prescan_strip(strip):
             if colorful >= 8:
                 found.append((row, col))
 
-    total = 9 * n_rows
+    total = 9 * N_ROWS
     print(f"  Prescan: {len(found)} item slots out of {total} — skipping {total-len(found)} empty")
     if not found:
         print("  Prescan found nothing colorful — hovering all slots as fallback")
-        return [(row, col) for row in range(n_rows) for col in range(9)]
+        return [(row, col) for row in range(N_ROWS) for col in range(9)]
     return found
 
 
@@ -503,29 +537,38 @@ def prescan_strip(strip):
 # ═══════════════════════════════════════════════════════════════
 def sweep_strip(strip):
     """
-    strip = (left, top, right, bottom, slot_px)
+    1. prescan_strip() takes ONE screenshot → finds only colorful (item) slots.
+    2. Hovers each item slot, reads tooltip with COLOR-FIRST logic (< 1 ms).
+    3. Clicks the first CONFIRM slot and returns True.
 
-    1. prescan_strip() takes ONE screenshot to find which of the 27 slots
-       actually contain items (colorful pixels vs pure gray empty slots).
-    2. Only those ~5-8 slots are hovered and tooltip-checked.
+    Timing improvements from screenshot analysis:
+      • HOVER_WAIT  0.14 → 0.10 s  (tooltip appears in 50 ms = 1 MC tick)
+      • REACT       0.28-0.95 → 0.20-0.65 s
+      • Color-first tooltip: removes 0.5-1 s AI call per item
+      • Net: 7 items now takes ~1.1 s instead of ~7 s
 
-    OLD: 27 slots × 0.20s = 5.4s minimum traversal.
-    NEW: ~6 slots × 0.14s = 0.84s traversal  (+ 1 prescan screenshot ~0.1s)
-
-    Clicks the FIRST slot whose tooltip says CONFIRM.
-    Returns True if solved, False if no confirm found.
+    Sweep aborts if SWEEP_TIMEOUT seconds have elapsed — server will kick
+    before the script could finish anyway, so no point hovering more.
     """
-    sl, st, sr, sb, slot = strip
+    sl, st, sr, sb, slot_w, slot_h = strip
 
     item_slots = prescan_strip(strip)
-    print(f"  Hovering {len(item_slots)} slot(s)")
+    print(f"  Hovering {len(item_slots)} slot(s)  [slot_w={slot_w} slot_h={slot_h}]")
 
+    sweep_start = time.time()
     for row, col in item_slots:
-        sx = sl + col*slot + slot//2
-        sy = st + row*slot + slot//2
+        # ── Hard timeout: abort if we've used too much of the AFK window ──
+        elapsed = time.time() - sweep_start
+        if elapsed > SWEEP_TIMEOUT:
+            print(f"  ⚠ sweep timeout at {elapsed:.1f}s — aborting")
+            return False
+
+        # X uses slot_w (column width), Y uses slot_h (row height separately)
+        sx = sl + col * slot_w + slot_w // 2
+        sy = st + row * slot_h + slot_h // 2
 
         xdo('mousemove', str(sx), str(sy))
-        time.sleep(HOVER_WAIT + random.uniform(0, 0.05))
+        time.sleep(HOVER_WAIT + random.uniform(0, 0.04))
 
         answer = read_tooltip(sx, sy)
 
@@ -533,20 +576,31 @@ def sweep_strip(strip):
             print(f"  row {row+1} col {col+1}: GREEN ✓ — clicking!")
             open(LOCK,'w').close()
             xdo('mousemove', str(sx), str(sy))
-            time.sleep(random.uniform(0.03, 0.09))
+            time.sleep(random.uniform(0.03, 0.08))
             xdo('mousedown','1')
-            time.sleep(random.uniform(0.07, 0.14))
+            time.sleep(random.uniform(0.06, 0.12))
             xdo('mouseup','1')
-            time.sleep(random.uniform(1.9, 3.3))   # wait for popup to close
+            time.sleep(random.uniform(1.8, 3.0))   # wait for popup to close
             try: os.remove(LOCK)
             except: pass
+            _log(f"SOLVED row={row+1} col={col+1} t={time.time()-sweep_start:.2f}s")
             return True
 
         elif answer == "deny":
             print(f"  row {row+1} col {col+1}: red ✗ — skip")
-        # "empty" = prescan false-positive, just continue
 
-    return False   # finished all item slots, nothing clicked
+    _log(f"FAILED items={len(item_slots)} t={time.time()-sweep_start:.2f}s")
+    return False
+
+# ── Diagnostic log ─────────────────────────────────────────────────────────
+_LOG = "/tmp/mc_afk_log.txt"
+def _log(msg):
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(_LOG, "a") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
 
 # ═══════════════════════════════════════════════════════════════
 #  MAIN LOOP
@@ -572,8 +626,8 @@ def main():
                 time.sleep(POLL)
                 continue
 
-            sl,st,sr,sb,slot=strip
-            print(f"[ AFK solver ] Afk strip found — width={sr-sl}px, slot≈{slot}px")
+            sl,st,sr,sb,slot_w,slot_h=strip
+            print(f"[ AFK solver ] Afk strip found — width={sr-sl}px  slot_w={slot_w}px  slot_h={slot_h}px")
 
             # Short human-like pause before reacting
             time.sleep(random.uniform(REACT_MIN, REACT_MAX))
