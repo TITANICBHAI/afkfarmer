@@ -12,9 +12,16 @@
 FLAG_FILE="/tmp/mc_spamming"
 AFK_LOCK="/tmp/mc_afk_solving"
 PY_SCRIPT="/tmp/mc_afk_px.py"
+PID_FILE="/tmp/mc_farm_pids"
 
 if [ -f "$FLAG_FILE" ]; then
     rm -f "$FLAG_FILE"
+    if [ -f "$PID_FILE" ]; then
+        while IFS= read -r _pid; do kill "$_pid" 2>/dev/null; done < "$PID_FILE"
+        rm -f "$PID_FILE"
+    fi
+    pkill -f "$PY_SCRIPT" 2>/dev/null
+    rm -f "$AFK_LOCK"
     echo "[ MC Farm ] STOPPED"
     exit 0
 fi
@@ -49,11 +56,26 @@ Calibration data:
 stdlib only — no pip, no install.
 """
 import os, sys, zlib, struct, subprocess, time, random, base64, json
-import uuid, pathlib, shutil, select
+import uuid, pathlib, shutil, select, math
 
 FLAG = "/tmp/mc_spamming"
 LOCK = "/tmp/mc_afk_solving"
 SNAP = "/tmp/_mc_afk.png"
+
+# ── PNG decode cache — one decode per scrot(), shared by all backends ─────
+# Invalidated automatically when SNAP's mtime changes (i.e. after each scrot).
+_snap_mtime  = -1.0
+_snap_cached = None   # (rows, w, h, bpp) or None
+
+def decode_png_cached():
+    """Return decoded SNAP, re-decoding only when the file has been updated."""
+    global _snap_mtime, _snap_cached
+    try:    mt = os.path.getmtime(SNAP)
+    except: mt = -1.0
+    if mt != _snap_mtime or _snap_cached is None:
+        _snap_cached = decode_png(SNAP)
+        _snap_mtime  = mt
+    return _snap_cached
 
 # ── Calibration output directory (set by mc_farm.sh via env var) ──────
 ASSETS_DIR  = os.environ.get('MC_ASSETS_DIR', '/tmp/mc_afk_assets')
@@ -65,7 +87,7 @@ _attempt_no = 0          # incremented each time a popup is found
 
 # ── Timing ────────────────────────────────────────────────────
 POLL       = 0.35   # seconds between full-screen popup checks
-HOVER_WAIT = 0.10   # wait after moving mouse (MC tooltip appears within 1 tick = 50ms; 100ms plenty)
+HOVER_WAIT = 0.15   # wait after moving mouse (MC tooltip appears within 1 tick = 50ms; 150ms safer)
 REACT_MIN  = 0.20   # human-like pause before starting to solve (min)
 REACT_MAX  = 0.65   # human-like pause before starting to solve (max)
 SWEEP_TIMEOUT = 5.5 # abort sweep if it's been running this many seconds (server kicks ~7-10s)
@@ -76,26 +98,38 @@ SWEEP_TIMEOUT = 5.5 # abort sweep if it's been running this many seconds (server
 # These are DIFFERENT — the AFK grid is NOT square in this server's GUI.
 SLOT_H_DEFAULT = 35  # initial estimate; recalculated dynamically from detected strip height
 
-# ── Hover spiral: positions to try (dx,dy) if center hover yields no tooltip
-# Starts at center (0,0), then expands outward in a cross/diamond pattern.
-# Each position is tried in order until a tooltip appears.
-HOVER_SPIRAL = [(0,0),(0,-5),(5,0),(0,5),(-5,0),(-4,-4),(4,-4),(4,4),(-4,4)]
+# ── Hover spiral: positions to try (dx,dy) around the slot center ────────────
+# Expands outward in rings so the center is always tried first.
+# Covers ±8px — enough to find tooltip even when strip coordinates are 1-2px off.
+HOVER_SPIRAL = [
+    (0,  0),                               # center
+    (0, -4), (4,  0), (0,  4), (-4,  0),  # ring 1: cross ±4
+    (-3,-3), (3, -3), (3,  3), (-3,  3),  # ring 1: diagonals ±3
+    (0, -8), (8,  0), (0,  8), (-8,  0),  # ring 2: cross ±8
+    (-6,-6), (6, -6), (6,  6), (-6,  6),  # ring 2: diagonals ±6
+]
 
 # ── Prescan confidence thresholds (colorful pixel count in 14×14 box) ────────
 PRESCAN_HIGH = 15   # ≥15 bright pixels → item definitely present
 PRESCAN_MED  = 5    # 5-14 → possible item (hover but accept "empty" result)
 # < 5 → skip entirely (empty slot)
 
-# ── Tooltip backend weights for voting ───────────────────────────────────────
-# These are the hardcoded defaults.  At startup _load_weights() overrides
-# them from attached_assets/weights.json if that file exists.
-# weights.json is produced by join_training_data.py after joining
-# attempts.jsonl (script log) with afkverify_events.jsonl (mod ground truth).
+# ── Tooltip backend weights (kept for _load_weights() compatibility) ─────────
 WEIGHT_COLOR    = 2
-WEIGHT_HSV      = 2   # hue-space scan — orthogonal to RGB, works without AI
+WEIGHT_HSV      = 2
 WEIGHT_AI       = 3
 WEIGHT_OCR      = 1
-VOTE_THRESHOLD  = 2   # minimum weighted votes needed to act
+VOTE_THRESHOLD  = 2   # legacy — no longer used for the confirm decision
+
+# ── Consensus quorums ─────────────────────────────────────────────────────────
+# read_tooltip_voted() now counts RAW VOTES (not weighted scores).
+# CONFIRM_QUORUM: how many backends must independently say "confirm" before
+#   we allow a click.  ≥2 prevents any single noisy backend from acting.
+# DENY_QUORUM   : how many backends must say "deny" to skip the slot.
+#   Kept at 2 — we're equally cautious about skipping the real confirm item.
+# When AI is available it counts as one vote (very reliable, never double-counts).
+CONFIRM_QUORUM = 2
+DENY_QUORUM    = 2
 
 # ── Slot icon template matching ───────────────────────────────────────────────
 # Templates are 16×16 downsampled slot crops (box-averaged to 768 floats each).
@@ -110,8 +144,9 @@ _slot_templates = {                     # averaged pixel arrays per label
 }
 
 # ── Minecraft UI colors ───────────────────────────────────────
-# Inventory background gray  ≈ rgb(198,198,198)
-C_GRAY  = ((180,180,180), (222,222,222))
+# Inventory background gray  ≈ rgb(198,198,198) vanilla; custom packs can be 140-230
+# Wide range intentional: catches JartexNetwork custom resource-pack grays AND slot interiors
+C_GRAY  = ((100,100,100), (230,230,230))
 # "Click to Confirm" title   §a = #55FF55 = rgb(85,255,85)
 C_GREEN = ((48, 195, 48),  (135, 255, 135))
 # "Do not click" title       §c = #FF5555 = rgb(255,85,85)
@@ -125,6 +160,8 @@ HAS_TESS     = subprocess.run(['which','tesseract'],capture_output=True).returnc
 HAS_CONVERT  = subprocess.run(['which','convert'],capture_output=True).returncode==0
 API_KEY      = os.environ.get('ANTHROPIC_API_KEY','').strip()
 HAS_AI       = bool(API_KEY)
+
+# ── Startup validation — runs after all functions are defined (see bottom) ──
 
 # ── Side-channel data filled during each sweep ────────────────
 # read_tooltip_voted() fills this so sweep_strip can record per-backend votes
@@ -188,11 +225,100 @@ def scrot(x=None,y=None,w=None,h=None):
         subprocess.run(['scrot','-z',SNAP],capture_output=True)
 
 def screen_wh():
+    """Return (width, height) of the display. Tries xdotool → xrandr → None,None."""
+    # 1. xdotool (fastest)
     o=subprocess.run(['xdotool','getdisplaygeometry'],capture_output=True,text=True).stdout.strip()
-    a,b=o.split(); return int(a),int(b)
+    parts=o.split()
+    if len(parts)>=2:
+        try: return int(parts[0]),int(parts[1])
+        except ValueError: pass
+    # 2. xrandr fallback
+    try:
+        import re as _re
+        lines=subprocess.run(['xrandr','--query'],capture_output=True,text=True).stdout.splitlines()
+        for ln in lines:
+            if ' connected' in ln:
+                m=_re.search(r'(\d{3,5})x(\d{3,5})\+0\+0',ln)
+                if m: return int(m.group(1)),int(m.group(2))
+    except Exception: pass
+    # 3. Give up — caller will use full-screen scrot (still works)
+    return None,None
 
 def xdo(*a):
     subprocess.run(['xdotool']+list(a),capture_output=True)
+
+# ── Cursor position tracking ──────────────────────────────────────────────────
+_cur_x = None
+_cur_y = None
+
+def _sync_cursor():
+    """Read actual cursor position from X11 and update tracking vars."""
+    global _cur_x, _cur_y
+    out = subprocess.run(['xdotool','getmouselocation','--shell'],
+                         capture_output=True, text=True).stdout
+    for ln in out.splitlines():
+        if ln.startswith('X='): _cur_x = int(ln[2:])
+        elif ln.startswith('Y='): _cur_y = int(ln[2:])
+
+def smooth_move(tx, ty):
+    """
+    Move cursor from its current position to (tx, ty) along a smooth
+    ease-in/ease-out path.
+
+    Movement profile:
+      • Cosine ease (slow start → fast middle → slow finish) — matches
+        how human wrists naturally accelerate and decelerate.
+      • Per-step Gaussian jitter (σ=0.6px) — mimics involuntary hand tremor.
+      • Final step lands exactly on (tx, ty) — no jitter on the last move.
+      • Duration scales with distance: fast for short hops (tooltip spiral),
+        slower for long cross-screen moves (new popup found far from last).
+      • Minimum 5 steps so short moves still look animated.
+
+    Speed reference — human cursor velocities (pixels/s):
+        close  (< 80px) : 400-600 px/s  → ~0.12-0.18 s
+        medium (80-250px): 700-1000 px/s → ~0.10-0.25 s
+        far   (>250px)  : 900-1400 px/s → ~0.18-0.30 s
+    """
+    global _cur_x, _cur_y
+    if _cur_x is None: _sync_cursor()
+    cx = _cur_x if _cur_x is not None else tx
+    cy = _cur_y if _cur_y is not None else ty
+    dx = tx - cx; dy = ty - cy
+    dist = math.hypot(dx, dy)
+    if dist < 1.5:                     # already there
+        _cur_x, _cur_y = tx, ty; return
+
+    steps    = max(5, min(22, int(dist / 9)))
+    duration = max(0.07, min(0.28, dist / 950.0))
+    step_t   = duration / steps
+
+    for i in range(1, steps + 1):
+        t  = 0.5 * (1.0 - math.cos(math.pi * i / steps))  # cosine ease
+        jx = random.gauss(0, 0.6) if i < steps else 0.0
+        jy = random.gauss(0, 0.6) if i < steps else 0.0
+        xdo('mousemove', str(round(cx + dx * t + jx)),
+                         str(round(cy + dy * t + jy)))
+        time.sleep(step_t)
+
+    _cur_x, _cur_y = tx, ty
+
+def _wait_for_tooltip(timeout=None):
+    """
+    Poll for a tooltip in SNAP after a hover move.
+    Returns True as soon as the tooltip appears; False on timeout.
+    Polls every 30 ms — MC renders tooltips within 1 game tick (50 ms)
+    so we almost always catch it on the first or second poll.
+    Falls back to a single snapshot + check if timeout ≤ 0.
+    """
+    deadline = time.time() + (timeout if timeout is not None else HOVER_WAIT)
+    while time.time() < deadline:
+        _snap_tooltip(0, 0, 9999, 9999)
+        if has_tooltip():
+            return True
+        time.sleep(0.03)
+    # One last check at deadline
+    _snap_tooltip(0, 0, 9999, 9999)
+    return has_tooltip()
 
 # ═══════════════════════════════════════════════════════════════
 #  FIND THE "AFK GRINDING" STRIP  (full-screen, smart separator)
@@ -216,10 +342,14 @@ def xdo(*a):
 def find_afk_strip():
     sw,sh = screen_wh()
 
-    # ── 1. Capture 90% of screen so popup is found wherever it sits ──
-    ox=int(sw*0.05); oy=int(sh*0.05)
-    cw=sw-2*ox;      ch=sh-2*oy
-    scrot(ox,oy,cw,ch)
+    # ── 1. Capture screen — use 90% crop when size is known, full screen otherwise ──
+    if sw and sh:
+        ox=int(sw*0.05); oy=int(sh*0.05)
+        cw=sw-2*ox;      ch=sh-2*oy
+        scrot(ox,oy,cw,ch)
+    else:
+        ox=0; oy=0
+        scrot()   # full-screen capture; popup will still be found
     r=decode_png(SNAP)
     if r is None: return None
     rows,iw,ih,bpp=r
@@ -237,7 +367,7 @@ def find_afk_strip():
                 if rs is None: rs=ix
                 rlen+=1
             else:
-                if rlen>bw and rlen>=100:
+                if rlen>bw and rlen>=75:
                     bw=rlen; mcx=rs+rlen//2
                     # ── 3. Walk center column up to popup top ──────
                     top=iy
@@ -253,7 +383,7 @@ def find_afk_strip():
                         if C_GRAY[0][0]<=rr2<=C_GRAY[1][0] and C_GRAY[0][1]<=gg2<=C_GRAY[1][1]:
                             bot+=1
                         else: break
-                    if bot-top>=70:
+                    if bot-top>=40:
                         # Store in screen coords
                         pl=ox+rs; pt=oy+top; pr=ox+rs+rlen; pb=oy+bot
                         best=(pl,pt,pr,pb)
@@ -263,8 +393,8 @@ def find_afk_strip():
     pl,pt,pr,pb = best
     pw=pr-pl; ph=pb-pt
 
-    # Sanity: popup should be 120-450px wide and at least 80px tall
-    if pw<120 or ph<80: return None
+    # Sanity: popup should be at least 80px wide and 50px tall
+    if pw<80 or ph<50: return None
 
     # ── Slot dimensions (measured from screenshots) ───────────────────
     slot_w = max(10, min(round(pw / 9), 60))
@@ -418,9 +548,9 @@ def _tooltip_title_rows(rows, ih, bpp):
     title_bot = tt + max(6, (tb - tt) // 4)
     return rows[tt:title_bot]
 
-def ask_color(path):
+def ask_color(path=None):
     """RGB range scan restricted to the tooltip title zone."""
-    r=decode_png(path)
+    r=decode_png_cached()
     if r is None: return "empty"
     rows,_,ih,bpp=r
     scan = _tooltip_title_rows(rows, ih, bpp)
@@ -441,7 +571,7 @@ def _rgb_to_h(r, g, b):
     else:        h=60*((r-g)/d+4)
     return h
 
-def ask_hsv(path):
+def ask_hsv(path=None):
     """
     Hue-space classification inside the tooltip title zone.
     Green MC text (§a #55FF55): hue ≈ 120°  → hue 90-160
@@ -450,7 +580,7 @@ def ask_hsv(path):
     gamma shift pushes the color outside the RGB boxes.
     Pure stdlib, no dependencies.
     """
-    r=decode_png(path)
+    r=decode_png_cached()
     if r is None: return "empty"
     rows,_,ih,bpp=r
     scan = _tooltip_title_rows(rows, ih, bpp)
@@ -463,6 +593,63 @@ def ask_hsv(path):
             elif h<=20 or h>=340: rn+=1
     if gn>=3 and gn>rn: return "confirm"
     if rn>=3 and rn>gn: return "deny"
+    return "empty"
+
+def ask_ratio(path=None):
+    """
+    Channel dominance ratio — completely independent of absolute brightness.
+    For every non-dark pixel in the tooltip title zone computes which channel
+    (R or G) accounts for the largest fraction of total brightness.
+    G/(R+G+B) > 0.45 AND G > 80  →  green vote
+    R/(R+G+B) > 0.45 AND R > 80  →  red vote
+    Catches resource-pack recolours that shift brightness but keep hue intact.
+    """
+    r=decode_png_cached()
+    if r is None: return "empty"
+    rows,_,ih,bpp=r
+    scan=_tooltip_title_rows(rows,ih,bpp)
+    gn=rn=0
+    for row in scan:
+        for ix in range(0,len(row),bpp):
+            rv=row[ix]; gv=row[ix+1]; bv=row[ix+2]
+            total=rv+gv+bv
+            if total<120: continue   # too dark to classify
+            if gv/total>0.45 and gv>80: gn+=1
+            elif rv/total>0.45 and rv>80: rn+=1
+    if gn>=4 and gn>rn: return "confirm"
+    if rn>=4 and rn>gn: return "deny"
+    return "empty"
+
+def ask_runs(path=None):
+    """
+    Longest consecutive colored-pixel run in the tooltip title zone.
+    MC text characters form contiguous horizontal runs of green or red
+    pixels; isolated noise pixels do not.  Finding a run ≥ 3 pixels
+    long means there's actual text, not a stray artifact.
+    Threshold ≥ 3 is intentionally low — even a single letter produces a
+    run of 2-6 px at GUI scale 1 and 4-12 px at GUI scale 2.
+    """
+    r=decode_png_cached()
+    if r is None: return "empty"
+    rows,_,ih,bpp=r
+    scan=_tooltip_title_rows(rows,ih,bpp)
+    max_g=max_r=0
+    for row in scan:
+        gr=rr=0
+        for ix in range(0,len(row),bpp):
+            rv=row[ix]; gv=row[ix+1]; bv=row[ix+2]
+            is_g = gv>rv+40 and gv>bv+40 and gv>100
+            is_r = rv>gv+40 and rv>bv+40 and rv>100
+            if is_g:
+                gr+=1; rr=0
+                if gr>max_g: max_g=gr
+            elif is_r:
+                rr+=1; gr=0
+                if rr>max_r: max_r=rr
+            else:
+                gr=rr=0
+    if max_g>=3 and max_g>max_r: return "confirm"
+    if max_r>=3 and max_r>max_g: return "deny"
     return "empty"
 
 # ═══════════════════════════════════════════════════════════════
@@ -680,106 +867,114 @@ def match_slot_from_prescan(rows, iw, ih, bpp, row, col, slot_w, slot_h):
     if d_mad + TEMPLATE_MAD_MARGIN <= c_mad: return 'deny'
     return None   # too close to call
 
-# Tooltip background: MC renders it as very dark purple ~rgb(16,0,16)
+# Tooltip background: MC renders it as very dark (near-black) ~rgb(16,0,16).
+# Keep the range tight to avoid false-positives on other dark game areas.
 C_TOOLTIP_BG = ((0,0,0),(42,10,42))
 
-def has_tooltip(path):
-    r=decode_png(path)
+def has_tooltip(path=None):
+    r=decode_png_cached()
     if r is None: return False
     rows,_,_,bpp=r
     return count_color(rows,bpp,C_TOOLTIP_BG[0],C_TOOLTIP_BG[1])>=15
 
 def _snap_tooltip(mx, my, sw, sh, slot_w=29):
-    # Scale the crop offsets with the slot size so the tooltip is never
-    # clipped at GUI scale 2+ (where slots and tooltips are physically larger).
-    # At scale 1 (slot_w≈18-29) the offsets stay near the original values.
-    # At scale 2 (slot_w≈36-40) they grow to ~200px and ~220px respectively.
-    scale = max(1.0, slot_w / 18.0)
-    ox = int(100 * scale); oy = int(110 * scale)
-    tx = max(0, mx - ox); ty = max(0, my - oy)
-    tw = min(sw - tx, int(460 * min(scale, 1.5)))
-    th = min(sh - ty, int(145 * min(scale, 1.5)))
-    scrot(tx, ty, tw, th)
-    return tx, ty
+    """Full-screen capture.
+    The tooltip can appear anywhere — left/right/above the slot depending on
+    screen position — so capturing the whole screen guarantees it is always
+    in frame.  decode_png_cached() means this costs one decode, not three.
+    mx/my/sw/sh/slot_w kept as parameters so callers need no changes.
+    """
+    scrot()   # full-screen → SNAP; decode_png_cached() re-decodes on next read
 
 # ═══════════════════════════════════════════════════════════════
 #  STRATEGY 1: HOVER WITH SPIRAL FALLBACK
 # ═══════════════════════════════════════════════════════════════
 def hover_spiral(sx, sy, sw, sh, slot_w=29):
+    """
+    Smoothly move to each spiral position and poll for tooltip appearance.
+    Returns (True, mx, my) as soon as a tooltip is detected.
+    Falls back to (False, sx, sy) if none of the spiral positions work.
+
+    Improvements vs old version:
+      • smooth_move() — cosine-eased path, not instant teleport
+      • _wait_for_tooltip() — polls every 30 ms instead of fixed sleep,
+        returns as soon as tooltip appears (saves ~50-100 ms per slot)
+      • Spiral covers ±8px in two rings — finds tooltip even when strip
+        coordinates are a few pixels off
+    """
     for dx, dy in HOVER_SPIRAL:
         nx = max(0, min(sw-1, sx+dx))
         ny = max(0, min(sh-1, sy+dy))
-        xdo('mousemove', str(nx), str(ny))
-        time.sleep(HOVER_WAIT + random.uniform(0, 0.03))
-        _snap_tooltip(nx, ny, sw, sh, slot_w)
-        if has_tooltip(SNAP):
+        smooth_move(nx, ny)
+        if _wait_for_tooltip(HOVER_WAIT):
             return True, nx, ny
     return False, sx, sy
 
 # ═══════════════════════════════════════════════════════════════
-#  STRATEGY 2: MULTI-BACKEND VOTED TOOLTIP READING
-#  color(wt=2) → AI(wt=3) → OCR(wt=1)
-#  Stores per-backend results in _last_vote_detail for logging.
+#  STRATEGY 2: QUORUM-BASED TOOLTIP READING  (5 methods)
+#
+#  All available backends are polled.  We count raw votes, not
+#  weighted scores:
+#    CONFIRM_QUORUM (≥2) backends must say "confirm" → click
+#    DENY_QUORUM    (≥2) backends must say "deny"    → skip
+#    Otherwise                                       → "empty"
+#
+#  This prevents any single noisy backend from triggering a click.
+#  Backends 1-4 are always available (pure stdlib, no deps).
+#  Backend 5 (AI) runs only when ANTHROPIC_API_KEY is set.
+#  Backend 6 (OCR) runs only when tesseract is installed.
 # ═══════════════════════════════════════════════════════════════
 def read_tooltip_voted():
     global _last_vote_detail
-    _last_vote_detail = {'color': None, 'hsv': None, 'ai': None, 'ocr': None, 'scores': {}}
-    scores = {"confirm": 0, "deny": 0}
+    votes = {}
 
-    # ── Backend 1: RGB color scan (tooltip title zone) ───────────────────
-    a = ask_color(SNAP)
-    _last_vote_detail['color'] = a
-    if a in scores:
-        scores[a] += WEIGHT_COLOR
-        if scores[a] >= VOTE_THRESHOLD:
-            _last_vote_detail['scores'] = dict(scores)
-            print(f"    [color✓{scores[a]}] → {a}"); return a
+    # ── Backend 1: RGB absolute range scan ───────────────────────────────
+    votes['color'] = ask_color()
 
-    # ── Backend 2: HSV hue scan (stdlib, no deps) ────────────────────────
-    a = ask_hsv(SNAP)
-    _last_vote_detail['hsv'] = a
-    if a in scores:
-        scores[a] += WEIGHT_HSV
-        winner = max(scores, key=scores.get)
-        _last_vote_detail['scores'] = dict(scores)
-        if scores[winner] >= VOTE_THRESHOLD:
-            print(f"    [hsv✓{scores[winner]}] → {winner}"); return winner
+    # ── Backend 2: HSV hue-space scan ────────────────────────────────────
+    votes['hsv'] = ask_hsv()
 
-    # ── Backend 3: AI vision (optional — needs ANTHROPIC_API_KEY) ────────
+    # ── Backend 3: Channel dominance ratio ───────────────────────────────
+    votes['ratio'] = ask_ratio()
+
+    # ── Backend 4: Longest consecutive colored-pixel run ─────────────────
+    votes['runs'] = ask_runs()
+
+    # ── Backend 5: AI vision (optional) ──────────────────────────────────
     if HAS_AI:
-        a = ask_ai(SNAP)
-        _last_vote_detail['ai'] = a
-        if a in scores:
-            scores[a] += WEIGHT_AI
-            winner = max(scores, key=scores.get)
-            _last_vote_detail['scores'] = dict(scores)
-            if scores[winner] >= VOTE_THRESHOLD:
-                print(f"    [AI✓{scores[winner]}] → {winner}"); return winner
+        votes['ai'] = ask_ai(SNAP)
 
-    # ── Backend 4: OCR (optional — needs tesseract) ───────────────────────
+    # ── Backend 6: OCR (optional) ────────────────────────────────────────
     if HAS_TESS:
-        a = ask_ocr(SNAP)
-        _last_vote_detail['ocr'] = a
-        if a in scores:
-            scores[a] += WEIGHT_OCR
+        votes['ocr'] = ask_ocr(SNAP)
 
-    _last_vote_detail['scores'] = dict(scores)
+    nc = sum(1 for v in votes.values() if v == 'confirm')
+    nd = sum(1 for v in votes.values() if v == 'deny')
+    total = len(votes)
 
-    if any(v > 0 for v in scores.values()):
-        winner = max(scores, key=scores.get)
-        print(f"    [voted {scores}] → {winner}"); return winner
+    _last_vote_detail = dict(votes)
+    _last_vote_detail['scores'] = {'confirm': nc, 'deny': nd, 'total': total}
 
-    print("    [no vote] → deny"); return "deny"
+    tag = '  '.join(f"{k}={v[0]}" for k,v in votes.items())
+    print(f"    [{total} backends] {tag}  →  c={nc} d={nd}")
+
+    if nc >= CONFIRM_QUORUM:
+        return "confirm"
+    if nd >= DENY_QUORUM:
+        return "deny"
+    return "empty"
 
 # ═══════════════════════════════════════════════════════════════
 #  STRATEGY 3: DOUBLE-CHECK CONFIRM BEFORE CLICKING
 # ═══════════════════════════════════════════════════════════════
 def double_check_confirm(mx, my, sw, sh, slot_w=29):
-    time.sleep(0.06)
-    xdo('mousemove', str(mx), str(my))
-    time.sleep(0.06)
-    _snap_tooltip(mx, my, sw, sh, slot_w)
-    if not has_tooltip(SNAP):
+    # Drift slightly off-center then smooth back — natural "re-check" motion
+    jx = mx + random.randint(-3, 3)
+    jy = my + random.randint(-3, 3)
+    smooth_move(jx, jy)
+    time.sleep(random.uniform(0.04, 0.07))
+    smooth_move(mx, my)
+    if not _wait_for_tooltip(HOVER_WAIT):
         print("    [double-check] tooltip gone — skipping")
         return False
     second = read_tooltip_voted()
@@ -794,16 +989,43 @@ def double_check_confirm(mx, my, sw, sh, slot_w=29):
 #  Stores click stats in _last_click_stats for logging.
 # ═══════════════════════════════════════════════════════════════
 def click_and_verify(mx, my):
-    global _last_click_stats
+    """
+    Click the confirm slot with human-like cursor behaviour:
+      1. Smooth-move to within a pixel or two of the target.
+      2. Tiny micro-jitter (±2px) — cursor is never perfectly still.
+      3. Brief settle pause before pressing down.
+      4. Natural mousedown duration (60-130 ms).
+      5. Post-click drift (random ±6px, ±4px) — hand moves slightly
+         after releasing, not frozen on the exact click point.
+      6. Verify popup closed; retry up to 3× if not.
+    """
+    global _last_click_stats, _cur_x, _cur_y
     t0 = time.time()
     open(LOCK,'w').close()
     for attempt in range(1, 4):
-        xdo('mousemove', str(mx), str(my))
-        time.sleep(random.uniform(0.03, 0.08))
-        xdo('mousedown','1')
-        time.sleep(random.uniform(0.06, 0.12))
-        xdo('mouseup','1')
-        time.sleep(0.45)
+        # ── 1. Smooth approach ────────────────────────────────────────────
+        smooth_move(mx, my)
+
+        # ── 2. Micro-jitter: land ±2px off-center (hand tremor) ──────────
+        jx = mx + random.randint(-2, 2)
+        jy = my + random.randint(-2, 2)
+        xdo('mousemove', str(jx), str(jy))
+        _cur_x, _cur_y = jx, jy
+        time.sleep(random.uniform(0.03, 0.07))   # settle
+
+        # ── 3. Press and hold ────────────────────────────────────────────
+        xdo('mousedown', '1')
+        time.sleep(random.uniform(0.06, 0.13))
+
+        # ── 4. Release ───────────────────────────────────────────────────
+        xdo('mouseup', '1')
+
+        # ── 5. Post-click drift ───────────────────────────────────────────
+        drift_x = mx + random.randint(-6, 6)
+        drift_y = my + random.randint(-4, 4)
+        smooth_move(drift_x, drift_y)
+
+        time.sleep(0.40)
         if not popup_open():
             print(f"    [click] popup closed after attempt {attempt} ✓")
             try: os.remove(LOCK)
@@ -815,7 +1037,7 @@ def click_and_verify(mx, my):
             }
             return True
         print(f"    [click] popup still open after attempt {attempt}, retrying…")
-        time.sleep(0.25)
+        time.sleep(0.22)
     try: os.remove(LOCK)
     except: pass
     _last_click_stats = {
@@ -831,8 +1053,11 @@ def click_and_verify(mx, my):
 # ═══════════════════════════════════════════════════════════════
 def popup_open():
     sw,sh=screen_wh()
-    ox=sw//2-200; oy=sh//2-150
-    scrot(ox, oy, 400, 300)
+    if sw and sh:
+        ox=sw//2-200; oy=sh//2-150
+        scrot(ox, oy, 400, 300)
+    else:
+        scrot()   # full-screen fallback when display size is unknown
     r=decode_png(SNAP)
     if r is None: return False
     rows,_,_,bpp=r
@@ -847,8 +1072,14 @@ def prescan_strip(strip):
     sw, sh = screen_wh()
 
     px = max(0, sl);  py = max(0, st)
-    pw = min(sw - px, sr - sl + 4)
-    ph = min(sh - py, sb - st + 4)
+    strip_w = sr - sl + 4
+    strip_h = sb - st + 4
+    if sw and sh:
+        pw = min(sw - px, strip_w)
+        ph = min(sh - py, strip_h)
+    else:
+        pw = strip_w
+        ph = strip_h
     scrot(px, py, pw, ph)
 
     r = decode_png(SNAP)
@@ -1017,7 +1248,11 @@ def write_attempt_record(record):
 # ═══════════════════════════════════════════════════════════════
 def sweep_strip(strip):
     sl, st, sr, sb, slot_w, slot_h = strip
-    sw, sh = screen_wh()
+    _sw, _sh = screen_wh()
+    # Use large safe defaults when display size is unknown so min/max clamps
+    # in hover_spiral() and _snap_tooltip() still work without crashing.
+    sw = _sw if _sw else 9999
+    sh = _sh if _sh else 9999
     sweep_start = time.time()
 
     # ── Save popup screenshot and start the attempt record ────────────────
@@ -1102,7 +1337,9 @@ def sweep_strip(strip):
             'row': row, 'col': col, 'screen_x': sx, 'screen_y': sy,
             'confidence'  : 'HIGH' if is_high else 'MED',
             'template_pre': tmpl,
-            'color_vote'  : None, 'hsv_vote': None, 'ai_vote': None, 'ocr_vote': None,
+            'color_vote' : None, 'hsv_vote' : None,
+            'ratio_vote' : None, 'runs_vote' : None,
+            'ai_vote'    : None, 'ocr_vote'  : None,
             'vote_scores' : {},
             'final_answer': None,
             'double_checked': False,
@@ -1127,11 +1364,13 @@ def sweep_strip(strip):
 
         # ── S3: Voted tooltip reading ────────────────────────────────────
         answer = read_tooltip_voted()
-        slot_info['color_vote']   = _last_vote_detail.get('color')
-        slot_info['hsv_vote']     = _last_vote_detail.get('hsv')
-        slot_info['ai_vote']      = _last_vote_detail.get('ai')
-        slot_info['ocr_vote']     = _last_vote_detail.get('ocr')
-        slot_info['vote_scores']  = _last_vote_detail.get('scores', {})
+        slot_info['color_vote']  = _last_vote_detail.get('color')
+        slot_info['hsv_vote']   = _last_vote_detail.get('hsv')
+        slot_info['ratio_vote'] = _last_vote_detail.get('ratio')
+        slot_info['runs_vote']  = _last_vote_detail.get('runs')
+        slot_info['ai_vote']    = _last_vote_detail.get('ai')
+        slot_info['ocr_vote']   = _last_vote_detail.get('ocr')
+        slot_info['vote_scores'] = _last_vote_detail.get('scores', {})
         slot_info['final_answer'] = answer
         print(f"  {label}: {answer}")
 
@@ -1335,6 +1574,18 @@ def main():
 
     print("[ AFK solver ] stopped")
 
+# ── Startup validation (here so screen_wh() is already defined above) ──────
+_missing_tools = [t for t in ('scrot','xdotool') if subprocess.run(['which',t],capture_output=True).returncode!=0]
+if _missing_tools:
+    print(f"[ FATAL ] Missing required tools: {', '.join(_missing_tools)}")
+    print(f"  Install with:  sudo apt install {' '.join(_missing_tools)}")
+    sys.exit(1)
+_sw0,_sh0 = screen_wh()
+_res = f"{_sw0}×{_sh0}" if _sw0 else "unknown(full-screen mode)"
+print(f"[ init ] screen={_res}  scrot=✓  xdotool=✓"
+      + ("  AI=✓" if HAS_AI else "  AI=✗(no key)")
+      + ("  OCR=✓" if HAS_TESS else "  OCR=✗"))
+
 if __name__=="__main__":
     main()
 PYEOF
@@ -1349,6 +1600,7 @@ echo "[ MC Farm ] calibration data → $MC_ASSETS_DIR/"
 python3 "$PY_SCRIPT" &
 AFK_PID=$!
 echo "[ MC Farm ] AFK solver PID=$AFK_PID"
+echo "$AFK_PID" > "$PID_FILE"
 
 # ── Spam loop ───────────────────────────────────────────────────
 START_TIME=$SECONDS
@@ -1367,36 +1619,82 @@ while [ -f "$FLAG_FILE" ]; do
     [ $FATIGUE_DELAY -gt 80 ] && FATIGUE_DELAY=80
     BEHAVIOR_ROLL=$((RANDOM % 100))
 
-    # ACTION 1: smooth camera rotation
+    # ── ACTION 1: cosine-eased camera rotation ───────────────────────────────
+    # Splits total displacement across 8-12 steps using ease-in/ease-out so the
+    # camera accelerates and decelerates naturally.  Per-step ±1px Gaussian-like
+    # jitter (sum of two uniforms) prevents the movement looking like a slideshow.
     if [ $BEHAVIOR_ROLL -lt 3 ] && [ $((SECONDS - LAST_ROTATE)) -ge $NEXT_ROTATE_INTERVAL ]; then
         rot_x=$(( (RANDOM % 201) - 100 ))
         rot_y=$(( (RANDOM % 41) - 20 ))
-        for ((s=0; s<5; s++)); do
-            xdotool mousemove_relative -- $((rot_x/5)) $((rot_y/5)) 2>/dev/null; sleep 0.01
+        N=$((8 + RANDOM % 5))        # 8-12 steps
+        prev_t="0.000000"
+        for ((s=1; s<=N; s++)); do
+            # Ease-in/ease-out delta and ±1px Gaussian-like jitter per axis
+            read dx dy <<< $(awk \
+                -v cx="$rot_x" -v cy="$rot_y" \
+                -v s="$s" -v n="$N" -v pt="$prev_t" \
+                -v rx1="$RANDOM" -v rx2="$RANDOM" \
+                -v ry1="$RANDOM" -v ry2="$RANDOM" '
+                BEGIN {
+                    pi = 3.14159265358979
+                    t  = 0.5 * (1 - cos(pi * s / n))
+                    dt = t - pt
+                    jx = (rx1/32767 - 0.5) + (rx2/32767 - 0.5)
+                    jy = (ry1/32767 - 0.5) + (ry2/32767 - 0.5)
+                    sx = int(cx*dt + jx + 0.5)
+                    sy = int(cy*dt + jy + 0.5)
+                    print sx, sy
+                }')
+            # Advance prev_t to current t for next iteration
+            prev_t=$(awk -v s="$s" -v n="$N" '
+                BEGIN { pi=3.14159265358979; printf "%.6f", 0.5*(1-cos(pi*s/n)) }')
+            xdotool mousemove_relative -- $dx $dy 2>/dev/null
+            sleep $(awk -v ms="$((7 + RANDOM % 9))" 'BEGIN {print ms/1000}')   # 7-15 ms
         done
         LAST_ROTATE=$SECONDS
         NEXT_ROTATE_INTERVAL=$((30 + RANDOM % 45))
         [ $((RANDOM % 10)) -eq 0 ] && START_TIME=$SECONDS
-        sleep $(awk -v ms="$((100 + RANDOM % 150))" 'BEGIN {print ms/1000}')
+        sleep $(awk -v ms="$((90 + RANDOM % 160))" 'BEGIN {print ms/1000}')
         continue
     fi
 
-    # ACTION 2: micro-vibration
+    # ── ACTION 2: micro-vibration with Gaussian-ish shake and natural drift ──
+    # Shake magnitude drawn from sum of two uniforms → bell-shaped distribution.
+    # Return is NOT a perfect mirror: a ±1px residual is left to mimic real
+    # hand tremor that never returns exactly to the starting pixel.
     if [ $BEHAVIOR_ROLL -ge 3 ] && [ $BEHAVIOR_ROLL -lt 8 ] && \
        [ $((SECONDS - LAST_VIBRATE)) -ge $NEXT_VIBRATE_INTERVAL ]; then
-        for ((i=0; i<$((2 + RANDOM % 4)); i++)); do
-            shk_x=$(( (RANDOM%7)-3 )); shk_y=$(( (RANDOM%7)-3 ))
-            xdotool mousemove_relative -- $shk_x $shk_y 2>/dev/null; sleep 0.02
-            xdotool mousemove_relative -- $((-shk_x)) $((-shk_y)) 2>/dev/null
+        VIBS=$((2 + RANDOM % 4))
+        for ((i=0; i<VIBS; i++)); do
+            # Gaussian-ish ±4 via sum of two uniform ±2 draws
+            shk_x=$(( (RANDOM%5-2) + (RANDOM%5-2) ))
+            shk_y=$(( (RANDOM%5-2) + (RANDOM%5-2) ))
+            xdotool mousemove_relative -- $shk_x $shk_y 2>/dev/null
+            sleep $(awk -v ms="$((16 + RANDOM % 12))" 'BEGIN {print ms/1000}')  # 16-27 ms
+            # Return with 1px random residual (don't land exactly back)
+            ret_x=$(( -shk_x + (RANDOM % 3) - 1 ))
+            ret_y=$(( -shk_y + (RANDOM % 3) - 1 ))
+            xdotool mousemove_relative -- $ret_x $ret_y 2>/dev/null
+            sleep $(awk -v ms="$((10 + RANDOM % 10))" 'BEGIN {print ms/1000}')
         done
         LAST_VIBRATE=$SECONDS
         NEXT_VIBRATE_INTERVAL=$((15 + RANDOM % 25))
         continue
     fi
 
-    # ACTION 3: standard attack click
+    # ── ACTION 3: attack click ────────────────────────────────────────────────
+    # Hold duration: 30-70 ms normally.
+    # 8% chance of a fumbled "short tap" (12-25 ms).
+    # 4% chance of an "overhold" (120-200 ms) — accidentally held too long.
+    if [ $((RANDOM % 100)) -lt 8 ]; then
+        hold_ms=$((12 + RANDOM % 14))                 # short tap
+    elif [ $((RANDOM % 100)) -lt 4 ]; then
+        hold_ms=$((120 + RANDOM % 81))                # overhold
+    else
+        hold_ms=$((30 + RANDOM % 41))                 # normal 30-70 ms
+    fi
     xdotool mousedown 1 2>/dev/null
-    sleep $(awk -v ms="$((30 + RANDOM % 41))" 'BEGIN {print ms/1000}')
+    sleep $(awk -v ms="$hold_ms" 'BEGIN {print ms/1000}')
     xdotool mouseup 1 2>/dev/null
 
     swing_ms=$((625 + RANDOM % 51 + FATIGUE_DELAY))
