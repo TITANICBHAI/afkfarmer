@@ -1372,7 +1372,7 @@ while [ -f "$FLAG_FILE" ]; do
         rot_x=$(( (RANDOM % 201) - 100 ))
         rot_y=$(( (RANDOM % 41) - 20 ))
         for ((s=0; s<5; s++)); do
-            xdotool mousemove_relative -- $((rot_x/5)) $((rot_y/5)); sleep 0.01
+            xdotool mousemove_relative -- $((rot_x/5)) $((rot_y/5)) 2>/dev/null; sleep 0.01
         done
         LAST_ROTATE=$SECONDS
         NEXT_ROTATE_INTERVAL=$((30 + RANDOM % 45))
@@ -1386,8 +1386,8 @@ while [ -f "$FLAG_FILE" ]; do
        [ $((SECONDS - LAST_VIBRATE)) -ge $NEXT_VIBRATE_INTERVAL ]; then
         for ((i=0; i<$((2 + RANDOM % 4)); i++)); do
             shk_x=$(( (RANDOM%7)-3 )); shk_y=$(( (RANDOM%7)-3 ))
-            xdotool mousemove_relative -- $shk_x $shk_y; sleep 0.02
-            xdotool mousemove_relative -- $((-shk_x)) $((-shk_y))
+            xdotool mousemove_relative -- $shk_x $shk_y 2>/dev/null; sleep 0.02
+            xdotool mousemove_relative -- $((-shk_x)) $((-shk_y)) 2>/dev/null
         done
         LAST_VIBRATE=$SECONDS
         NEXT_VIBRATE_INTERVAL=$((15 + RANDOM % 25))
@@ -1395,9 +1395,9 @@ while [ -f "$FLAG_FILE" ]; do
     fi
 
     # ACTION 3: standard attack click
-    xdotool mousedown 1
+    xdotool mousedown 1 2>/dev/null
     sleep $(awk -v ms="$((30 + RANDOM % 41))" 'BEGIN {print ms/1000}')
-    xdotool mouseup 1
+    xdotool mouseup 1 2>/dev/null
 
     swing_ms=$((625 + RANDOM % 51 + FATIGUE_DELAY))
     [ $((RANDOM % 10)) -eq 0 ] && swing_ms=$((swing_ms + 50 + RANDOM % 101))
