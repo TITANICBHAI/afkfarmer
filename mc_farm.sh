@@ -252,20 +252,48 @@ def find_afk_strip():
                 inv_sep_rel = rel
                 break   # found the "Inventory" separator — stop scanning
 
-    # ── 5. Build final strip coordinates ──────────────────────────────
+    # ── 5a. Secondary separator: scan for "Inventory" white text rows ───
+    #
+    #  The "Inventory" label uses MC's pure-white text (R≥250,G≥250,B≥250).
+    #  Items in the AFK grid don't have such pure-white pixels (they're colored).
+    #  Scan rows in 42-52% of popup height for a white-pixel fraction > 8%.
+    #  This works even when the Inventory separator row is the SAME gray shade
+    #  as slot rows (making the dark-band method unreliable).
+    #
+    if inv_sep_rel is None:
+        lo_rel = int(ph * 0.42)
+        hi_rel = int(ph * 0.52)
+        for rel in range(lo_rel, min(hi_rel, pb_i-pt_i)+1):
+            iy = pt_i + rel
+            if iy >= ih: break
+            row = rows[iy]
+            white = 0; span = max(1, pr_i - pl_i)
+            for ix in range(pl_i, min(pr_i, iw)):
+                rr=row[ix*bpp]; gg=row[ix*bpp+1]; bb=row[ix*bpp+2]
+                if rr>=250 and gg>=250 and bb>=250:
+                    white += 1
+            if white / span > 0.08:
+                inv_sep_rel = rel
+                break   # first row with heavy white text = "Inventory" label
+
+    # ── 5b. Build final strip coordinates ─────────────────────────────
     if title_end_rel is not None:
         strip_top = pt + title_end_rel
     else:
-        strip_top = pt + int(slot * 1.1)   # fallback: ~one slot below popup top
+        # MC title bar is ~14 px.  slot*0.45 ≈ 16 px at slot=35 — much
+        # better than the old slot*1.1 ≈ 38 px which landed strip_top
+        # 20 px BELOW actual row-0 item centers, causing prescan to miss them.
+        strip_top = pt + int(slot * 0.45)
 
     if inv_sep_rel is not None:
         strip_bot = pt + inv_sep_rel
         print(f"  Popup {pw}×{ph}px  slot≈{slot}px  "
               f"title_end={title_end_rel}px  inv_sep={inv_sep_rel}px  [exact]")
     else:
-        strip_bot = pt + int(ph * 0.47)
+        # Measured from screenshots: "Inventory" label always at 45.7% of ph.
+        strip_bot = pt + int(ph * 0.46)
         print(f"  Popup {pw}×{ph}px  slot≈{slot}px  "
-              f"title_end={title_end_rel}px  sep=not found [47% fallback]")
+              f"title_end={title_end_rel}px  sep=not found [46% fallback]")
 
     if strip_bot <= strip_top: return None
 
@@ -382,15 +410,23 @@ def read_tooltip(mx, my):
 #  QUICK POPUP PRESENCE CHECK  (gray-mass scan, no full analysis)
 # ═══════════════════════════════════════════════════════════════
 def popup_open():
+    """
+    FAST poll check — called every 0.35 s so must decode a SMALL image.
+
+    JartexNetwork always centers the Afk Grinding popup near the screen
+    center.  A 400 × 300 crop around center catches it reliably without
+    the pure-Python PNG decode cost of a full-screen capture (~0.07 s
+    vs ~1 s for full 1024×576).  The larger full-screen decode is only
+    done once inside find_afk_strip() when a popup is confirmed.
+    """
     sw,sh=screen_wh()
-    # Sample 86% × 84% of screen — catches any popup position, not just center.
-    # Same gray-pixel threshold (1600) — still only needs a small mass of gray.
-    ox=int(sw*0.07); oy=int(sh*0.08)
-    scrot(ox, oy, sw-2*ox, sh-2*oy)
+    # 400 × 300 window centered on screen — covers full popup with margin
+    ox=sw//2-200; oy=sh//2-150
+    scrot(ox, oy, 400, 300)
     r=decode_png(SNAP)
     if r is None: return False
     rows,_,_,bpp=r
-    return count_color(rows,bpp,C_GRAY[0],C_GRAY[1])>1600
+    return count_color(rows,bpp,C_GRAY[0],C_GRAY[1])>1200
 
 # ═══════════════════════════════════════════════════════════════
 #  PRESCAN — find which slots have items WITHOUT hovering
