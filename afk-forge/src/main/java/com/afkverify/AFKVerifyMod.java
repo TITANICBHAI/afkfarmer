@@ -6,6 +6,7 @@ import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.server.FMLServerStartingEvent;
 import org.apache.logging.log4j.LogManager;
@@ -36,6 +37,11 @@ public class AFKVerifyMod {
         server = event.getServer();
         LOGGER.info("[AFKVerify] Server starting — afk-distance={} afk-seconds={}s kick-timeout={}s",
             CONFIG_AFK_DISTANCE, CONFIG_AFK_SECONDS_MS / 1000, CONFIG_KICK_TIMEOUT_MS / 1000);
+    }
+
+    @SubscribeEvent
+    public void onRegisterCommands(RegisterCommandsEvent event) {
+        AFKVerifyCommand.register(event);
     }
 
     @SubscribeEvent
