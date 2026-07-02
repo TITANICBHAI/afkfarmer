@@ -15,25 +15,38 @@ Automatically detects the periodic *"Afk Grinding"* popup, scans which slots con
 - **RAM** — stays well under 50 MB (no PIL, no numpy, only stdlib + scrot + xdotool).
 - **Spam/anti-AFK loop** — random mouse wiggles and clicks while mining.
 
-## Requirements
+## Linux Mint Setup (run once before first use)
 
-```
-xdotool  scrot  python3  xorg (running)
-```
+```bash
+# 1. Update package list
+sudo apt update
 
-Optional (for better accuracy):
-```
-ANTHROPIC_API_KEY=sk-ant-...   # enables Claude vision
-tesseract                       # OCR fallback
+# 2. Required — mouse/keyboard automation
+sudo apt install -y xdotool
+
+# 3. Required — screenshot tool
+sudo apt install -y scrot
+
+# 4. Optional but recommended — OCR fallback (faster than AI for offline use)
+sudo apt install -y tesseract-ocr
+
+# 5. Verify
+xdotool --version && scrot --version && echo "Ready!"
 ```
 
 ## Usage
 
 ```bash
-# Start farming (spam + AFK solver both launch in background)
+# Make executable (first time only)
+chmod +x mc_farm.sh
+
+# Optional: set Anthropic key for AI tooltip reading (most accurate)
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# Start farming (spam loop + AFK solver both run in background)
 bash mc_farm.sh
 
-# Stop everything
+# Stop everything (run again while active)
 bash mc_farm.sh
 ```
 
