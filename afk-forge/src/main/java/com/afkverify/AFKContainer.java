@@ -40,12 +40,14 @@ public class AFKContainer extends ChestContainer {
                                 .withStyle(TextFormatting.WHITE)),
                         player.getUUID()
                     );
-                    AFKPlayerTracker.onPassed(ownerUuid);
+                    // Pass slotId so the tracker records which slot was clicked
+                    AFKPlayerTracker.onPassed(ownerUuid, slotId);
                     return ItemStack.EMPTY;
 
                 } else if (name.contains("Do not click")) {
                     player.closeContainer();
-                    AFKPlayerTracker.onFailed(ownerUuid);
+                    // Pass slotId so the tracker can record it vs confirm_slot
+                    AFKPlayerTracker.onFailed(ownerUuid, slotId);
                     if (AFKVerifyMod.CONFIG_KICK_ON_FAIL) {
                         if (player instanceof net.minecraft.entity.player.ServerPlayerEntity) {
                             ((net.minecraft.entity.player.ServerPlayerEntity) player)
