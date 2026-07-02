@@ -68,3 +68,45 @@ Running the script a **second time** while it is active stops all background pro
 ```bash
 GITHUB_PERSONAL_ACCESS_TOKEN=ghp_... bash github_push.sh
 ```
+
+## Training data — joining the script's log with the mod's log
+
+Two logs get written while farming, and neither one alone tells you whether
+the script is actually clicking the right slot:
+
+- **`attached_assets/attempts.jsonl`** (written by `mc_farm.sh`) — what the
+  *script* saw: every slot it inspected, what each backend (color/AI/OCR)
+  voted, which slot it clicked. It never learns the real answer from the
+  server, only whether its click made the popup close.
+- **`afkverify_events.jsonl`** (written by the Fabric/Forge mod on the
+  server) — what the *server* saw: the real confirm slot (ground truth) and
+  whether the player's click passed, failed, or timed out.
+
+Each popup on the mod side carries a `popup_id` (a UUID assigned when the
+popup opens and echoed back on the outcome event), and both logs record
+`confirm_row`/`confirm_col`/`clicked_row`/`clicked_col` using the same
+row/col addressing the script uses internally, so the two logs can be joined
+precisely instead of only by "these happened around the same time."
+
+Optionally set `MC_PLAYER_NAME` before running `mc_farm.sh` so each
+`attempts.jsonl` record is tagged with the player's name — useful for
+telling attempts apart on a server where more than one person is farming:
+
+```bash
+MC_PLAYER_NAME="YourIGN" bash mc_farm.sh
+```
+
+Run the join tool (needs `afkverify_events.jsonl` from the server's run
+directory, and `python3` which is not otherwise required by `mc_farm.sh`):
+
+```bash
+python3 join_training_data.py --events /path/to/server/afkverify_events.jsonl
+```
+
+It writes `attached_assets/training_data.jsonl` (one labeled record per
+popup: what the script guessed + what was actually correct) and prints a
+per-backend accuracy report to stdout — use that to decide whether
+color/AI/OCR actually deserves the most trust and retune the backend order
+or weighting in `mc_farm.sh` accordingly. If a popup_id isn't available
+(older mod build), it automatically falls back to timestamp-proximity
+matching (±1s, configurable via `--tolerance`).
