@@ -196,7 +196,7 @@ public class AFKPlayerTracker {
     }
 
     // ── Trigger the AFK popup ─────────────────────────────────────────────
-    private static void triggerPopup(ServerPlayerEntity player) {
+    public static void triggerPopup(ServerPlayerEntity player) {
         UUID id = player.getUuid();
         if (Boolean.TRUE.equals(inGui.get(id))) return;
 
