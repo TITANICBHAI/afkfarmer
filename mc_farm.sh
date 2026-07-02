@@ -58,6 +58,9 @@ SNAP = "/tmp/_mc_afk.png"
 # ── Calibration output directory (set by mc_farm.sh via env var) ──────
 ASSETS_DIR  = os.environ.get('MC_ASSETS_DIR', '/tmp/mc_afk_assets')
 SESSION_ID  = str(uuid.uuid4())[:8]
+# Optional — the in-game username of whoever runs this script, used purely to
+# make joining against afkverify_events.jsonl unambiguous on shared servers.
+PLAYER_NAME = os.environ.get('MC_PLAYER_NAME', '').strip()
 _attempt_no = 0          # incremented each time a popup is found
 
 # ── Timing ────────────────────────────────────────────────────
@@ -719,6 +722,11 @@ def sweep_strip(strip):
         'attempt_no'     : _attempt_no,
         'timestamp_iso'  : time.strftime('%Y-%m-%dT%H:%M:%S'),
         'timestamp_epoch': round(time.time(), 3),
+        # Optional — set MC_PLAYER_NAME before running mc_farm.sh so this
+        # record can be filtered/joined against the exact matching player in
+        # afkverify_events.jsonl on a shared/multiplayer server. Falls back
+        # to timestamp-proximity join (see join_training_data.py) if unset.
+        'player_name'    : PLAYER_NAME or None,
         'screenshot'     : base_name + '.png',
         'strip'          : {
             'left': sl, 'top': st, 'right': sr, 'bottom': sb,
