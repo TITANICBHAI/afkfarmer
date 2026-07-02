@@ -121,6 +121,7 @@ declare -a SYNC_FILES=(
   "afk-fabric/src/main/java/com/afkverify/AFKVerifyMod.java"      "afk-fabric/src/main/java/com/afkverify/AFKVerifyMod.java"
   "afk-fabric/src/main/java/com/afkverify/AFKPlayerTracker.java"  "afk-fabric/src/main/java/com/afkverify/AFKPlayerTracker.java"
   "afk-fabric/src/main/java/com/afkverify/AFKScreenHandler.java"  "afk-fabric/src/main/java/com/afkverify/AFKScreenHandler.java"
+  "afk-fabric/src/main/java/com/afkverify/AFKVerifyCommand.java"  "afk-fabric/src/main/java/com/afkverify/AFKVerifyCommand.java"
 
   # ── Forge mod (1.16.5) ────────────────────────────────────────────────────────
   "afk-forge/build.gradle"                                         "afk-forge/build.gradle"
@@ -132,6 +133,7 @@ declare -a SYNC_FILES=(
   "afk-forge/src/main/java/com/afkverify/AFKVerifyMod.java"       "afk-forge/src/main/java/com/afkverify/AFKVerifyMod.java"
   "afk-forge/src/main/java/com/afkverify/AFKPlayerTracker.java"   "afk-forge/src/main/java/com/afkverify/AFKPlayerTracker.java"
   "afk-forge/src/main/java/com/afkverify/AFKContainer.java"       "afk-forge/src/main/java/com/afkverify/AFKContainer.java"
+  "afk-forge/src/main/java/com/afkverify/AFKVerifyCommand.java"   "afk-forge/src/main/java/com/afkverify/AFKVerifyCommand.java"
 )
 
 # ── Diff summary ─────────────────────────────────────────────────────────────
