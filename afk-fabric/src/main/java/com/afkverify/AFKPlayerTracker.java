@@ -25,9 +25,14 @@ public class AFKPlayerTracker {
     private static final Map<UUID, Long>    guiOpenAt    = new ConcurrentHashMap<>();
     private static final Map<UUID, Integer> confirmSlot  = new ConcurrentHashMap<>();
     private static final Map<UUID, String>  playerName   = new ConcurrentHashMap<>();
+    // Random ID minted per popup so script-side (attempts.jsonl) and mod-side
+    // (afkverify_events.jsonl) records can be joined precisely instead of by
+    // fuzzy timestamp proximity alone — see join_training_data.py.
+    private static final Map<UUID, String>  popupId      = new ConcurrentHashMap<>();
 
     private static final DateTimeFormatter ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
     private static final String EVENT_LOG = "afkverify_events.jsonl";
+    private static final String PLATFORM  = "fabric";
 
     private static int tickCounter = 0;
 
@@ -68,6 +73,7 @@ public class AFKPlayerTracker {
         guiOpenAt.remove(id);
         confirmSlot.remove(id);
         playerName.remove(id);
+        popupId.remove(id);
     }
 
     // ── Popup outcome callbacks (called from AFKScreenHandler) ────────────
@@ -75,20 +81,28 @@ public class AFKPlayerTracker {
         int correct = confirmSlot.getOrDefault(id, -1);
         long openedAt = guiOpenAt.getOrDefault(id, System.currentTimeMillis());
         long elapsedMs = System.currentTimeMillis() - openedAt;
+        String pid = popupId.getOrDefault(id, null);
 
         inGui.put(id, false);
         guiOpenAt.remove(id);
         confirmSlot.remove(id);
+        popupId.remove(id);
         idleSince.put(id, System.currentTimeMillis());
 
         writeEvent(String.format(
-            "{\"schema\":\"afkverify_event_v1\",\"event\":\"passed\","
+            "{\"schema\":\"afkverify_event_v1\",\"event\":\"passed\",\"platform\":%s,"
+            + "\"popup_id\":%s,"
             + "\"timestamp_iso\":%s,\"timestamp_epoch\":%.3f,"
             + "\"player_name\":%s,\"player_uuid\":%s,"
-            + "\"slot_clicked\":%d,\"confirm_slot\":%d,\"elapsed_ms\":%d,\"correct\":%b}",
+            + "\"slot_clicked\":%d,\"clicked_row\":%d,\"clicked_col\":%d,"
+            + "\"confirm_slot\":%d,\"confirm_row\":%d,\"confirm_col\":%d,"
+            + "\"elapsed_ms\":%d,\"correct\":%b}",
+            esc(PLATFORM), esc(pid),
             esc(nowIso()), nowEpoch(),
             esc(playerName.getOrDefault(id, "?")), esc(id.toString()),
-            clickedSlot, correct, elapsedMs, (clickedSlot == correct)
+            clickedSlot, clickedSlot / 9, clickedSlot % 9,
+            correct, correct / 9, correct % 9,
+            elapsedMs, (clickedSlot == correct)
         ));
     }
 
@@ -96,19 +110,27 @@ public class AFKPlayerTracker {
         int correct = confirmSlot.getOrDefault(id, -1);
         long openedAt = guiOpenAt.getOrDefault(id, System.currentTimeMillis());
         long elapsedMs = System.currentTimeMillis() - openedAt;
+        String pid = popupId.getOrDefault(id, null);
 
         inGui.put(id, false);
         guiOpenAt.remove(id);
         confirmSlot.remove(id);
+        popupId.remove(id);
 
         writeEvent(String.format(
-            "{\"schema\":\"afkverify_event_v1\",\"event\":\"failed\","
+            "{\"schema\":\"afkverify_event_v1\",\"event\":\"failed\",\"platform\":%s,"
+            + "\"popup_id\":%s,"
             + "\"timestamp_iso\":%s,\"timestamp_epoch\":%.3f,"
             + "\"player_name\":%s,\"player_uuid\":%s,"
-            + "\"slot_clicked\":%d,\"confirm_slot\":%d,\"elapsed_ms\":%d,\"correct\":%b}",
+            + "\"slot_clicked\":%d,\"clicked_row\":%d,\"clicked_col\":%d,"
+            + "\"confirm_slot\":%d,\"confirm_row\":%d,\"confirm_col\":%d,"
+            + "\"elapsed_ms\":%d,\"correct\":%b}",
+            esc(PLATFORM), esc(pid),
             esc(nowIso()), nowEpoch(),
             esc(playerName.getOrDefault(id, "?")), esc(id.toString()),
-            clickedSlot, correct, elapsedMs, false
+            clickedSlot, clickedSlot / 9, clickedSlot % 9,
+            correct, correct / 9, correct % 9,
+            elapsedMs, false
         ));
     }
 
@@ -127,18 +149,23 @@ public class AFKPlayerTracker {
                 long elapsedMs = now - openedAt;
                 if (elapsedMs >= AFKVerifyMod.CONFIG_KICK_TIMEOUT_MS) {
                     int correct = confirmSlot.getOrDefault(id, -1);
+                    String pid = popupId.getOrDefault(id, null);
                     inGui.put(id, false);
                     guiOpenAt.remove(id);
                     confirmSlot.remove(id);
+                    popupId.remove(id);
 
                     writeEvent(String.format(
-                        "{\"schema\":\"afkverify_event_v1\",\"event\":\"timeout\","
+                        "{\"schema\":\"afkverify_event_v1\",\"event\":\"timeout\",\"platform\":%s,"
+                        + "\"popup_id\":%s,"
                         + "\"timestamp_iso\":%s,\"timestamp_epoch\":%.3f,"
                         + "\"player_name\":%s,\"player_uuid\":%s,"
-                        + "\"confirm_slot\":%d,\"elapsed_ms\":%d}",
+                        + "\"confirm_slot\":%d,\"confirm_row\":%d,\"confirm_col\":%d,"
+                        + "\"elapsed_ms\":%d}",
+                        esc(PLATFORM), esc(pid),
                         esc(nowIso()), nowEpoch(),
                         esc(player.getName().getString()), esc(id.toString()),
-                        correct, elapsedMs
+                        correct, correct / 9, correct % 9, elapsedMs
                     ));
 
                     player.networkHandler.disconnect(
@@ -197,18 +224,26 @@ public class AFKPlayerTracker {
         guiOpenAt.put(id, openedEpoch);
         confirmSlot.put(id, cs);
         playerName.put(id, player.getName().getString());
+        String pid = UUID.randomUUID().toString();
+        popupId.put(id, pid);
 
-        // Log popup_shown event so this can be joined with script-side data
+        // Log popup_shown event so this can be joined with script-side data.
+        // popup_id is the primary join key; timestamp_epoch is a fallback for
+        // tools that only have the script-side attempts.jsonl (which has no
+        // way to know popup_id since it never talks to the server).
         final int finalCs = cs;
         final int finalDeny = denySlotsUsed;
         writeEvent(String.format(
-            "{\"schema\":\"afkverify_event_v1\",\"event\":\"popup_shown\","
+            "{\"schema\":\"afkverify_event_v1\",\"event\":\"popup_shown\",\"platform\":%s,"
+            + "\"popup_id\":%s,"
             + "\"timestamp_iso\":%s,\"timestamp_epoch\":%.3f,"
             + "\"player_name\":%s,\"player_uuid\":%s,"
-            + "\"confirm_slot\":%d,\"deny_slots\":%d,\"total_slots\":27}",
+            + "\"confirm_slot\":%d,\"confirm_row\":%d,\"confirm_col\":%d,"
+            + "\"deny_slots\":%d,\"total_slots\":27}",
+            esc(PLATFORM), esc(pid),
             esc(nowIso()), openedEpoch / 1000.0,
             esc(player.getName().getString()), esc(id.toString()),
-            finalCs, finalDeny
+            finalCs, finalCs / 9, finalCs % 9, finalDeny
         ));
 
         player.openHandledScreen(new SimpleNamedScreenHandlerFactory(
