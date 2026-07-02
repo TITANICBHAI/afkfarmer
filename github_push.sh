@@ -94,18 +94,34 @@ remote_sha() {
   | json_str sha || true
 }
 
+# ── All files to sync ────────────────────────────────────────────────────────
+# Format: "local_path" "remote_path_in_repo"
+declare -a SYNC_FILES=(
+  "mc_farm.sh"                                                     "mc_farm.sh"
+  "github_push.sh"                                                 "github_push.sh"
+  "README.md"                                                      "README.md"
+  "afk-plugin/src/main/java/com/afkverify/AFKVerifyPlugin.java"   "afk-plugin/src/main/java/com/afkverify/AFKVerifyPlugin.java"
+  "afk-plugin/src/main/resources/plugin.yml"                      "afk-plugin/src/main/resources/plugin.yml"
+  "afk-plugin/src/main/resources/config.yml"                      "afk-plugin/src/main/resources/config.yml"
+  "afk-plugin/build.sh"                                           "afk-plugin/build.sh"
+  "afk-plugin/README.md"                                          "afk-plugin/README.md"
+  "afk-plugin/.github/workflows/build.yml"                        ".github/workflows/afkverify-build.yml"
+)
+
 # ── Diff summary ─────────────────────────────────────────────────────────────
 diff_summary() {
   echo ""
   echo "── Local vs GitHub diff ─────────────────────────────────────────────"
-  for f in mc_farm.sh github_push.sh README.md; do
-    [[ -f "$f" ]] || continue
+  for ((i=0; i<${#SYNC_FILES[@]}; i+=2)); do
+    local lf="${SYNC_FILES[i]}"
+    local rf="${SYNC_FILES[i+1]}"
+    [[ -f "$lf" ]] || continue
     local rsha
-    rsha=$(remote_sha "$f" || true)
+    rsha=$(remote_sha "$rf" || true)
     if [[ -z "$rsha" ]]; then
-      echo "  $f : NEW FILE"
+      echo "  $rf : NEW FILE"
     else
-      echo "  $f : exists on remote (sha=${rsha:0:8}…)"
+      echo "  $rf : exists (sha=${rsha:0:8}…)"
     fi
   done
   echo "──────────────────────────────────────────────────────────────────────"
@@ -122,9 +138,11 @@ diff_summary
 
 COMMIT_MSG="chore: sync $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-push_file "mc_farm.sh"      "mc_farm.sh"      "$COMMIT_MSG"
-push_file "github_push.sh"  "github_push.sh"  "$COMMIT_MSG"
-push_file "README.md"       "README.md"       "$COMMIT_MSG"
+for ((i=0; i<${#SYNC_FILES[@]}; i+=2)); do
+  lf="${SYNC_FILES[i]}"
+  rf="${SYNC_FILES[i+1]}"
+  [[ -f "$lf" ]] && push_file "$lf" "$rf" "$COMMIT_MSG"
+done
 
 echo ""
 echo "Done → https://github.com/${OWNER}/${REPO}"
