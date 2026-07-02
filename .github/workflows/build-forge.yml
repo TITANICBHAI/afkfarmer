@@ -1,0 +1,62 @@
+name: Build Forge Mod (1.16.5)
+
+on:
+  push:
+    paths:
+      - 'afk-forge/**'
+      - '.github/workflows/build-forge.yml'
+  pull_request:
+    paths:
+      - 'afk-forge/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          # ForgeGradle 5.1 runs on Java 17.
+          # build.gradle sets sourceCompatibility/targetCompatibility = 1.8
+          # so the compiled .class files are still Java-8-compatible bytecode.
+
+      - name: Setup Gradle 7.6.4 + cache
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '7.6.4'
+          # Gradle 7.x is the last series fully supported by ForgeGradle 5.
+          # ForgeGradle downloads ~600 MB of Minecraft + SRG/MCP mappings into
+          # ~/.gradle/caches/forge_gradle — the setup-gradle action caches this
+          # automatically, so subsequent runs are fast after the first cold build.
+          cache-read-only: false
+
+      - name: Build Forge mod
+        working-directory: afk-forge
+        run: gradle build --no-daemon
+        # ForgeGradle's `jar.finalizedBy("reobfJar")` in build.gradle runs
+        # reobfJar automatically after jar, producing the final remapped JAR.
+
+      - name: Collect JAR (exclude -sources, exclude un-obfed dev jar)
+        run: |
+          mkdir -p out
+          # ForgeGradle emits two JARs: the dev jar and the reobfuscated jar.
+          # The reobfuscated one ends with the version number and NO extra suffix.
+          find afk-forge/build/libs -name '*.jar' \
+            ! -name '*-sources*' \
+            ! -name '*-dev*' \
+            -exec cp {} out/ \;
+          echo "Built: $(ls -lh out/)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: afkverify-forge-1.16.5
+          path: out/*.jar
+          if-no-files-found: error
+          retention-days: 30
