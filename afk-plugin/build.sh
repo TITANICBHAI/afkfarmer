@@ -17,7 +17,21 @@ BUILD="$ROOT/build"
 LIBS="$ROOT/libs"
 
 API_JAR="$LIBS/paper-api.jar"
-API_URL="https://repo.papermc.io/repository/maven-public/io/papermc/paper/paper-api/1.20.4-R0.1-SNAPSHOT/paper-api-1.20.4-R0.1-SNAPSHOT-20231217.192524-23.jar"
+API_URL="https://repo.papermc.io/repository/maven-public/io/papermc/paper/paper-api/1.20.4-R0.1-SNAPSHOT/paper-api-1.20.4-R0.1-20241030.192207-176.jar"
+
+# Paper API's jar is compile-only and does NOT bundle its transitive deps
+# (adventure/bungeecord-chat), even though real Paper/Spigot server jars
+# provide them at runtime. javac needs them on the classpath too, or it
+# fails with "class file for net.kyori.adventure.* not found".
+MAVEN_CENTRAL="https://repo1.maven.org/maven2"
+declare -A EXTRA_JARS=(
+    [adventure-api.jar]="net/kyori/adventure-api/4.17.0/adventure-api-4.17.0.jar"
+    [adventure-key.jar]="net/kyori/adventure-key/4.17.0/adventure-key-4.17.0.jar"
+    [adventure-plain.jar]="net/kyori/adventure-text-serializer-plain/4.17.0/adventure-text-serializer-plain-4.17.0.jar"
+    [examination-api.jar]="net/kyori/examination-api/1.3.0/examination-api-1.3.0.jar"
+    [examination-string.jar]="net/kyori/examination-string/1.3.0/examination-string-1.3.0.jar"
+    [bungeecord-chat.jar]="net/md-5/bungeecord-chat/1.20-R0.2/bungeecord-chat-1.20-R0.2.jar"
+)
 
 mkdir -p "$BUILD/classes" "$LIBS"
 
@@ -41,9 +55,21 @@ else
 fi
 
 echo ""
+echo "── Fetching transitive deps (adventure/bungeecord-chat, ~1 MB) ──────"
+CP="$API_JAR"
+for name in "${!EXTRA_JARS[@]}"; do
+    jar_path="$LIBS/$name"
+    if [ ! -f "$jar_path" ]; then
+        curl -sSL --fail "$MAVEN_CENTRAL/${EXTRA_JARS[$name]}" -o "$jar_path"
+    fi
+    CP="$CP:$jar_path"
+done
+echo "  Ready"
+
+echo ""
 echo "── Compiling Java source ────────────────────────────────────────────"
 javac -encoding UTF-8 -source 8 -target 8 \
-      -cp "$API_JAR" \
+      -cp "$CP" \
       -d "$BUILD/classes" \
       $(find "$SRC" -name "*.java")
 echo "  Compiled OK"
