@@ -74,7 +74,7 @@ SWEEP_TIMEOUT = 5.5 # abort sweep if it's been running this many seconds (server
 #   slot_w = 29 px  (column width  = popup_w / 9)
 #   slot_h = 35 px  (row height    = spacing between row centers, CONSTANT)
 # These are DIFFERENT — the AFK grid is NOT square in this server's GUI.
-SLOT_H_DEFAULT = 35
+SLOT_H_DEFAULT = 35  # initial estimate; recalculated dynamically from detected strip height
 
 # ── Hover spiral: positions to try (dx,dy) if center hover yields no tooltip
 # Starts at center (0,0), then expands outward in a cross/diamond pattern.
@@ -90,6 +90,7 @@ PRESCAN_MED  = 5    # 5-14 → possible item (hover but accept "empty" result)
 # Color scan is fast and very reliable for these two distinct MC colors.
 # AI is most accurate but slow. OCR is a middle ground.
 WEIGHT_COLOR = 2
+WEIGHT_HSV   = 2   # hue-space scan — orthogonal to RGB, works without AI
 WEIGHT_AI    = 3
 WEIGHT_OCR   = 1
 VOTE_THRESHOLD = 2   # minimum weighted votes needed to act
@@ -113,7 +114,7 @@ HAS_AI       = bool(API_KEY)
 
 # ── Side-channel data filled during each sweep ────────────────
 # read_tooltip_voted() fills this so sweep_strip can record per-backend votes
-_last_vote_detail = {'color': None, 'ai': None, 'ocr': None, 'scores': {}}
+_last_vote_detail = {'color': None, 'hsv': None, 'ai': None, 'ocr': None, 'scores': {}}
 # click_and_verify() fills this so sweep_strip can record click stats
 _last_click_stats = {'elapsed_ms': 0, 'retries': 0, 'popup_closed': False}
 
@@ -253,7 +254,7 @@ def find_afk_strip():
 
     # ── Slot dimensions (measured from screenshots) ───────────────────
     slot_w = max(10, min(round(pw / 9), 60))
-    SLOT_H = SLOT_H_DEFAULT   # 35 px — constant regardless of popup size
+    SLOT_H = SLOT_H_DEFAULT   # fallback used for MIN_STRIP_H; refined below
 
     # ── 4. Row-by-row gray-fraction scan to locate the two dark bands ─
     DARK_T = 0.18
@@ -328,6 +329,11 @@ def find_afk_strip():
 
     if strip_bot <= strip_top: return None
 
+    # Recalculate slot height from the measured strip bounds.
+    # The strip holds exactly 3 rows — this makes the value correct at
+    # any GUI scale (1, 2, 3, 4) and any screen resolution automatically.
+    SLOT_H = max(10, min(60, round((strip_bot - strip_top) / 3)))
+
     strip_left  = pl + (pw - 9*slot_w) // 2
     strip_right = strip_left + 9*slot_w
 
@@ -380,14 +386,69 @@ def ask_ocr(path):
         return None
     except Exception: return None
 
+def _tooltip_title_rows(rows, ih, bpp):
+    """
+    Locate the tooltip bounding box by scanning for dark-purple background
+    pixels, then return ONLY the top ~25% (the item name / title line).
+    Scanning just the title zone eliminates false positives from item
+    textures and environmental colors in the rest of the screenshot.
+    Falls back to the full image if no tooltip background is found.
+    """
+    tt = -1; tb = -1
+    for iy in range(ih):
+        if count_color([rows[iy]], bpp, C_TOOLTIP_BG[0], C_TOOLTIP_BG[1]) >= 3:
+            if tt < 0: tt = iy
+            tb = iy
+    if tt < 0 or tb - tt < 6:
+        return rows          # no tooltip box visible — scan everything
+    title_bot = tt + max(6, (tb - tt) // 4)
+    return rows[tt:title_bot]
+
 def ask_color(path):
+    """RGB range scan restricted to the tooltip title zone."""
     r=decode_png(path)
     if r is None: return "empty"
-    rows,_,_,bpp=r
-    g=count_color(rows,bpp,C_GREEN[0],C_GREEN[1])
-    rd=count_color(rows,bpp,C_RED[0],C_RED[1])
-    if g>=10 and g>rd:  return "confirm"
-    if rd>=10 and rd>g: return "deny"
+    rows,_,ih,bpp=r
+    scan = _tooltip_title_rows(rows, ih, bpp)
+    g =count_color(scan, bpp, C_GREEN[0], C_GREEN[1])
+    rd=count_color(scan, bpp, C_RED[0],   C_RED[1])
+    if g>=5 and g>rd:  return "confirm"
+    if rd>=5 and rd>g: return "deny"
+    return "empty"
+
+# ── HSV backend helpers ───────────────────────────────────────────────────────
+def _rgb_to_h(r, g, b):
+    """Return hue 0-360 from 0-255 RGB.  Returns -1 for achromatic pixels."""
+    r,g,b = r/255,g/255,b/255
+    mx=max(r,g,b); mn=min(r,g,b); d=mx-mn
+    if d<0.15 or mx<0.25: return -1   # achromatic or too dark — skip
+    if mx==r: h=60*((g-b)/d%6)
+    elif mx==g: h=60*((b-r)/d+2)
+    else:        h=60*((r-g)/d+4)
+    return h
+
+def ask_hsv(path):
+    """
+    Hue-space classification inside the tooltip title zone.
+    Green MC text (§a #55FF55): hue ≈ 120°  → hue 90-160
+    Red   MC text (§c #FF5555): hue ≈ 0/360° → hue <20 or >340
+    Orthogonal to the RGB range scan — catches cases where brightness or
+    gamma shift pushes the color outside the RGB boxes.
+    Pure stdlib, no dependencies.
+    """
+    r=decode_png(path)
+    if r is None: return "empty"
+    rows,_,ih,bpp=r
+    scan = _tooltip_title_rows(rows, ih, bpp)
+    gn=0; rn=0
+    for row in scan:
+        for ix in range(0, len(row), bpp):
+            h=_rgb_to_h(row[ix], row[ix+1], row[ix+2])
+            if h<0: continue
+            if  90<=h<=160: gn+=1
+            elif h<=20 or h>=340: rn+=1
+    if gn>=3 and gn>rn: return "confirm"
+    if rn>=3 and rn>gn: return "deny"
     return "empty"
 
 # Tooltip background: MC renders it as very dark purple ~rgb(16,0,16)
@@ -426,10 +487,10 @@ def hover_spiral(sx, sy, sw, sh):
 # ═══════════════════════════════════════════════════════════════
 def read_tooltip_voted():
     global _last_vote_detail
-    _last_vote_detail = {'color': None, 'ai': None, 'ocr': None, 'scores': {}}
+    _last_vote_detail = {'color': None, 'hsv': None, 'ai': None, 'ocr': None, 'scores': {}}
     scores = {"confirm": 0, "deny": 0}
 
-    # ── Backend 1: color pixel scan ──────────────────────────────────────
+    # ── Backend 1: RGB color scan (tooltip title zone) ───────────────────
     a = ask_color(SNAP)
     _last_vote_detail['color'] = a
     if a in scores:
@@ -438,7 +499,17 @@ def read_tooltip_voted():
             _last_vote_detail['scores'] = dict(scores)
             print(f"    [color✓{scores[a]}] → {a}"); return a
 
-    # ── Backend 2: AI vision ─────────────────────────────────────────────
+    # ── Backend 2: HSV hue scan (stdlib, no deps) ────────────────────────
+    a = ask_hsv(SNAP)
+    _last_vote_detail['hsv'] = a
+    if a in scores:
+        scores[a] += WEIGHT_HSV
+        winner = max(scores, key=scores.get)
+        _last_vote_detail['scores'] = dict(scores)
+        if scores[winner] >= VOTE_THRESHOLD:
+            print(f"    [hsv✓{scores[winner]}] → {winner}"); return winner
+
+    # ── Backend 3: AI vision (optional — needs ANTHROPIC_API_KEY) ────────
     if HAS_AI:
         a = ask_ai(SNAP)
         _last_vote_detail['ai'] = a
@@ -449,7 +520,7 @@ def read_tooltip_voted():
             if scores[winner] >= VOTE_THRESHOLD:
                 print(f"    [AI✓{scores[winner]}] → {winner}"); return winner
 
-    # ── Backend 3: OCR ───────────────────────────────────────────────────
+    # ── Backend 4: OCR (optional — needs tesseract) ───────────────────────
     if HAS_TESS:
         a = ask_ocr(SNAP)
         _last_vote_detail['ocr'] = a
@@ -760,7 +831,7 @@ def sweep_strip(strip):
         slot_info = {
             'row': row, 'col': col, 'screen_x': sx, 'screen_y': sy,
             'confidence' : 'HIGH' if is_high else 'MED',
-            'color_vote' : None, 'ai_vote': None, 'ocr_vote': None,
+            'color_vote' : None, 'hsv_vote': None, 'ai_vote': None, 'ocr_vote': None,
             'vote_scores': {},
             'final_answer': None,
             'double_checked': False,
@@ -779,6 +850,7 @@ def sweep_strip(strip):
         # ── S3: Voted tooltip reading ────────────────────────────────────
         answer = read_tooltip_voted()
         slot_info['color_vote']   = _last_vote_detail.get('color')
+        slot_info['hsv_vote']     = _last_vote_detail.get('hsv')
         slot_info['ai_vote']      = _last_vote_detail.get('ai')
         slot_info['ocr_vote']     = _last_vote_detail.get('ocr')
         slot_info['vote_scores']  = _last_vote_detail.get('scores', {})
@@ -899,7 +971,7 @@ def sweep_strip(strip):
 #  MAIN LOOP
 # ═══════════════════════════════════════════════════════════════
 def main():
-    mode = ("AI+color" if HAS_AI else "") + ("+OCR" if HAS_TESS else "") or "color-only"
+    mode = ("AI+" if HAS_AI else "") + "color+HSV" + ("+OCR" if HAS_TESS else "")
     print(f"[ AFK solver ] mode: {mode}")
     print(f"[ AFK solver ] session: {SESSION_ID}")
     print(f"[ AFK solver ] calibration data → {ASSETS_DIR}/")
@@ -924,10 +996,24 @@ def main():
             print(f"[ AFK solver ] Afk strip found — width={sr-sl}px  "
                   f"slot_w={slot_w}px  slot_h={slot_h}px")
 
+            # Pause the bash spam loop for the ENTIRE solve window —
+            # prescan, hover, tooltip read, and click — not just the
+            # click itself.  sweep_strip() manages the lock internally
+            # for sub-phases (click_and_verify, failure-watcher) too;
+            # those paths are idempotent (same file, same semantics).
+            open(LOCK, 'w').close()
+
             time.sleep(random.uniform(REACT_MIN, REACT_MAX))
 
             idle=0
             solved = sweep_strip(strip)
+
+            # Belt-and-suspenders cleanup: sweep_strip() removes the
+            # lock when it clicks successfully or after the failure-
+            # watcher exits.  If it returns via timeout or an
+            # unexpected path the lock stays set, so we clear it here.
+            try: os.remove(LOCK)
+            except: pass
 
             if solved:
                 print("[ AFK solver ] ✓ solved! Back to watching...\n")
