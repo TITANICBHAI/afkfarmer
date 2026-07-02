@@ -97,15 +97,41 @@ remote_sha() {
 # ── All files to sync ────────────────────────────────────────────────────────
 # Format: "local_path" "remote_path_in_repo"
 declare -a SYNC_FILES=(
-  "mc_farm.sh"                                                     "mc_farm.sh"
-  "github_push.sh"                                                 "github_push.sh"
-  "README.md"                                                      "README.md"
+  "mc_farm.sh"                                                                        "mc_farm.sh"
+  "github_push.sh"                                                                    "github_push.sh"
+  "README.md"                                                                         "README.md"
+
+  # ── Spigot/Paper plugin ───────────────────────────────────────────────────────
   "afk-plugin/src/main/java/com/afkverify/AFKVerifyPlugin.java"   "afk-plugin/src/main/java/com/afkverify/AFKVerifyPlugin.java"
   "afk-plugin/src/main/resources/plugin.yml"                      "afk-plugin/src/main/resources/plugin.yml"
   "afk-plugin/src/main/resources/config.yml"                      "afk-plugin/src/main/resources/config.yml"
   "afk-plugin/build.sh"                                           "afk-plugin/build.sh"
   "afk-plugin/README.md"                                          "afk-plugin/README.md"
   "afk-plugin/.github/workflows/build.yml"                        ".github/workflows/afkverify-build.yml"
+  ".github/workflows/build-fabric.yml"                            ".github/workflows/build-fabric.yml"
+  ".github/workflows/build-forge.yml"                             ".github/workflows/build-forge.yml"
+  ".github/workflows/release.yml"                                 ".github/workflows/release.yml"
+
+  # ── Fabric mod (1.20.6) ───────────────────────────────────────────────────────
+  "afk-fabric/build.gradle"                                        "afk-fabric/build.gradle"
+  "afk-fabric/gradle.properties"                                   "afk-fabric/gradle.properties"
+  "afk-fabric/settings.gradle"                                     "afk-fabric/settings.gradle"
+  "afk-fabric/build.sh"                                           "afk-fabric/build.sh"
+  "afk-fabric/src/main/resources/fabric.mod.json"                 "afk-fabric/src/main/resources/fabric.mod.json"
+  "afk-fabric/src/main/java/com/afkverify/AFKVerifyMod.java"      "afk-fabric/src/main/java/com/afkverify/AFKVerifyMod.java"
+  "afk-fabric/src/main/java/com/afkverify/AFKPlayerTracker.java"  "afk-fabric/src/main/java/com/afkverify/AFKPlayerTracker.java"
+  "afk-fabric/src/main/java/com/afkverify/AFKScreenHandler.java"  "afk-fabric/src/main/java/com/afkverify/AFKScreenHandler.java"
+
+  # ── Forge mod (1.16.5) ────────────────────────────────────────────────────────
+  "afk-forge/build.gradle"                                         "afk-forge/build.gradle"
+  "afk-forge/gradle.properties"                                    "afk-forge/gradle.properties"
+  "afk-forge/settings.gradle"                                      "afk-forge/settings.gradle"
+  "afk-forge/build.sh"                                            "afk-forge/build.sh"
+  "afk-forge/src/main/resources/META-INF/mods.toml"               "afk-forge/src/main/resources/META-INF/mods.toml"
+  "afk-forge/src/main/resources/pack.mcmeta"                      "afk-forge/src/main/resources/pack.mcmeta"
+  "afk-forge/src/main/java/com/afkverify/AFKVerifyMod.java"       "afk-forge/src/main/java/com/afkverify/AFKVerifyMod.java"
+  "afk-forge/src/main/java/com/afkverify/AFKPlayerTracker.java"   "afk-forge/src/main/java/com/afkverify/AFKPlayerTracker.java"
+  "afk-forge/src/main/java/com/afkverify/AFKContainer.java"       "afk-forge/src/main/java/com/afkverify/AFKContainer.java"
 )
 
 # ── Diff summary ─────────────────────────────────────────────────────────────
