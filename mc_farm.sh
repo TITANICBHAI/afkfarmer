@@ -57,8 +57,25 @@ SWEEP_TIMEOUT = 5.5 # abort sweep if it's been running this many seconds (server
 #   slot_w = 29 px  (column width  = popup_w / 9)
 #   slot_h = 35 px  (row height    = spacing between row centers, CONSTANT)
 # These are DIFFERENT — the AFK grid is NOT square in this server's GUI.
-# Using a single slot for both caused up to 16 px vertical error on row 2.
 SLOT_H_DEFAULT = 35
+
+# ── Hover spiral: positions to try (dx,dy) if center hover yields no tooltip
+# Starts at center (0,0), then expands outward in a cross/diamond pattern.
+# Each position is tried in order until a tooltip appears.
+HOVER_SPIRAL = [(0,0),(0,-5),(5,0),(0,5),(-5,0),(-4,-4),(4,-4),(4,4),(-4,4)]
+
+# ── Prescan confidence thresholds (colorful pixel count in 14×14 box) ────────
+PRESCAN_HIGH = 15   # ≥15 bright pixels → item definitely present
+PRESCAN_MED  = 5    # 5-14 → possible item (hover but accept "empty" result)
+# < 5 → skip entirely (empty slot)
+
+# ── Tooltip backend weights for voting ───────────────────────────────────────
+# Color scan is fast and very reliable for these two distinct MC colors.
+# AI is most accurate but slow. OCR is a middle ground.
+WEIGHT_COLOR = 2
+WEIGHT_AI    = 3
+WEIGHT_OCR   = 1
+VOTE_THRESHOLD = 2   # minimum weighted votes needed to act
 
 # ── Minecraft UI colors ───────────────────────────────────────
 # Inventory background gray  ≈ rgb(198,198,198)
@@ -400,44 +417,145 @@ def has_tooltip(path):
     rows,_,_,bpp=r
     return count_color(rows,bpp,C_TOOLTIP_BG[0],C_TOOLTIP_BG[1])>=15
 
-def read_tooltip(mx, my):
-    """
-    Capture the area where the tooltip appears, then identify it.
-
-    Detection order: COLOR → AI → OCR
-    ─────────────────────────────────
-    The green (#55FF55) and red (#FF5555) MC text colors are so distinct that
-    the pixel color scan alone is ~100 % accurate when a tooltip IS present.
-    Trying AI first (old order) wasted 0.5-1 s per item for no benefit.
-    New order: color scan first (< 1 ms); fall back to AI/OCR only if the
-    color scan finds neither green nor red (should be <5 % of cases).
-
-    Tooltip region: 460×145 px centred on the cursor (extends left to catch
-    tooltips that open leftward on right-edge slots).
-    """
-    sw,sh=screen_wh()
-    tx=max(0,  mx-100);  ty=max(0,  my-110)
-    tw=min(sw-tx, 460);  th=min(sh-ty, 145)
+def _snap_tooltip(mx, my, sw, sh):
+    """Capture the tooltip region around (mx,my) into SNAP. Returns (tx,ty)."""
+    tx=max(0,mx-100); ty=max(0,my-110)
+    tw=min(sw-tx,460); th=min(sh-ty,145)
     scrot(tx,ty,tw,th)
+    return tx, ty
 
-    # ── Fast gate: no tooltip background → empty slot, skip everything ──
-    if not has_tooltip(SNAP):
-        return "empty"
+# ═══════════════════════════════════════════════════════════════
+#  STRATEGY 1: HOVER WITH SPIRAL FALLBACK
+#  If the slot-centre hover produces no tooltip (e.g. border mis-hit)
+#  we try 8 positions spiralling outward before giving up.
+# ═══════════════════════════════════════════════════════════════
+def hover_spiral(sx, sy, sw, sh):
+    """
+    Move mouse to (sx,sy) and surrounding spiral positions until a tooltip
+    appears.  Returns (found: bool, final_mx, final_my).
 
-    # ── Color scan first — fast, no network/process overhead ────────────
+    Spiral positions (dx,dy): centre first, then cross, then diagonals.
+    All positions are clamped to screen bounds.
+    """
+    for dx, dy in HOVER_SPIRAL:
+        nx = max(0, min(sw-1, sx+dx))
+        ny = max(0, min(sh-1, sy+dy))
+        xdo('mousemove', str(nx), str(ny))
+        time.sleep(HOVER_WAIT + random.uniform(0, 0.03))
+        _snap_tooltip(nx, ny, sw, sh)
+        if has_tooltip(SNAP):
+            return True, nx, ny
+    return False, sx, sy
+
+# ═══════════════════════════════════════════════════════════════
+#  STRATEGY 2: MULTI-BACKEND VOTED TOOLTIP READING
+#  color(wt=2) → AI(wt=3) → OCR(wt=1)
+#  Acts when any backend reaches VOTE_THRESHOLD weighted votes.
+#  Prevents single-backend false positives from immediately clicking.
+# ═══════════════════════════════════════════════════════════════
+def read_tooltip_voted():
+    """
+    Read the current SNAP (tooltip screenshot) using up to 3 backends.
+
+    Backends are run cheapest-first.  Each backend casts weighted votes for
+    "confirm" or "deny".  We act as soon as the leading answer accumulates
+    VOTE_THRESHOLD points — that way a very confident color scan (weight 2)
+    returns immediately, but if color is ambiguous we bring in AI/OCR.
+
+    False-positive protection: color alone needs ≥ 2 pts (VOTE_THRESHOLD).
+    If somehow both confirm AND deny each get 1 pt from different backends,
+    AI (weight 3) is the tiebreaker and will dominate.
+    """
+    scores = {"confirm": 0, "deny": 0}
+
+    # ── Backend 1: color pixel scan — fast, runs always ─────────────────
     a = ask_color(SNAP)
-    if a in ("confirm","deny"):
-        print(f"    [color] → {a}"); return a
+    if a in scores:
+        scores[a] += WEIGHT_COLOR
+        if scores[a] >= VOTE_THRESHOLD:
+            print(f"    [color✓{scores[a]}] → {a}"); return a
 
-    # ── Fallback: AI then OCR (only reached if color was inconclusive) ──
+    # ── Backend 2: AI vision — accurate, slow, network call ─────────────
     if HAS_AI:
-        a=ask_ai(SNAP)
-        if a is not None: print(f"    [AI]    → {a}"); return a
-    if HAS_TESS:
-        a=ask_ocr(SNAP)
-        if a is not None: print(f"    [OCR]   → {a}"); return a
+        a = ask_ai(SNAP)
+        if a in scores:
+            scores[a] += WEIGHT_AI
+            winner = max(scores, key=scores.get)
+            if scores[winner] >= VOTE_THRESHOLD:
+                print(f"    [AI✓{scores[winner]}] → {winner}"); return winner
 
-    print(f"    [color] → deny (fallback)"); return "deny"
+    # ── Backend 3: OCR — medium accuracy, local ──────────────────────────
+    if HAS_TESS:
+        a = ask_ocr(SNAP)
+        if a in scores:
+            scores[a] += WEIGHT_OCR
+
+    # ── Return best-voted answer (or deny if nothing conclusive) ─────────
+    if any(v > 0 for v in scores.values()):
+        winner = max(scores, key=scores.get)
+        print(f"    [voted {scores}] → {winner}"); return winner
+
+    print("    [no vote] → deny"); return "deny"
+
+# ═══════════════════════════════════════════════════════════════
+#  STRATEGY 3: DOUBLE-CHECK CONFIRM BEFORE CLICKING
+#  Re-hover same position, re-read tooltip.  Both reads must agree
+#  on "confirm" before we commit to a click.
+# ═══════════════════════════════════════════════════════════════
+def double_check_confirm(mx, my, sw, sh):
+    """
+    After the first 'confirm' read, wait 60 ms, re-hover the same pixel,
+    and re-read.  Returns True only if both reads say 'confirm'.
+
+    Prevents acting on tooltip flicker or transient false green pixels.
+    """
+    time.sleep(0.06)
+    xdo('mousemove', str(mx), str(my))
+    time.sleep(0.06)
+    _snap_tooltip(mx, my, sw, sh)
+    if not has_tooltip(SNAP):
+        print("    [double-check] tooltip gone — skipping")
+        return False
+    second = read_tooltip_voted()
+    if second != "confirm":
+        print(f"    [double-check] disagreed ({second}) — skipping")
+        return False
+    print("    [double-check] ✓ confirmed")
+    return True
+
+# ═══════════════════════════════════════════════════════════════
+#  STRATEGY 4: CLICK WITH POPUP-CLOSE VERIFICATION + RETRY
+#  After each click we check whether the popup actually closed.
+#  If it didn't, we retry (up to 3 times total).
+# ═══════════════════════════════════════════════════════════════
+def click_and_verify(mx, my):
+    """
+    Click (mx,my) up to 3 times, verifying popup closure after each attempt.
+    Acquires AFK_LOCK so the spam loop pauses during the click.
+    Returns True if popup closed, False if all retries failed.
+
+    False-positive protection: if the popup stays open after a click, it
+    means we either mis-clicked or clicked the wrong item — we try again.
+    """
+    open(LOCK,'w').close()
+    for attempt in range(1, 4):
+        xdo('mousemove', str(mx), str(my))
+        time.sleep(random.uniform(0.03, 0.08))
+        xdo('mousedown','1')
+        time.sleep(random.uniform(0.06, 0.12))
+        xdo('mouseup','1')
+        time.sleep(0.45)   # brief settle before checking
+        if not popup_open():
+            print(f"    [click] popup closed after attempt {attempt} ✓")
+            try: os.remove(LOCK)
+            except: pass
+            return True
+        print(f"    [click] popup still open after attempt {attempt}, retrying…")
+        time.sleep(0.25)
+    try: os.remove(LOCK)
+    except: pass
+    print("    [click] all retries failed — popup refused to close")
+    return False
 
 # ═══════════════════════════════════════════════════════════════
 #  QUICK POPUP PRESENCE CHECK  (gray-mass scan, no full analysis)
@@ -464,27 +582,29 @@ def popup_open():
 # ═══════════════════════════════════════════════════════════════
 #  PRESCAN — find which slots have items WITHOUT hovering
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+#  STRATEGY 5: TWO-TIER PRESCAN WITH CONFIDENCE LEVELS
+#  HIGH  (≥ PRESCAN_HIGH colorful pixels): item definitely present
+#  MED   (PRESCAN_MED … PRESCAN_HIGH-1): possible item, hover anyway
+#  EMPTY (< PRESCAN_MED): skip entirely
+#
+#  Using a 14×14 sample box (up from 12×12) catches more item texture
+#  pixels even when the hover offset is slightly off-centre.
+#  n_rows is hardcoded to 3 — JartexNetwork always sends 3 AFK rows.
+# ═══════════════════════════════════════════════════════════════
 def prescan_strip(strip):
     """
-    Take ONE screenshot of the AFK strip, return slots that contain items.
+    Returns (high_slots, med_slots) — two lists of (row,col) tuples.
 
-    Uses SEPARATE slot_w (column width) and slot_h (row height) — the AFK
-    grid is NOT square (measured: slot_w≈29px, slot_h=35px).  Using one
-    value for both axes placed the prescan sample point up to 16px off on
-    row 2, causing items there to be reported as empty and never clicked.
+    high_slots: very likely have items (process first)
+    med_slots : might have items (process after, accept 'empty' silently)
 
-    n_rows is HARDCODED to 3 — JartexNetwork always shows exactly 3 AFK
-    rows regardless of how many items are placed.
-
-    Colorfulness test: max(R,G,B)-min(R,G,B) > 30 → not plain gray.
-    Samples a 12×12 box at each slot centre to avoid border artifacts.
-    Falls back to ALL slots if the decode fails.
+    Falls back to (all_slots, []) if the decode fails.
     """
     sl, st, sr, sb, slot_w, slot_h = strip
-    N_ROWS = 3   # always 3 for JartexNetwork OneBlock AFK popup
+    N_ROWS = 3
     sw, sh = screen_wh()
 
-    # Screenshot only the AFK strip (tight crop for speed)
     px = max(0, sl);  py = max(0, st)
     pw = min(sw - px, sr - sl + 4)
     ph = min(sh - py, sb - st + 4)
@@ -492,20 +612,20 @@ def prescan_strip(strip):
 
     r = decode_png(SNAP)
     if r is None:
-        print("  Prescan: decode failed — hovering all slots")
-        return [(row, col) for row in range(N_ROWS) for col in range(9)]
+        print("  Prescan: decode failed — hovering ALL slots")
+        all_s = [(row,col) for row in range(N_ROWS) for col in range(9)]
+        return all_s, []
 
     img_rows, iw, ih, bpp = r
-    found = []
+    high, med = [], []
 
     for row in range(N_ROWS):
         for col in range(9):
-            # Centre of slot in IMAGE coordinates
-            # X uses slot_w (column width), Y uses slot_h (row height)
             cx = col * slot_w + slot_w // 2
             cy = row * slot_h + slot_h // 2
 
-            half = 6
+            # 14×14 sample box (±7 px) — larger than before for better coverage
+            half = 7
             x0 = max(0, cx - half);  x1 = min(iw, cx + half)
             y0 = max(0, cy - half);  y1 = min(ih, cy + half)
 
@@ -513,83 +633,130 @@ def prescan_strip(strip):
             for iy in range(y0, y1):
                 rd = img_rows[iy]
                 for ix in range(x0, x1):
-                    rr = rd[ix*bpp]; gg = rd[ix*bpp+1]; bb = rd[ix*bpp+2]
-                    if max(rr,gg,bb) - min(rr,gg,bb) > 30:
+                    rr=rd[ix*bpp]; gg=rd[ix*bpp+1]; bb=rd[ix*bpp+2]
+                    if max(rr,gg,bb) - min(rr,gg,bb) > 28:   # slightly lower threshold
                         colorful += 1
-                    if colorful >= 8:
+                    if colorful >= PRESCAN_HIGH:
                         break
-                if colorful >= 8:
+                if colorful >= PRESCAN_HIGH:
                     break
 
-            if colorful >= 8:
-                found.append((row, col))
+            if   colorful >= PRESCAN_HIGH: high.append((row, col))
+            elif colorful >= PRESCAN_MED:  med.append((row, col))
 
-    total = 9 * N_ROWS
-    print(f"  Prescan: {len(found)} item slots out of {total} — skipping {total-len(found)} empty")
-    if not found:
-        print("  Prescan found nothing colorful — hovering all slots as fallback")
-        return [(row, col) for row in range(N_ROWS) for col in range(9)]
-    return found
+    print(f"  Prescan: {len(high)} HIGH + {len(med)} MED "
+          f"({9*N_ROWS - len(high) - len(med)} empty skipped)")
+
+    if not high and not med:
+        print("  Prescan found nothing — hovering ALL as safety fallback")
+        all_s = [(row,col) for row in range(N_ROWS) for col in range(9)]
+        return all_s, []
+
+    return high, med
 
 
 # ═══════════════════════════════════════════════════════════════
-#  SWEEP THE AFK STRIP — prescan, then hover only item slots
+#  SWEEP — brings all 5 strategies together
 # ═══════════════════════════════════════════════════════════════
 def sweep_strip(strip):
     """
-    1. prescan_strip() takes ONE screenshot → finds only colorful (item) slots.
-    2. Hovers each item slot, reads tooltip with COLOR-FIRST logic (< 1 ms).
-    3. Clicks the first CONFIRM slot and returns True.
+    Full multi-strategy AFK sweep:
 
-    Timing improvements from screenshot analysis:
-      • HOVER_WAIT  0.14 → 0.10 s  (tooltip appears in 50 ms = 1 MC tick)
-      • REACT       0.28-0.95 → 0.20-0.65 s
-      • Color-first tooltip: removes 0.5-1 s AI call per item
-      • Net: 7 items now takes ~1.1 s instead of ~7 s
+    S1 — Two-tier prescan  : HIGH slots first, MED slots after.
+    S2 — Spiral hover      : if center hover misses, try 8 surrounding points.
+    S3 — Voted tooltip read: color(2pt) → AI(3pt) → OCR(1pt), need ≥2 pts.
+    S4 — Double-check      : re-hover + re-read before committing to a click.
+    S5 — Click-verify-retry: after click, check popup closed; retry up to 3×.
 
-    Sweep aborts if SWEEP_TIMEOUT seconds have elapsed — server will kick
-    before the script could finish anyway, so no point hovering more.
+    MED slots are processed last and never double-checked (they may be empty;
+    a single 'confirm' from voted read is enough to click, but a single 'deny'
+    or 'empty' is silently skipped without logging a failure).
+
+    Sweep aborts at SWEEP_TIMEOUT to avoid server kick during a long scan.
     """
     sl, st, sr, sb, slot_w, slot_h = strip
-
-    item_slots = prescan_strip(strip)
-    print(f"  Hovering {len(item_slots)} slot(s)  [slot_w={slot_w} slot_h={slot_h}]")
-
+    sw, sh = screen_wh()
     sweep_start = time.time()
-    for row, col in item_slots:
-        # ── Hard timeout: abort if we've used too much of the AFK window ──
+
+    # ── S1: Two-tier prescan ─────────────────────────────────────────────
+    high_slots, med_slots = prescan_strip(strip)
+    total_items = len(high_slots) + len(med_slots)
+    print(f"  sweep_strip: {len(high_slots)} HIGH + {len(med_slots)} MED  "
+          f"[slot_w={slot_w} slot_h={slot_h}]")
+
+    def process_slot(row, col, is_high):
+        """Returns True if this slot was successfully clicked."""
+        nonlocal sweep_start
+
         elapsed = time.time() - sweep_start
         if elapsed > SWEEP_TIMEOUT:
-            print(f"  ⚠ sweep timeout at {elapsed:.1f}s — aborting")
-            return False
+            print(f"  ⚠ timeout at {elapsed:.1f}s — aborting sweep")
+            return "timeout"
 
-        # X uses slot_w (column width), Y uses slot_h (row height separately)
+        # Screen coords of slot centre
         sx = sl + col * slot_w + slot_w // 2
         sy = st + row * slot_h + slot_h // 2
 
-        xdo('mousemove', str(sx), str(sy))
-        time.sleep(HOVER_WAIT + random.uniform(0, 0.04))
+        label = f"row{row+1}c{col+1}[{'H' if is_high else 'M'}]"
 
-        answer = read_tooltip(sx, sy)
+        # ── S2: Hover + spiral fallback ──────────────────────────────────
+        found, mx, my = hover_spiral(sx, sy, sw, sh)
+
+        if not found:
+            # No tooltip even after spiral — truly empty slot
+            print(f"  {label}: no tooltip after spiral → skip")
+            return False
+
+        # ── S3: Voted tooltip reading ────────────────────────────────────
+        answer = read_tooltip_voted()
+        print(f"  {label}: {answer}")
 
         if answer == "confirm":
-            print(f"  row {row+1} col {col+1}: GREEN ✓ — clicking!")
-            open(LOCK,'w').close()
-            xdo('mousemove', str(sx), str(sy))
-            time.sleep(random.uniform(0.03, 0.08))
-            xdo('mousedown','1')
-            time.sleep(random.uniform(0.06, 0.12))
-            xdo('mouseup','1')
-            time.sleep(random.uniform(1.8, 3.0))   # wait for popup to close
-            try: os.remove(LOCK)
-            except: pass
-            _log(f"SOLVED row={row+1} col={col+1} t={time.time()-sweep_start:.2f}s")
-            return True
+            if is_high:
+                # ── S4: Double-check before clicking (HIGH slots only) ───
+                ok = double_check_confirm(mx, my, sw, sh)
+                if not ok:
+                    return False
+
+            # ── S5: Click with popup-close verification ──────────────────
+            success = click_and_verify(mx, my)
+            elapsed = time.time() - sweep_start
+            _log(f"{'SOLVED' if success else 'CLICK-FAIL'} "
+                 f"{label} conf={'H' if is_high else 'M'} t={elapsed:.2f}s")
+
+            if success:
+                time.sleep(random.uniform(0.8, 1.4))  # brief rest
+                return True
+            else:
+                # Click failed; continue scanning remaining slots
+                print(f"  {label}: click failed — continuing scan")
+                return False
 
         elif answer == "deny":
-            print(f"  row {row+1} col {col+1}: red ✗ — skip")
+            return False
 
-    _log(f"FAILED items={len(item_slots)} t={time.time()-sweep_start:.2f}s")
+        # "empty" or unknown
+        return False
+
+    # Process HIGH-confidence slots first
+    for row, col in high_slots:
+        result = process_slot(row, col, is_high=True)
+        if result == "timeout":
+            _log(f"TIMEOUT items={total_items} t={time.time()-sweep_start:.2f}s")
+            return False
+        if result is True:
+            return True
+
+    # Process MEDIUM-confidence slots (no double-check, lighter logging)
+    for row, col in med_slots:
+        result = process_slot(row, col, is_high=False)
+        if result == "timeout":
+            _log(f"TIMEOUT items={total_items} t={time.time()-sweep_start:.2f}s")
+            return False
+        if result is True:
+            return True
+
+    _log(f"FAILED items={total_items} t={time.time()-sweep_start:.2f}s")
     return False
 
 # ── Diagnostic log ─────────────────────────────────────────────────────────
