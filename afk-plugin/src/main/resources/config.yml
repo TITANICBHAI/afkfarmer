@@ -1,0 +1,27 @@
+# ── AFKVerify Configuration ────────────────────────────────────────────
+# Reload with: /afkverify reload
+
+# Distance (in blocks) a player must move to reset their idle timer.
+# 0.5 = half a block — standing still while looking around still triggers.
+# 2.0 = two blocks — small shuffles are ignored, must actually walk.
+afk-distance: 0.5
+
+# Seconds of no movement before the popup appears.
+# 30  = half a minute (good for testing)
+# 120 = 2 minutes  (similar to JartexNetwork OneBlock)
+# 300 = 5 minutes
+afk-seconds: 30
+
+# Seconds the player has to click the correct item before being kicked.
+# Must be enough time for the AFK script to detect + click (≈ 3-5 seconds).
+kick-timeout: 15
+
+# Kick the player if they click the WRONG item (§c "Do not click").
+# Set false to just warn them and reset the timer instead.
+kick-on-fail: true
+
+# How many "Do not click" items to show (max 26, since 1 slot is always
+# the §a "Click to Confirm" item). The rest of the 27 slots will be AIR.
+# 26 = full 3×9 grid, every slot has an item (matches JartexNetwork)
+#  5 = sparse grid, only 6 total items visible
+deny-slots: 26
