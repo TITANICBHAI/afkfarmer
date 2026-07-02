@@ -59,6 +59,9 @@ C_GRAY  = ((180,180,180), (222,222,222))
 C_GREEN = ((48, 195, 48),  (135, 255, 135))
 # "Do not click" title       §c = #FF5555 = rgb(255,85,85)
 C_RED   = ((188,  38, 38), (255, 118, 118))
+# MC popup title bar + "Inventory" label dark background ≈ rgb(55,55,55)
+# These dark bands separate the AFK test strip from the player inventory.
+C_DARK  = ((10,  10,  10), (110, 110, 110))
 
 # ── Detect available methods once ─────────────────────────────
 HAS_TESS = subprocess.run(['which','tesseract'],capture_output=True).returncode==0
@@ -128,27 +131,36 @@ def xdo(*a):
     subprocess.run(['xdotool']+list(a),capture_output=True)
 
 # ═══════════════════════════════════════════════════════════════
-#  FIND THE "AFK GRINDING" STRIP
+#  FIND THE "AFK GRINDING" STRIP  (full-screen, smart separator)
 #
-#  The strip is the box ABOVE "Inventory". From your screenshots it
-#  is always ~42-44% of the full popup height. We find the full gray
-#  rectangle, then slice off just the upper portion.
+#  Detection pipeline:
+#   1. Screenshot 90% of screen — popup can be anywhere, not just center.
+#   2. Find widest contiguous gray horizontal run → popup L/R + row Y.
+#   3. Walk that column up/down to get precise popup top/bottom.
+#   4. Row-by-row gray-fraction scan within the popup:
+#        • "Afk Grinding" title bar  : dark rows  (< 18 % gray)
+#        • AFK test slot rows         : gray rows  (> 40 % gray)
+#        • "Inventory" separator      : dark rows  (< 18 % gray)  ← split here
+#        • Player inventory rows      : gray rows  (> 40 % gray)  ← ignored
+#   5. strip_top = first gray row after title dark band.
+#      strip_bot = first dark row after AFK slot gray band.
+#      Falls back to slot*1.1 / 47% ratio if either is inconclusive.
 #
 #  Returns (strip_left, strip_top, strip_right, strip_bottom, slot_px)
-#  all in screen coordinates, or None if no popup found.
+#  all in SCREEN coordinates, or None if no popup found.
 # ═══════════════════════════════════════════════════════════════
 def find_afk_strip():
     sw,sh = screen_wh()
 
-    # Capture the center 65% of screen — popup is always here
-    cx=int(sw*0.18); cy=int(sh*0.12)
-    cw=int(sw*0.64); ch=int(sh*0.76)
-    scrot(cx,cy,cw,ch)
+    # ── 1. Capture 90% of screen so popup is found wherever it sits ──
+    ox=int(sw*0.05); oy=int(sh*0.05)
+    cw=sw-2*ox;      ch=sh-2*oy
+    scrot(ox,oy,cw,ch)
     r=decode_png(SNAP)
     if r is None: return None
     rows,iw,ih,bpp=r
 
-    # ── Find widest gray horizontal run ───────────────────────
+    # ── 2. Find widest contiguous gray run (= popup background) ──────
     best=None; bw=0
     for iy in range(0,ih,2):
         row=rows[iy]; rs=None; rlen=0
@@ -161,48 +173,107 @@ def find_afk_strip():
                 if rs is None: rs=ix
                 rlen+=1
             else:
-                if rlen>bw and rlen>=140:
+                if rlen>bw and rlen>=100:
                     bw=rlen; mcx=rs+rlen//2
-                    # Walk up to find popup top
+                    # ── 3. Walk center column up to popup top ──────
                     top=iy
                     while top>0:
-                        rr2,gg2=rows[top-1][mcx*bpp],rows[top-1][mcx*bpp+1]
-                        if C_GRAY[0][0]<=rr2<=C_GRAY[1][0] and C_GRAY[0][1]<=gg2<=C_GRAY[1][1]: top-=1
+                        rr2=rows[top-1][mcx*bpp]; gg2=rows[top-1][mcx*bpp+1]
+                        if C_GRAY[0][0]<=rr2<=C_GRAY[1][0] and C_GRAY[0][1]<=gg2<=C_GRAY[1][1]:
+                            top-=1
                         else: break
-                    # Walk down to find popup bottom
+                    # ── 3. Walk center column down to popup bottom ─
                     bot=iy
                     while bot<ih-1:
-                        rr2,gg2=rows[bot+1][mcx*bpp],rows[bot+1][mcx*bpp+1]
-                        if C_GRAY[0][0]<=rr2<=C_GRAY[1][0] and C_GRAY[0][1]<=gg2<=C_GRAY[1][1]: bot+=1
+                        rr2=rows[bot+1][mcx*bpp]; gg2=rows[bot+1][mcx*bpp+1]
+                        if C_GRAY[0][0]<=rr2<=C_GRAY[1][0] and C_GRAY[0][1]<=gg2<=C_GRAY[1][1]:
+                            bot+=1
                         else: break
                     if bot-top>=70:
-                        # Convert crop-local → screen coords
-                        pl=cx+rs; pt=cy+top; pr=cx+rs+rlen; pb=cy+bot
+                        # Store in screen coords
+                        pl=ox+rs; pt=oy+top; pr=ox+rs+rlen; pb=oy+bot
                         best=(pl,pt,pr,pb)
                 rs=None; rlen=0
 
     if best is None: return None
     pl,pt,pr,pb = best
-    pw = pr-pl
-    ph = pb-pt
+    pw=pr-pl; ph=pb-pt
 
-    # ── Slot size: 9 slots fill ~90% of popup width ───────────
-    # (MC uses a little padding on each side)
+    # Sanity: popup should be 120-450px wide and at least 80px tall
+    if pw<120 or ph<80: return None
+
+    # ── Slot size: 9 slots fill ~90% of popup width ───────────────────
     slot = int(pw * 0.90 / 9)
     slot = max(10, min(slot, 60))
 
-    # ── AFK strip = popup top + title height  →  ~47% of popup ─
-    # Screenshots confirm 3 item rows before the "Inventory" separator.
-    # 43% was cutting off the 3rd row — 47% captures all three.
-    title_h    = int(slot * 1.1)
-    strip_top  = pt + title_h
-    strip_bot  = pt + int(ph * 0.47)   # stops before "Inventory" label
+    # ── 4. Row-by-row gray-fraction scan to locate the two dark bands ─
+    #
+    #   gray_frac[i] = fraction of popup-width pixels that are C_GRAY
+    #   in the row at screen-y = pt+i.
+    #
+    #   Thresholds (tuned from screenshots):
+    #     DARK_T = 0.18  — row is a "dark band" (title / Inventory label)
+    #     GRAY_T = 0.40  — row is a "slot row"
+    #
+    #   State machine:
+    #     START → TITLE_DARK → AFK_SLOTS → INV_SEP (stop here)
+    #
+    DARK_T = 0.18
+    GRAY_T = 0.40
 
-    # Center the 9-column grid horizontally inside the popup
-    strip_left = pl + (pw - 9*slot)//2
+    # Convert popup screen coords → image coords
+    pt_i = pt-oy; pb_i = pb-oy
+    pl_i = pl-ox; pr_i = pr-ox
+
+    state = 'start'
+    title_end_rel = None   # row index (relative to pt) where title ends
+    inv_sep_rel   = None   # row index (relative to pt) where Inventory sep starts
+
+    for rel in range(min(ph, pb_i-pt_i)+1):
+        iy = pt_i + rel
+        if iy >= ih: break
+        row = rows[iy]
+        gray = 0; span = max(1, pr_i - pl_i)
+        for ix in range(pl_i, min(pr_i, iw)):
+            rr=row[ix*bpp]; gg=row[ix*bpp+1]; bb=row[ix*bpp+2]
+            if (C_GRAY[0][0]<=rr<=C_GRAY[1][0] and
+                C_GRAY[0][1]<=gg<=C_GRAY[1][1] and
+                C_GRAY[0][2]<=bb<=C_GRAY[1][2]):
+                gray+=1
+        gf = gray / span
+
+        if state == 'start':
+            if gf < DARK_T:   state = 'title_dark'
+            elif gf >= GRAY_T: state = 'afk_slots'; title_end_rel = rel
+        elif state == 'title_dark':
+            if gf >= GRAY_T:  state = 'afk_slots'; title_end_rel = rel
+        elif state == 'afk_slots':
+            if gf < DARK_T:
+                inv_sep_rel = rel
+                break   # found the "Inventory" separator — stop scanning
+
+    # ── 5. Build final strip coordinates ──────────────────────────────
+    if title_end_rel is not None:
+        strip_top = pt + title_end_rel
+    else:
+        strip_top = pt + int(slot * 1.1)   # fallback: ~one slot below popup top
+
+    if inv_sep_rel is not None:
+        strip_bot = pt + inv_sep_rel
+        print(f"  Popup {pw}×{ph}px  slot≈{slot}px  "
+              f"title_end={title_end_rel}px  inv_sep={inv_sep_rel}px  [exact]")
+    else:
+        strip_bot = pt + int(ph * 0.47)
+        print(f"  Popup {pw}×{ph}px  slot≈{slot}px  "
+              f"title_end={title_end_rel}px  sep=not found [47% fallback]")
 
     if strip_bot <= strip_top: return None
-    return (strip_left, strip_top, pr - (pw-9*slot)//2, strip_bot, slot)
+
+    # Center 9 columns horizontally within the popup
+    strip_left  = pl + (pw - 9*slot) // 2
+    strip_right = strip_left + 9*slot
+
+    return (strip_left, strip_top, strip_right, strip_bot, slot)
 
 # ═══════════════════════════════════════════════════════════════
 #  TOOLTIP READING — AI → OCR → color (best to worst)
@@ -312,8 +383,10 @@ def read_tooltip(mx, my):
 # ═══════════════════════════════════════════════════════════════
 def popup_open():
     sw,sh=screen_wh()
-    # Sample the center strip where MC always opens its GUIs
-    scrot(sw//2-160, sh//3, 320, 220)
+    # Sample 86% × 84% of screen — catches any popup position, not just center.
+    # Same gray-pixel threshold (1600) — still only needs a small mass of gray.
+    ox=int(sw*0.07); oy=int(sh*0.08)
+    scrot(ox, oy, sw-2*ox, sh-2*oy)
     r=decode_png(SNAP)
     if r is None: return False
     rows,_,_,bpp=r
