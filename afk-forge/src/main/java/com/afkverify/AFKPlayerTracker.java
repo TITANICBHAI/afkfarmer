@@ -11,6 +11,9 @@ import net.minecraft.util.text.StringTextComponent;
 import net.minecraft.util.text.TextFormatting;
 import net.minecraftforge.fml.network.NetworkHooks;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import java.io.FileWriter;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -18,6 +21,8 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class AFKPlayerTracker {
+
+    private static final Logger LOGGER = LogManager.getLogger(AFKVerifyMod.MOD_ID);
 
     private static final Map<UUID, Vector3d> lastPos     = new ConcurrentHashMap<>();
     private static final Map<UUID, Long>     idleSince   = new ConcurrentHashMap<>();
