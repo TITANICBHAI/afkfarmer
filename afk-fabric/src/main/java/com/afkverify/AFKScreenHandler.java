@@ -1,5 +1,6 @@
 package com.afkverify;
 
+import net.minecraft.component.DataComponentTypes;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.inventory.Inventory;
@@ -67,7 +68,7 @@ public class AFKScreenHandler extends GenericContainerScreenHandler {
 
     public static ItemStack makeConfirmItem() {
         ItemStack stack = new ItemStack(Items.LIME_DYE);
-        stack.setCustomName(
+        stack.set(DataComponentTypes.CUSTOM_NAME,
             Text.literal("Click to Confirm")
                 .formatted(Formatting.GREEN, Formatting.BOLD)
         );
@@ -76,7 +77,7 @@ public class AFKScreenHandler extends GenericContainerScreenHandler {
 
     public static ItemStack makeDenyItem() {
         ItemStack stack = new ItemStack(Items.RED_DYE);
-        stack.setCustomName(
+        stack.set(DataComponentTypes.CUSTOM_NAME,
             Text.literal("Do not click")
                 .formatted(Formatting.RED, Formatting.BOLD)
         );
