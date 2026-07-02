@@ -1,0 +1,25 @@
+modLoader="javafml"
+loaderVersion="[36,)"
+license="MIT"
+
+[[mods]]
+    modId="afkverify"
+    version="1.0.0"
+    displayName="AFKVerify"
+    description='''
+Replicates the JartexNetwork Afk Grinding popup for local testing.
+One random slot is LIME_DYE (Click to Confirm), the rest are RED_DYE (Do not click).
+Idle players are prompted after 30 seconds; wrong answer or timeout = kick.
+    '''
+    [[mods.dependencies.afkverify]]
+        modId="forge"
+        mandatory=true
+        versionRange="[36.2,)"
+        ordering="NONE"
+        side="SERVER"
+    [[mods.dependencies.afkverify]]
+        modId="minecraft"
+        mandatory=true
+        versionRange="[1.16.5,1.17)"
+        ordering="NONE"
+        side="SERVER"
