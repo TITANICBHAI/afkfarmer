@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "afkverify",
+  "version": "1.0.0",
+  "name": "AFKVerify",
+  "description": "Replicates the JartexNetwork Afk Grinding popup for local testing.",
+  "authors": ["AFKVerify"],
+  "contact": {
+    "homepage": "https://github.com/TITANICBHAI/afkfarmer"
+  },
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["com.afkverify.AFKVerifyMod"]
+  },
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "fabric-api":   "*",
+    "minecraft":    "~1.20.6"
+  }
+}
