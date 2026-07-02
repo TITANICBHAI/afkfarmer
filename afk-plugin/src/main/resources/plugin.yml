@@ -1,0 +1,22 @@
+name: AFKVerify
+version: 1.0.0
+main: com.afkverify.AFKVerifyPlugin
+api-version: 1.13
+description: AFK verification popup — triggers if player stays still too long
+author: AFKVerify
+website: https://github.com/TITANICBHAI/afkfarmer
+
+commands:
+  afkverify:
+    description: AFKVerify admin commands
+    usage: /afkverify [reload|test|status]
+    permission: afkverify.admin
+    permission-message: "§cYou do not have permission."
+
+permissions:
+  afkverify.admin:
+    description: Access /afkverify commands
+    default: op
+  afkverify.bypass:
+    description: Bypass AFK checks entirely
+    default: false
