@@ -99,6 +99,7 @@ remote_sha() {
 declare -a SYNC_FILES=(
   "mc_farm.sh"                                                                        "mc_farm.sh"
   "github_push.sh"                                                                    "github_push.sh"
+  "join_training_data.py"                                                             "join_training_data.py"
   "README.md"                                                                         "README.md"
 
   # ── Spigot/Paper plugin ───────────────────────────────────────────────────────
