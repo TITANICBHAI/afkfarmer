@@ -42,11 +42,13 @@ public class AFKScreenHandler extends GenericContainerScreenHandler {
                     .append(Text.literal("Verification passed! Welcome back.").formatted(Formatting.WHITE)),
                 false
             );
-            AFKPlayerTracker.onPassed(ownerUuid);
+            // Pass slotIndex so the tracker can log which slot was clicked
+            AFKPlayerTracker.onPassed(ownerUuid, slotIndex);
 
         } else if (name.contains("Do not click")) {
             serverPlayer.closeHandledScreen();
-            AFKPlayerTracker.onFailed(ownerUuid);
+            // Pass slotIndex so the tracker can log it (and compare against confirm_slot)
+            AFKPlayerTracker.onFailed(ownerUuid, slotIndex);
             if (AFKVerifyMod.CONFIG_KICK_ON_FAIL) {
                 serverPlayer.networkHandler.disconnect(
                     Text.literal("You clicked the wrong item!\nPlease reconnect.")
