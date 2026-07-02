@@ -38,13 +38,27 @@ Detection priority (best to worst):
   2. OCR        (tesseract)        — reads text characters; no key needed
   3. Color scan                    — green vs red pixel count; always works
 
+Calibration data:
+  Every popup attempt is saved as a timestamped PNG in attached_assets/ plus
+  one JSON line in attached_assets/attempts.jsonl.  After each attempt the
+  script pauses and asks for a correctness label via the terminal (20 s
+  timeout → auto-skip).  When the script can't find the confirm item the
+  spam loop is paused and the user can click manually; the script waits up to
+  30 s for the popup to close before resuming.
+
 stdlib only — no pip, no install.
 """
 import os, sys, zlib, struct, subprocess, time, random, base64, json
+import uuid, pathlib, shutil, select
 
 FLAG = "/tmp/mc_spamming"
 LOCK = "/tmp/mc_afk_solving"
 SNAP = "/tmp/_mc_afk.png"
+
+# ── Calibration output directory (set by mc_farm.sh via env var) ──────
+ASSETS_DIR  = os.environ.get('MC_ASSETS_DIR', '/tmp/mc_afk_assets')
+SESSION_ID  = str(uuid.uuid4())[:8]
+_attempt_no = 0          # incremented each time a popup is found
 
 # ── Timing ────────────────────────────────────────────────────
 POLL       = 0.35   # seconds between full-screen popup checks
@@ -89,9 +103,16 @@ C_RED   = ((188,  38, 38), (255, 118, 118))
 C_DARK  = ((10,  10,  10), (110, 110, 110))
 
 # ── Detect available methods once ─────────────────────────────
-HAS_TESS = subprocess.run(['which','tesseract'],capture_output=True).returncode==0
-API_KEY  = os.environ.get('ANTHROPIC_API_KEY','').strip()
-HAS_AI   = bool(API_KEY)
+HAS_TESS     = subprocess.run(['which','tesseract'],capture_output=True).returncode==0
+HAS_CONVERT  = subprocess.run(['which','convert'],capture_output=True).returncode==0
+API_KEY      = os.environ.get('ANTHROPIC_API_KEY','').strip()
+HAS_AI       = bool(API_KEY)
+
+# ── Side-channel data filled during each sweep ────────────────
+# read_tooltip_voted() fills this so sweep_strip can record per-backend votes
+_last_vote_detail = {'color': None, 'ai': None, 'ocr': None, 'scores': {}}
+# click_and_verify() fills this so sweep_strip can record click stats
+_last_click_stats = {'elapsed_ms': 0, 'retries': 0, 'popup_closed': False}
 
 # ═══════════════════════════════════════════════════════════════
 #  PNG DECODER  — pure stdlib (struct + zlib), no Pillow needed
@@ -228,30 +249,10 @@ def find_afk_strip():
     if pw<120 or ph<80: return None
 
     # ── Slot dimensions (measured from screenshots) ───────────────────
-    #
-    #  slot_w: column width = popup_w / 9  (round, not floor)
-    #          pw=260 → slot_w=29.  The old int(pw*0.90/9)=26 put col 0
-    #          13 px too far right and missed col 8 entirely.
-    #
-    #  SLOT_H: row height is CONSTANT = 35 px (spacing between row centres
-    #          measured across all screenshot sessions).  The grid is NOT
-    #          square — using one value for both axes caused a 16 px vertical
-    #          error on row 2, making those items completely unhittable.
     slot_w = max(10, min(round(pw / 9), 60))
     SLOT_H = SLOT_H_DEFAULT   # 35 px — constant regardless of popup size
 
     # ── 4. Row-by-row gray-fraction scan to locate the two dark bands ─
-    #
-    #   gray_frac[i] = fraction of popup-width pixels that are C_GRAY
-    #   in the row at screen-y = pt+i.
-    #
-    #   Thresholds (tuned from screenshots):
-    #     DARK_T = 0.18  — row is a "dark band" (title / Inventory label)
-    #     GRAY_T = 0.40  — row is a "slot row"
-    #
-    #   State machine:
-    #     START → TITLE_DARK → AFK_SLOTS → INV_SEP (stop here)
-    #
     DARK_T = 0.18
     GRAY_T = 0.40
 
@@ -260,8 +261,8 @@ def find_afk_strip():
     pl_i = pl-ox; pr_i = pr-ox
 
     state = 'start'
-    title_end_rel = None   # row index (relative to pt) where title ends
-    inv_sep_rel   = None   # row index (relative to pt) where Inventory sep starts
+    title_end_rel = None
+    inv_sep_rel   = None
 
     for rel in range(min(ph, pb_i-pt_i)+1):
         iy = pt_i + rel
@@ -284,15 +285,9 @@ def find_afk_strip():
         elif state == 'afk_slots':
             if gf < DARK_T:
                 inv_sep_rel = rel
-                break   # found the "Inventory" separator — stop scanning
+                break
 
     # ── 5a. Secondary separator: scan for "Inventory" white text rows ───
-    #
-    #  The "Inventory" label uses MC pure-white text (R≥250,G≥250,B≥250).
-    #  Items in the AFK grid are coloured — no pure-white pixels.
-    #  Scan rows at 42-52% of popup height.  Measured across all sessions:
-    #  "Inventory" text appears at exactly 46.1% of popup height.
-    #
     if inv_sep_rel is None:
         lo_rel = int(ph * 0.42)
         hi_rel = int(ph * 0.52)
@@ -307,21 +302,15 @@ def find_afk_strip():
                     white += 1
             if white / span > 0.08:
                 inv_sep_rel = rel
-                break   # first row with heavy white text = "Inventory" label
+                break
 
     # ── 5b. Build final strip coordinates ─────────────────────────────
-    #
-    #  strip_top: measured title bar = 18 px (constant across all sessions)
     if title_end_rel is not None:
         strip_top = pt + title_end_rel
     else:
-        strip_top = pt + 18   # fixed 18 px — measured MC title bar height
+        strip_top = pt + 18
 
-    #  strip_bot: must include all 3 AFK rows.
-    #  Row 2 bottom = strip_top + 3*SLOT_H = strip_top + 105.
-    #  "Inventory" text at ~46% is at y≈249, row 2 bottom at y≈253 — very
-    #  close, so we always enforce the minimum to avoid cutting row 2 off.
-    MIN_STRIP_H = 3 * SLOT_H   # always show 3 AFK rows (= 105 px)
+    MIN_STRIP_H = 3 * SLOT_H
 
     if inv_sep_rel is not None:
         raw_bot = pt + inv_sep_rel
@@ -329,7 +318,6 @@ def find_afk_strip():
         print(f"  Popup {pw}×{ph}px  slot_w={slot_w}px  SLOT_H={SLOT_H}px  "
               f"title_end={title_end_rel}px  inv_sep={inv_sep_rel}px  [exact]")
     else:
-        # 49% fallback: 130+126=256 > strip_top+105=253 → 3 rows always included
         raw_bot = pt + int(ph * 0.49)
         strip_bot = max(raw_bot, strip_top + MIN_STRIP_H)
         print(f"  Popup {pw}×{ph}px  slot_w={slot_w}px  SLOT_H={SLOT_H}px  "
@@ -337,18 +325,15 @@ def find_afk_strip():
 
     if strip_bot <= strip_top: return None
 
-    # Center 9 columns horizontally within the popup using slot_w
     strip_left  = pl + (pw - 9*slot_w) // 2
     strip_right = strip_left + 9*slot_w
 
-    # Return 6-element tuple — callers must unpack as (sl,st,sr,sb,slot_w,slot_h)
     return (strip_left, strip_top, strip_right, strip_bot, slot_w, SLOT_H)
 
 # ═══════════════════════════════════════════════════════════════
 #  TOOLTIP READING — AI → OCR → color (best to worst)
 # ═══════════════════════════════════════════════════════════════
 
-# Step-by-step prompt: tells Claude to reason the same way a human would
 _PROMPT = """You are watching a Minecraft anti-AFK check.
 
 Think step by step:
@@ -406,19 +391,12 @@ def ask_color(path):
 C_TOOLTIP_BG = ((0,0,0),(42,10,42))
 
 def has_tooltip(path):
-    """
-    Fast pre-check before AI/OCR: did any tooltip appear at all?
-    MC tooltip boxes have a very distinctive near-black-purple background.
-    Empty slots produce NO tooltip so we skip expensive calls entirely.
-    Needs ≥15 matching pixels to avoid false positives from dark game BG.
-    """
     r=decode_png(path)
     if r is None: return False
     rows,_,_,bpp=r
     return count_color(rows,bpp,C_TOOLTIP_BG[0],C_TOOLTIP_BG[1])>=15
 
 def _snap_tooltip(mx, my, sw, sh):
-    """Capture the tooltip region around (mx,my) into SNAP. Returns (tx,ty)."""
     tx=max(0,mx-100); ty=max(0,my-110)
     tw=min(sw-tx,460); th=min(sh-ty,145)
     scrot(tx,ty,tw,th)
@@ -426,17 +404,8 @@ def _snap_tooltip(mx, my, sw, sh):
 
 # ═══════════════════════════════════════════════════════════════
 #  STRATEGY 1: HOVER WITH SPIRAL FALLBACK
-#  If the slot-centre hover produces no tooltip (e.g. border mis-hit)
-#  we try 8 positions spiralling outward before giving up.
 # ═══════════════════════════════════════════════════════════════
 def hover_spiral(sx, sy, sw, sh):
-    """
-    Move mouse to (sx,sy) and surrounding spiral positions until a tooltip
-    appears.  Returns (found: bool, final_mx, final_my).
-
-    Spiral positions (dx,dy): centre first, then cross, then diagonals.
-    All positions are clamped to screen bounds.
-    """
     for dx, dy in HOVER_SPIRAL:
         nx = max(0, min(sw-1, sx+dx))
         ny = max(0, min(sh-1, sy+dy))
@@ -450,47 +419,42 @@ def hover_spiral(sx, sy, sw, sh):
 # ═══════════════════════════════════════════════════════════════
 #  STRATEGY 2: MULTI-BACKEND VOTED TOOLTIP READING
 #  color(wt=2) → AI(wt=3) → OCR(wt=1)
-#  Acts when any backend reaches VOTE_THRESHOLD weighted votes.
-#  Prevents single-backend false positives from immediately clicking.
+#  Stores per-backend results in _last_vote_detail for logging.
 # ═══════════════════════════════════════════════════════════════
 def read_tooltip_voted():
-    """
-    Read the current SNAP (tooltip screenshot) using up to 3 backends.
-
-    Backends are run cheapest-first.  Each backend casts weighted votes for
-    "confirm" or "deny".  We act as soon as the leading answer accumulates
-    VOTE_THRESHOLD points — that way a very confident color scan (weight 2)
-    returns immediately, but if color is ambiguous we bring in AI/OCR.
-
-    False-positive protection: color alone needs ≥ 2 pts (VOTE_THRESHOLD).
-    If somehow both confirm AND deny each get 1 pt from different backends,
-    AI (weight 3) is the tiebreaker and will dominate.
-    """
+    global _last_vote_detail
+    _last_vote_detail = {'color': None, 'ai': None, 'ocr': None, 'scores': {}}
     scores = {"confirm": 0, "deny": 0}
 
-    # ── Backend 1: color pixel scan — fast, runs always ─────────────────
+    # ── Backend 1: color pixel scan ──────────────────────────────────────
     a = ask_color(SNAP)
+    _last_vote_detail['color'] = a
     if a in scores:
         scores[a] += WEIGHT_COLOR
         if scores[a] >= VOTE_THRESHOLD:
+            _last_vote_detail['scores'] = dict(scores)
             print(f"    [color✓{scores[a]}] → {a}"); return a
 
-    # ── Backend 2: AI vision — accurate, slow, network call ─────────────
+    # ── Backend 2: AI vision ─────────────────────────────────────────────
     if HAS_AI:
         a = ask_ai(SNAP)
+        _last_vote_detail['ai'] = a
         if a in scores:
             scores[a] += WEIGHT_AI
             winner = max(scores, key=scores.get)
+            _last_vote_detail['scores'] = dict(scores)
             if scores[winner] >= VOTE_THRESHOLD:
                 print(f"    [AI✓{scores[winner]}] → {winner}"); return winner
 
-    # ── Backend 3: OCR — medium accuracy, local ──────────────────────────
+    # ── Backend 3: OCR ───────────────────────────────────────────────────
     if HAS_TESS:
         a = ask_ocr(SNAP)
+        _last_vote_detail['ocr'] = a
         if a in scores:
             scores[a] += WEIGHT_OCR
 
-    # ── Return best-voted answer (or deny if nothing conclusive) ─────────
+    _last_vote_detail['scores'] = dict(scores)
+
     if any(v > 0 for v in scores.values()):
         winner = max(scores, key=scores.get)
         print(f"    [voted {scores}] → {winner}"); return winner
@@ -499,16 +463,8 @@ def read_tooltip_voted():
 
 # ═══════════════════════════════════════════════════════════════
 #  STRATEGY 3: DOUBLE-CHECK CONFIRM BEFORE CLICKING
-#  Re-hover same position, re-read tooltip.  Both reads must agree
-#  on "confirm" before we commit to a click.
 # ═══════════════════════════════════════════════════════════════
 def double_check_confirm(mx, my, sw, sh):
-    """
-    After the first 'confirm' read, wait 60 ms, re-hover the same pixel,
-    and re-read.  Returns True only if both reads say 'confirm'.
-
-    Prevents acting on tooltip flicker or transient false green pixels.
-    """
     time.sleep(0.06)
     xdo('mousemove', str(mx), str(my))
     time.sleep(0.06)
@@ -525,18 +481,11 @@ def double_check_confirm(mx, my, sw, sh):
 
 # ═══════════════════════════════════════════════════════════════
 #  STRATEGY 4: CLICK WITH POPUP-CLOSE VERIFICATION + RETRY
-#  After each click we check whether the popup actually closed.
-#  If it didn't, we retry (up to 3 times total).
+#  Stores click stats in _last_click_stats for logging.
 # ═══════════════════════════════════════════════════════════════
 def click_and_verify(mx, my):
-    """
-    Click (mx,my) up to 3 times, verifying popup closure after each attempt.
-    Acquires AFK_LOCK so the spam loop pauses during the click.
-    Returns True if popup closed, False if all retries failed.
-
-    False-positive protection: if the popup stays open after a click, it
-    means we either mis-clicked or clicked the wrong item — we try again.
-    """
+    global _last_click_stats
+    t0 = time.time()
     open(LOCK,'w').close()
     for attempt in range(1, 4):
         xdo('mousemove', str(mx), str(my))
@@ -544,16 +493,26 @@ def click_and_verify(mx, my):
         xdo('mousedown','1')
         time.sleep(random.uniform(0.06, 0.12))
         xdo('mouseup','1')
-        time.sleep(0.45)   # brief settle before checking
+        time.sleep(0.45)
         if not popup_open():
             print(f"    [click] popup closed after attempt {attempt} ✓")
             try: os.remove(LOCK)
             except: pass
+            _last_click_stats = {
+                'elapsed_ms': int((time.time()-t0)*1000),
+                'retries'   : attempt,
+                'popup_closed': True,
+            }
             return True
         print(f"    [click] popup still open after attempt {attempt}, retrying…")
         time.sleep(0.25)
     try: os.remove(LOCK)
     except: pass
+    _last_click_stats = {
+        'elapsed_ms': int((time.time()-t0)*1000),
+        'retries'   : 3,
+        'popup_closed': False,
+    }
     print("    [click] all retries failed — popup refused to close")
     return False
 
@@ -561,17 +520,7 @@ def click_and_verify(mx, my):
 #  QUICK POPUP PRESENCE CHECK  (gray-mass scan, no full analysis)
 # ═══════════════════════════════════════════════════════════════
 def popup_open():
-    """
-    FAST poll check — called every 0.35 s so must decode a SMALL image.
-
-    JartexNetwork always centers the Afk Grinding popup near the screen
-    center.  A 400 × 300 crop around center catches it reliably without
-    the pure-Python PNG decode cost of a full-screen capture (~0.07 s
-    vs ~1 s for full 1024×576).  The larger full-screen decode is only
-    done once inside find_afk_strip() when a popup is confirmed.
-    """
     sw,sh=screen_wh()
-    # 400 × 300 window centered on screen — covers full popup with margin
     ox=sw//2-200; oy=sh//2-150
     scrot(ox, oy, 400, 300)
     r=decode_png(SNAP)
@@ -582,25 +531,7 @@ def popup_open():
 # ═══════════════════════════════════════════════════════════════
 #  PRESCAN — find which slots have items WITHOUT hovering
 # ═══════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════
-#  STRATEGY 5: TWO-TIER PRESCAN WITH CONFIDENCE LEVELS
-#  HIGH  (≥ PRESCAN_HIGH colorful pixels): item definitely present
-#  MED   (PRESCAN_MED … PRESCAN_HIGH-1): possible item, hover anyway
-#  EMPTY (< PRESCAN_MED): skip entirely
-#
-#  Using a 14×14 sample box (up from 12×12) catches more item texture
-#  pixels even when the hover offset is slightly off-centre.
-#  n_rows is hardcoded to 3 — JartexNetwork always sends 3 AFK rows.
-# ═══════════════════════════════════════════════════════════════
 def prescan_strip(strip):
-    """
-    Returns (high_slots, med_slots) — two lists of (row,col) tuples.
-
-    high_slots: very likely have items (process first)
-    med_slots : might have items (process after, accept 'empty' silently)
-
-    Falls back to (all_slots, []) if the decode fails.
-    """
     sl, st, sr, sb, slot_w, slot_h = strip
     N_ROWS = 3
     sw, sh = screen_wh()
@@ -624,7 +555,6 @@ def prescan_strip(strip):
             cx = col * slot_w + slot_w // 2
             cy = row * slot_h + slot_h // 2
 
-            # 14×14 sample box (±7 px) — larger than before for better coverage
             half = 7
             x0 = max(0, cx - half);  x1 = min(iw, cx + half)
             y0 = max(0, cy - half);  y1 = min(ih, cy + half)
@@ -634,7 +564,7 @@ def prescan_strip(strip):
                 rd = img_rows[iy]
                 for ix in range(x0, x1):
                     rr=rd[ix*bpp]; gg=rd[ix*bpp+1]; bb=rd[ix*bpp+2]
-                    if max(rr,gg,bb) - min(rr,gg,bb) > 28:   # slightly lower threshold
+                    if max(rr,gg,bb) - min(rr,gg,bb) > 28:
                         colorful += 1
                     if colorful >= PRESCAN_HIGH:
                         break
@@ -654,111 +584,6 @@ def prescan_strip(strip):
 
     return high, med
 
-
-# ═══════════════════════════════════════════════════════════════
-#  SWEEP — brings all 5 strategies together
-# ═══════════════════════════════════════════════════════════════
-def sweep_strip(strip):
-    """
-    Full multi-strategy AFK sweep:
-
-    S1 — Two-tier prescan  : HIGH slots first, MED slots after.
-    S2 — Spiral hover      : if center hover misses, try 8 surrounding points.
-    S3 — Voted tooltip read: color(2pt) → AI(3pt) → OCR(1pt), need ≥2 pts.
-    S4 — Double-check      : re-hover + re-read before committing to a click.
-    S5 — Click-verify-retry: after click, check popup closed; retry up to 3×.
-
-    MED slots are processed last and never double-checked (they may be empty;
-    a single 'confirm' from voted read is enough to click, but a single 'deny'
-    or 'empty' is silently skipped without logging a failure).
-
-    Sweep aborts at SWEEP_TIMEOUT to avoid server kick during a long scan.
-    """
-    sl, st, sr, sb, slot_w, slot_h = strip
-    sw, sh = screen_wh()
-    sweep_start = time.time()
-
-    # ── S1: Two-tier prescan ─────────────────────────────────────────────
-    high_slots, med_slots = prescan_strip(strip)
-    total_items = len(high_slots) + len(med_slots)
-    print(f"  sweep_strip: {len(high_slots)} HIGH + {len(med_slots)} MED  "
-          f"[slot_w={slot_w} slot_h={slot_h}]")
-
-    def process_slot(row, col, is_high):
-        """Returns True if this slot was successfully clicked."""
-        nonlocal sweep_start
-
-        elapsed = time.time() - sweep_start
-        if elapsed > SWEEP_TIMEOUT:
-            print(f"  ⚠ timeout at {elapsed:.1f}s — aborting sweep")
-            return "timeout"
-
-        # Screen coords of slot centre
-        sx = sl + col * slot_w + slot_w // 2
-        sy = st + row * slot_h + slot_h // 2
-
-        label = f"row{row+1}c{col+1}[{'H' if is_high else 'M'}]"
-
-        # ── S2: Hover + spiral fallback ──────────────────────────────────
-        found, mx, my = hover_spiral(sx, sy, sw, sh)
-
-        if not found:
-            # No tooltip even after spiral — truly empty slot
-            print(f"  {label}: no tooltip after spiral → skip")
-            return False
-
-        # ── S3: Voted tooltip reading ────────────────────────────────────
-        answer = read_tooltip_voted()
-        print(f"  {label}: {answer}")
-
-        if answer == "confirm":
-            if is_high:
-                # ── S4: Double-check before clicking (HIGH slots only) ───
-                ok = double_check_confirm(mx, my, sw, sh)
-                if not ok:
-                    return False
-
-            # ── S5: Click with popup-close verification ──────────────────
-            success = click_and_verify(mx, my)
-            elapsed = time.time() - sweep_start
-            _log(f"{'SOLVED' if success else 'CLICK-FAIL'} "
-                 f"{label} conf={'H' if is_high else 'M'} t={elapsed:.2f}s")
-
-            if success:
-                time.sleep(random.uniform(0.8, 1.4))  # brief rest
-                return True
-            else:
-                # Click failed; continue scanning remaining slots
-                print(f"  {label}: click failed — continuing scan")
-                return False
-
-        elif answer == "deny":
-            return False
-
-        # "empty" or unknown
-        return False
-
-    # Process HIGH-confidence slots first
-    for row, col in high_slots:
-        result = process_slot(row, col, is_high=True)
-        if result == "timeout":
-            _log(f"TIMEOUT items={total_items} t={time.time()-sweep_start:.2f}s")
-            return False
-        if result is True:
-            return True
-
-    # Process MEDIUM-confidence slots (no double-check, lighter logging)
-    for row, col in med_slots:
-        result = process_slot(row, col, is_high=False)
-        if result == "timeout":
-            _log(f"TIMEOUT items={total_items} t={time.time()-sweep_start:.2f}s")
-            return False
-        if result is True:
-            return True
-
-    _log(f"FAILED items={total_items} t={time.time()-sweep_start:.2f}s")
-    return False
-
 # ── Diagnostic log ─────────────────────────────────────────────────────────
 _LOG = "/tmp/mc_afk_log.txt"
 def _log(msg):
@@ -770,33 +595,327 @@ def _log(msg):
         pass
 
 # ═══════════════════════════════════════════════════════════════
+#  CALIBRATION DATA HELPERS
+# ═══════════════════════════════════════════════════════════════
+def _ensure_assets():
+    """Create calibration data directory if it doesn't exist."""
+    pathlib.Path(ASSETS_DIR).mkdir(parents=True, exist_ok=True)
+
+
+def save_popup_screenshot(strip):
+    """
+    Capture full screen, draw the detected strip rect on top (green box via
+    ImageMagick if available, raw copy otherwise), save to ASSETS_DIR.
+
+    Returns (ts_str, base_name) where base_name is the filename stem
+    (without .png) used for both the image and the JSON record.
+    """
+    global _attempt_no
+    _ensure_assets()
+    _attempt_no += 1
+    ts   = time.strftime("%Y%m%d_%H%M%S")
+    base = f"popup_{ts}_{SESSION_ID}_{_attempt_no:04d}"
+    raw  = f"/tmp/_mc_save_{_attempt_no}.png"
+    dest = os.path.join(ASSETS_DIR, base + ".png")
+
+    subprocess.run(['scrot', '-z', raw], capture_output=True)
+
+    sl, st, sr, sb, slot_w, slot_h = strip
+    ann = (f"#{_attempt_no} sess={SESSION_ID} strip({sl},{st})-({sr},{sb}) "
+           f"sw={slot_w} sh={slot_h}")
+
+    if HAS_CONVERT:
+        try:
+            r = subprocess.run([
+                'convert', raw,
+                # Green box around the detected AFK strip
+                '-fill', 'none', '-stroke', '#00FF00', '-strokewidth', '2',
+                '-draw', f'rectangle {sl},{st} {sr},{sb}',
+                # Slot grid lines (faint yellow)
+                '-stroke', '#FFFF0060', '-strokewidth', '1',
+                # Label top-left of strip
+                '-fill', '#00FF00', '-stroke', 'none', '-pointsize', '11',
+                '-annotate', f'+{sl}+{max(13, st - 2)}', ann,
+                dest
+            ], capture_output=True, timeout=5)
+            if r.returncode != 0 or not os.path.exists(dest):
+                raise RuntimeError("convert failed")
+        except Exception:
+            try: shutil.copy2(raw, dest)
+            except Exception: pass
+    else:
+        try: shutil.copy2(raw, dest)
+        except Exception: pass
+
+    try: os.remove(raw)
+    except: pass
+
+    return ts, base
+
+
+def ask_feedback(context=''):
+    """
+    Pause and ask the user for a correctness label via /dev/tty.
+    Works even when this process runs in the background (not attached to
+    stdin) because /dev/tty connects directly to the controlling terminal.
+
+    Returns 'correct' | 'incorrect' | 'skipped'.  20-second timeout.
+    """
+    sep = '─' * 62
+    msg = (f"\n{sep}\n"
+           f"[FEEDBACK]  {context}\n"
+           f"  Did the solver act correctly?\n"
+           f"  [y] Yes — right click    [n] No — wrong or missed\n"
+           f"  [s] Skip  (20 s auto-skip)    → ")
+    try:
+        with open('/dev/tty', 'r') as inp, open('/dev/tty', 'w') as out:
+            out.write(msg); out.flush()
+            readable, _, _ = select.select([inp], [], [], 20.0)
+            if readable:
+                ans   = inp.readline().strip().lower()
+                label = ('correct'   if ans.startswith('y') else
+                         'incorrect' if ans.startswith('n') else 'skipped')
+                out.write(f"  → saved as: {label}\n{sep}\n"); out.flush()
+                return label
+            out.write(f'(timeout — auto-skipped)\n{sep}\n'); out.flush()
+    except Exception as e:
+        print(f"  [feedback] /dev/tty error: {e}")
+    return 'skipped'
+
+
+def write_attempt_record(record):
+    """Append one JSON line to attached_assets/attempts.jsonl."""
+    try:
+        _ensure_assets()
+        path = os.path.join(ASSETS_DIR, 'attempts.jsonl')
+        with open(path, 'a') as f:
+            f.write(json.dumps(record, separators=(',', ':')) + '\n')
+    except Exception as e:
+        print(f"  [record] write error: {e}")
+
+# ═══════════════════════════════════════════════════════════════
+#  SWEEP — all 5 strategies + calibration data recording
+#
+#  Each popup attempt produces:
+#    attached_assets/popup_<ts>_<sess>_<N>.png   — annotated screenshot
+#    attached_assets/attempts.jsonl              — one JSON record appended
+#
+#  After the attempt the script pauses for user feedback (20 s timeout).
+#  If the script fails to find the confirm item it opens AFK_LOCK (pausing
+#  the spam loop) and watches for 30 s so the user can handle the popup
+#  manually; then asks feedback before resuming.
+# ═══════════════════════════════════════════════════════════════
+def sweep_strip(strip):
+    sl, st, sr, sb, slot_w, slot_h = strip
+    sw, sh = screen_wh()
+    sweep_start = time.time()
+
+    # ── Save popup screenshot and start the attempt record ────────────────
+    ts_str, base_name = save_popup_screenshot(strip)
+
+    record = {
+        'schema'         : 'afk_attempt_v1',
+        'session_id'     : SESSION_ID,
+        'attempt_no'     : _attempt_no,
+        'timestamp_iso'  : time.strftime('%Y-%m-%dT%H:%M:%S'),
+        'timestamp_epoch': round(time.time(), 3),
+        'screenshot'     : base_name + '.png',
+        'strip'          : {
+            'left': sl, 'top': st, 'right': sr, 'bottom': sb,
+            'slot_w': slot_w, 'slot_h': slot_h,
+        },
+        'prescan'        : {},
+        'slots_inspected': [],
+        'outcome'        : {},
+        'user_feedback'  : None,
+    }
+
+    # ── S1: Two-tier prescan ─────────────────────────────────────────────
+    high_slots, med_slots = prescan_strip(strip)
+    record['prescan'] = {'high': high_slots, 'med': med_slots}
+    total_items = len(high_slots) + len(med_slots)
+    print(f"  sweep_strip: {len(high_slots)} HIGH + {len(med_slots)} MED  "
+          f"[slot_w={slot_w} slot_h={slot_h}]")
+
+    solved_info = [None]   # set by process_slot when click succeeds
+
+    def process_slot(row, col, is_high):
+        elapsed = time.time() - sweep_start
+        if elapsed > SWEEP_TIMEOUT:
+            print(f"  ⚠ timeout at {elapsed:.1f}s — aborting sweep")
+            return "timeout"
+
+        sx = sl + col * slot_w + slot_w // 2
+        sy = st + row * slot_h + slot_h // 2
+        label = f"row{row+1}c{col+1}[{'H' if is_high else 'M'}]"
+
+        slot_info = {
+            'row': row, 'col': col, 'screen_x': sx, 'screen_y': sy,
+            'confidence' : 'HIGH' if is_high else 'MED',
+            'color_vote' : None, 'ai_vote': None, 'ocr_vote': None,
+            'vote_scores': {},
+            'final_answer': None,
+            'double_checked': False,
+            'clicked'       : False,
+            'click_success' : None,
+        }
+
+        # ── S2: Hover + spiral fallback ──────────────────────────────────
+        found, mx, my = hover_spiral(sx, sy, sw, sh)
+        if not found:
+            slot_info['final_answer'] = 'no_tooltip'
+            record['slots_inspected'].append(slot_info)
+            print(f"  {label}: no tooltip after spiral → skip")
+            return False
+
+        # ── S3: Voted tooltip reading ────────────────────────────────────
+        answer = read_tooltip_voted()
+        slot_info['color_vote']   = _last_vote_detail.get('color')
+        slot_info['ai_vote']      = _last_vote_detail.get('ai')
+        slot_info['ocr_vote']     = _last_vote_detail.get('ocr')
+        slot_info['vote_scores']  = _last_vote_detail.get('scores', {})
+        slot_info['final_answer'] = answer
+        print(f"  {label}: {answer}")
+
+        if answer == "confirm":
+            if is_high:
+                # ── S4: Double-check before clicking (HIGH slots only) ───
+                ok = double_check_confirm(mx, my, sw, sh)
+                slot_info['double_checked'] = True
+                if not ok:
+                    record['slots_inspected'].append(slot_info)
+                    return False
+
+            # ── S5: Click with popup-close verification ──────────────────
+            slot_info['clicked'] = True
+            success = click_and_verify(mx, my)
+            slot_info['click_success']    = success
+            slot_info['click_elapsed_ms'] = _last_click_stats['elapsed_ms']
+            slot_info['click_retries']    = _last_click_stats['retries']
+            record['slots_inspected'].append(slot_info)
+
+            elapsed = time.time() - sweep_start
+            _log(f"{'SOLVED' if success else 'CLICK-FAIL'} "
+                 f"{label} conf={'H' if is_high else 'M'} t={elapsed:.2f}s")
+
+            if success:
+                solved_info[0] = slot_info
+                time.sleep(random.uniform(0.8, 1.4))
+                return True
+            else:
+                print(f"  {label}: click failed — continuing scan")
+                return False
+
+        elif answer == "deny":
+            record['slots_inspected'].append(slot_info)
+            return False
+
+        record['slots_inspected'].append(slot_info)
+        return False
+
+    # ── Process HIGH first, then MED; break on first success ────────────
+    final_result = False
+    for slots, is_high in [(high_slots, True), (med_slots, False)]:
+        for row, col in slots:
+            r = process_slot(row, col, is_high)
+            if r == "timeout":
+                record['outcome'] = {
+                    'script_result': 'timeout',
+                    'swept_for_s'  : round(time.time() - sweep_start, 2),
+                    'popup_closed' : False,
+                }
+                _log(f"TIMEOUT items={total_items} t={time.time()-sweep_start:.2f}s")
+                record['user_feedback'] = ask_feedback(
+                    f"Script TIMED OUT after {record['outcome']['swept_for_s']}s "
+                    f"(scanned {total_items} items).  Screenshot: {base_name}.png")
+                write_attempt_record(record)
+                return False
+            if r is True:
+                final_result = True
+                break
+        if final_result:
+            break
+
+    # ── Outcome A: script clicked the confirm item ────────────────────────
+    if final_result:
+        si = solved_info[0]
+        record['outcome'] = {
+            'script_result'   : 'clicked',
+            'popup_closed'    : _last_click_stats['popup_closed'],
+            'click_elapsed_ms': _last_click_stats['elapsed_ms'],
+            'click_retries'   : _last_click_stats['retries'],
+            'swept_for_s'     : round(time.time() - sweep_start, 2),
+        }
+        ctx = (f"Script clicked row={si['row']+1} col={si['col']+1}  "
+               f"({'popup closed ✓' if _last_click_stats['popup_closed'] else 'popup stayed open?'}).  "
+               f"Screenshot: {base_name}.png")
+        record['user_feedback'] = ask_feedback(ctx)
+        write_attempt_record(record)
+        return True
+
+    # ── Outcome B: script failed — watch for user to handle popup ────────
+    record['outcome'] = {
+        'script_result': 'not_found',
+        'swept_for_s'  : round(time.time() - sweep_start, 2),
+        'popup_closed' : False,
+    }
+
+    # Pause spam loop while we watch
+    open(LOCK, 'w').close()
+    print(f"\n[ watch ] Script scanned {total_items} item(s) — confirm not found.")
+    print( "[ watch ] Popup still open.  Handle it yourself (30 s), then give feedback.")
+    print( "[ watch ] The spam loop is paused until the popup closes.\n")
+
+    wt = time.time()
+    while popup_open() and (time.time() - wt) < 30.0:
+        time.sleep(0.5)
+
+    popup_gone = not popup_open()
+    record['outcome']['popup_closed']    = popup_gone
+    record['outcome']['watch_elapsed_s'] = round(time.time() - wt, 1)
+
+    try: os.remove(LOCK)
+    except: pass
+
+    _log(f"FAILED items={total_items} t={time.time()-sweep_start:.2f}s "
+         f"user_handled={'Y' if popup_gone else 'N'}")
+
+    ctx = (f"Script FAILED ({total_items} items scanned, confirm not found).  "
+           f"{'You closed the popup ✓' if popup_gone else 'Popup still open / timed out.'}  "
+           f"Screenshot: {base_name}.png")
+    record['user_feedback'] = ask_feedback(ctx)
+    write_attempt_record(record)
+    return False
+
+# ═══════════════════════════════════════════════════════════════
 #  MAIN LOOP
 # ═══════════════════════════════════════════════════════════════
 def main():
     mode = ("AI+color" if HAS_AI else "") + ("+OCR" if HAS_TESS else "") or "color-only"
     print(f"[ AFK solver ] mode: {mode}")
+    print(f"[ AFK solver ] session: {SESSION_ID}")
+    print(f"[ AFK solver ] calibration data → {ASSETS_DIR}/")
     print( "[ AFK solver ] watching for Afk Grinding popup...\n")
 
+    _ensure_assets()
     idle=0
     while os.path.exists(FLAG):
         try:
-            # Fast check — is any big gray region visible?
             if not popup_open():
                 idle+=1
                 if idle%40==0: print("[ AFK solver ] still watching...")
                 time.sleep(POLL)
                 continue
 
-            # Confirm it's the Afk Grinding strip and get exact coords
             strip = find_afk_strip()
             if strip is None:
                 time.sleep(POLL)
                 continue
 
             sl,st,sr,sb,slot_w,slot_h=strip
-            print(f"[ AFK solver ] Afk strip found — width={sr-sl}px  slot_w={slot_w}px  slot_h={slot_h}px")
+            print(f"[ AFK solver ] Afk strip found — width={sr-sl}px  "
+                  f"slot_w={slot_w}px  slot_h={slot_h}px")
 
-            # Short human-like pause before reacting
             time.sleep(random.uniform(REACT_MIN, REACT_MAX))
 
             idle=0
@@ -805,7 +924,6 @@ def main():
             if solved:
                 print("[ AFK solver ] ✓ solved! Back to watching...\n")
             else:
-                # Didn't find it — retry quickly (server may still be animating)
                 time.sleep(POLL)
 
         except KeyboardInterrupt:
@@ -819,6 +937,12 @@ def main():
 if __name__=="__main__":
     main()
 PYEOF
+
+# ── Set up calibration output dir and tell Python where it lives ────
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+mkdir -p "$SCRIPT_DIR/attached_assets"
+export MC_ASSETS_DIR="$SCRIPT_DIR/attached_assets"
+echo "[ MC Farm ] calibration data → $MC_ASSETS_DIR/"
 
 # ── Launch AFK solver in background ────────────────────────────
 python3 "$PY_SCRIPT" &
@@ -834,7 +958,7 @@ NEXT_VIBRATE_INTERVAL=$((15 + RANDOM % 25))
 
 while [ -f "$FLAG_FILE" ]; do
 
-    # Pause while AFK solver is in the middle of clicking
+    # Pause while AFK solver is in the middle of clicking (or watching for user)
     if [ -f "$AFK_LOCK" ]; then sleep 0.2; continue; fi
 
     ELAPSED=$((SECONDS - START_TIME))
