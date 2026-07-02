@@ -87,8 +87,10 @@ PRESCAN_MED  = 5    # 5-14 → possible item (hover but accept "empty" result)
 # < 5 → skip entirely (empty slot)
 
 # ── Tooltip backend weights for voting ───────────────────────────────────────
-# Color scan is fast and very reliable for these two distinct MC colors.
-# AI is most accurate but slow. OCR is a middle ground.
+# These are the hardcoded defaults.  At startup _load_weights() overrides
+# them from attached_assets/weights.json if that file exists.
+# weights.json is produced by join_training_data.py after joining
+# attempts.jsonl (script log) with afkverify_events.jsonl (mod ground truth).
 WEIGHT_COLOR    = 2
 WEIGHT_HSV      = 2   # hue-space scan — orthogonal to RGB, works without AI
 WEIGHT_AI       = 3
@@ -497,6 +499,37 @@ def _template_mad(a, b):
     if not a or not b or len(a) != len(b): return 999.0
     return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
 
+def _load_weights():
+    """
+    Override hardcoded backend weights from attached_assets/weights.json.
+    That file is produced by join_training_data.py after you give it both
+    the script's attempts.jsonl and the mod's afkverify_events.jsonl.
+    If the file is absent or malformed the hardcoded defaults stay in place.
+    """
+    global WEIGHT_COLOR, WEIGHT_HSV, WEIGHT_AI, WEIGHT_OCR
+    path = os.path.join(ASSETS_DIR, 'weights.json')
+    try:
+        with open(path) as f:
+            w = json.load(f)
+        WEIGHT_COLOR = int(w.get('color', WEIGHT_COLOR))
+        WEIGHT_HSV   = int(w.get('hsv',   WEIGHT_HSV))
+        WEIGHT_AI    = int(w.get('ai',    WEIGHT_AI))
+        WEIGHT_OCR   = int(w.get('ocr',   WEIGHT_OCR))
+        n   = w.get('n_popups', '?')
+        acc = w.get('accuracy', {})
+        def _pct(k):
+            v = acc.get(k, {}).get('precision')
+            return f'{v:.0%}' if isinstance(v, float) else '?'
+        print(f"[ weights ] Loaded (n={n} popups) — "
+              f"color={WEIGHT_COLOR}({_pct('color')})  "
+              f"HSV={WEIGHT_HSV}({_pct('hsv')})  "
+              f"AI={WEIGHT_AI}({_pct('ai')})  "
+              f"OCR={WEIGHT_OCR}({_pct('ocr')})")
+    except FileNotFoundError:
+        pass   # no weights.json yet — use hardcoded defaults silently
+    except Exception as e:
+        print(f"[ weights ] Error loading weights.json: {e} — using defaults")
+
 def _load_templates():
     """Load persisted slot icon templates from ASSETS_DIR/slot_templates.json."""
     global _slot_templates, TEMPLATE_FILE
@@ -741,11 +774,11 @@ def read_tooltip_voted():
 # ═══════════════════════════════════════════════════════════════
 #  STRATEGY 3: DOUBLE-CHECK CONFIRM BEFORE CLICKING
 # ═══════════════════════════════════════════════════════════════
-def double_check_confirm(mx, my, sw, sh):
+def double_check_confirm(mx, my, sw, sh, slot_w=29):
     time.sleep(0.06)
     xdo('mousemove', str(mx), str(my))
     time.sleep(0.06)
-    _snap_tooltip(mx, my, sw, sh)
+    _snap_tooltip(mx, my, sw, sh, slot_w)
     if not has_tooltip(SNAP):
         print("    [double-check] tooltip gone — skipping")
         return False
@@ -822,7 +855,7 @@ def prescan_strip(strip):
     if r is None:
         print("  Prescan: decode failed — hovering ALL slots")
         all_s = [(row,col) for row in range(N_ROWS) for col in range(9)]
-        return all_s, []
+        return all_s, [], None
 
     img_rows, iw, ih, bpp = r
     high, med = [], []
@@ -832,7 +865,7 @@ def prescan_strip(strip):
             cx = col * slot_w + slot_w // 2
             cy = row * slot_h + slot_h // 2
 
-            half = 7
+            half = max(5, slot_w // 4)   # scale with GUI scale
             x0 = max(0, cx - half);  x1 = min(iw, cx + half)
             y0 = max(0, cy - half);  y1 = min(ih, cy + half)
 
@@ -857,9 +890,9 @@ def prescan_strip(strip):
     if not high and not med:
         print("  Prescan found nothing — hovering ALL as safety fallback")
         all_s = [(row,col) for row in range(N_ROWS) for col in range(9)]
-        return all_s, []
+        return all_s, [], (img_rows, iw, ih, bpp)
 
-    return high, med
+    return high, med, (img_rows, iw, ih, bpp)
 
 # ── Diagnostic log ─────────────────────────────────────────────────────────
 _LOG = "/tmp/mc_afk_log.txt"
@@ -1013,11 +1046,44 @@ def sweep_strip(strip):
     }
 
     # ── S1: Two-tier prescan ─────────────────────────────────────────────
-    high_slots, med_slots = prescan_strip(strip)
+    high_slots, med_slots, prescan_img = prescan_strip(strip)
     record['prescan'] = {'high': high_slots, 'med': med_slots}
     total_items = len(high_slots) + len(med_slots)
     print(f"  sweep_strip: {len(high_slots)} HIGH + {len(med_slots)} MED  "
           f"[slot_w={slot_w} slot_h={slot_h}]")
+
+    # ── S1b: Template pre-classification (no hover needed) ───────────────
+    # Match slot icons against the accumulated template library built from
+    # attached_assets/.  Deny slots are skipped immediately; confirm slots
+    # get fast-tracked.  Falls back to hover+tooltip if templates are absent
+    # or confidence is too low.
+    template_votes = {}
+    if prescan_img is not None:
+        p_rows, p_iw, p_ih, p_bpp = prescan_img
+        for _r, _c in high_slots + med_slots:
+            tv = match_slot_from_prescan(p_rows, p_iw, p_ih, p_bpp,
+                                         _r, _c, slot_w, slot_h)
+            if tv:
+                template_votes[(_r, _c)] = tv
+        if template_votes:
+            n_c = sum(1 for v in template_votes.values() if v == 'confirm')
+            n_d = sum(1 for v in template_votes.values() if v == 'deny')
+            print(f"  Template pre-scan: {n_c} confirm  {n_d} deny  "
+                  f"{total_items - len(template_votes)} unclassified")
+
+    # ── Reorder sweep: template-confirm slots first (most likely the answer),
+    # then remaining HIGH, then remaining MED.  Preserves original is_high flag
+    # so double-check behaviour is unchanged.
+    tmpl_conf_h = [(r, c) for r, c in high_slots if template_votes.get((r, c)) == 'confirm']
+    tmpl_conf_m = [(r, c) for r, c in med_slots  if template_votes.get((r, c)) == 'confirm']
+    rest_high   = [(r, c) for r, c in high_slots  if template_votes.get((r, c)) != 'confirm']
+    rest_med    = [(r, c) for r, c in med_slots   if template_votes.get((r, c)) != 'confirm']
+    sweep_order = [
+        (tmpl_conf_h, True),   # template-confirm from HIGH → double-checked
+        (tmpl_conf_m, False),  # template-confirm from MED  → no double-check
+        (rest_high,   True),
+        (rest_med,    False),
+    ]
 
     solved_info = [None]   # set by process_slot when click succeeds
 
@@ -1030,20 +1096,29 @@ def sweep_strip(strip):
         sx = sl + col * slot_w + slot_w // 2
         sy = st + row * slot_h + slot_h // 2
         label = f"row{row+1}c{col+1}[{'H' if is_high else 'M'}]"
+        tmpl = template_votes.get((row, col))
 
         slot_info = {
             'row': row, 'col': col, 'screen_x': sx, 'screen_y': sy,
-            'confidence' : 'HIGH' if is_high else 'MED',
-            'color_vote' : None, 'hsv_vote': None, 'ai_vote': None, 'ocr_vote': None,
-            'vote_scores': {},
+            'confidence'  : 'HIGH' if is_high else 'MED',
+            'template_pre': tmpl,
+            'color_vote'  : None, 'hsv_vote': None, 'ai_vote': None, 'ocr_vote': None,
+            'vote_scores' : {},
             'final_answer': None,
             'double_checked': False,
             'clicked'       : False,
             'click_success' : None,
         }
 
+        # ── S1c: Template deny → skip without hovering ───────────────────
+        if tmpl == 'deny':
+            slot_info['final_answer'] = 'deny_template'
+            record['slots_inspected'].append(slot_info)
+            print(f"  {label}: deny (template, no hover)")
+            return False
+
         # ── S2: Hover + spiral fallback ──────────────────────────────────
-        found, mx, my = hover_spiral(sx, sy, sw, sh)
+        found, mx, my = hover_spiral(sx, sy, sw, sh, slot_w)
         if not found:
             slot_info['final_answer'] = 'no_tooltip'
             record['slots_inspected'].append(slot_info)
@@ -1060,10 +1135,25 @@ def sweep_strip(strip):
         slot_info['final_answer'] = answer
         print(f"  {label}: {answer}")
 
+        # ── Online template update ────────────────────────────────────────
+        # Reinforce the template with this slot's icon crop from the prescan
+        # image so future popups can skip hovering entirely.
+        def _reinforce_template(label_str):
+            if prescan_img is None:
+                return
+            p_rows2, p_iw2, p_ih2, p_bpp2 = prescan_img
+            pad = max(1, slot_w // 10)
+            x0 = col * slot_w + pad;  y0 = row * slot_h + pad
+            wi = slot_w - 2*pad;      hi = slot_h - 2*pad
+            if x0+wi <= p_iw2 and y0+hi <= p_ih2 and wi >= 4 and hi >= 4:
+                flat = _downsample(p_rows2, x0, y0, wi, hi, p_bpp2)
+                if flat:
+                    _update_template(label_str, flat)
+
         if answer == "confirm":
             if is_high:
                 # ── S4: Double-check before clicking (HIGH slots only) ───
-                ok = double_check_confirm(mx, my, sw, sh)
+                ok = double_check_confirm(mx, my, sw, sh, slot_w)
                 slot_info['double_checked'] = True
                 if not ok:
                     record['slots_inspected'].append(slot_info)
@@ -1083,6 +1173,7 @@ def sweep_strip(strip):
 
             if success:
                 solved_info[0] = slot_info
+                _reinforce_template('confirm')
                 time.sleep(random.uniform(0.8, 1.4))
                 return True
             else:
@@ -1090,15 +1181,21 @@ def sweep_strip(strip):
                 return False
 
         elif answer == "deny":
+            # Reinforce deny template only when the vote margin is clear —
+            # avoids drifting the template on ambiguous or borderline reads.
+            deny_score = slot_info['vote_scores'].get('deny', 0)
+            conf_score = slot_info['vote_scores'].get('confirm', 0)
+            if deny_score >= VOTE_THRESHOLD and deny_score - conf_score >= WEIGHT_COLOR:
+                _reinforce_template('deny')
             record['slots_inspected'].append(slot_info)
             return False
 
         record['slots_inspected'].append(slot_info)
         return False
 
-    # ── Process HIGH first, then MED; break on first success ────────────
+    # ── Sweep in priority order: template-confirm first, then high, then med ─
     final_result = False
-    for slots, is_high in [(high_slots, True), (med_slots, False)]:
+    for slots, is_high in sweep_order:
         for row, col in slots:
             r = process_slot(row, col, is_high)
             if r == "timeout":
@@ -1181,6 +1278,13 @@ def main():
     print( "[ AFK solver ] watching for Afk Grinding popup...\n")
 
     _ensure_assets()
+    _load_weights()
+    _load_templates()
+    # Bootstrap from historic attempts only when no templates exist yet —
+    # avoids re-ingesting old data every run, which would dampen recent
+    # online learning accumulated during previous sessions.
+    if _slot_templates.get('confirm') is None and _slot_templates.get('deny') is None:
+        _bootstrap_templates_from_assets()
     idle=0
     while os.path.exists(FLAG):
         try:
