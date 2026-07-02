@@ -20,14 +20,14 @@ public class AFKContainer extends ChestContainer {
 
     public AFKContainer(int windowId, PlayerInventory playerInventory,
                         IInventory chestInventory, UUID ownerUuid) {
-        super(ContainerType.GENERIC_9X3, windowId, playerInventory, chestInventory, 3);
+        super(ContainerType.GENERIC_9x3, windowId, playerInventory, chestInventory, 3);
         this.ownerUuid = ownerUuid;
     }
 
     @Override
-    public ItemStack slotClick(int slotId, int dragType, ClickType clickTypeIn, PlayerEntity player) {
+    public ItemStack clicked(int slotId, int dragType, ClickType clickTypeIn, PlayerEntity player) {
         if (slotId >= 0 && slotId < 27) {
-            ItemStack stack = getSlot(slotId).getStack();
+            ItemStack stack = getSlot(slotId).getItem();
             if (!stack.isEmpty() && stack.hasCustomHoverName()) {
                 String name = stack.getHoverName().getString();
 
