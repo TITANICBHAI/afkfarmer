@@ -1,0 +1,50 @@
+name: Build AFKVerify Plugin
+
+on:
+  push:
+    paths:
+      - 'afk-plugin/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Download Paper API (compile-time dep)
+        run: |
+          mkdir -p afk-plugin/libs
+          curl -sSL -o afk-plugin/libs/paper-api.jar \
+            "https://repo.papermc.io/repository/maven-public/io/papermc/paper/paper-api/1.20.4-R0.1-SNAPSHOT/paper-api-1.20.4-R0.1-SNAPSHOT-20231217.192524-23.jar" \
+            || curl -sSL -o afk-plugin/libs/paper-api.jar \
+            "https://hub.spigotmc.org/nexus/content/repositories/snapshots/org/spigotmc/spigot-api/1.20.4-R0.1-SNAPSHOT/spigot-api-1.20.4-R0.1-SNAPSHOT.jar"
+          echo "API jar: $(du -sh afk-plugin/libs/paper-api.jar)"
+
+      - name: Compile
+        run: |
+          mkdir -p afk-plugin/build/classes
+          javac -encoding UTF-8 -source 8 -target 8 \
+            -cp afk-plugin/libs/paper-api.jar \
+            -d afk-plugin/build/classes \
+            $(find afk-plugin/src/main/java -name "*.java")
+
+      - name: Copy resources & package JAR
+        run: |
+          cp afk-plugin/src/main/resources/plugin.yml afk-plugin/build/classes/
+          cp afk-plugin/src/main/resources/config.yml afk-plugin/build/classes/
+          jar cf AFKVerify.jar -C afk-plugin/build/classes .
+          echo "Built: $(du -sh AFKVerify.jar)"
+
+      - name: Upload AFKVerify.jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: AFKVerify
+          path: AFKVerify.jar
+          retention-days: 30
