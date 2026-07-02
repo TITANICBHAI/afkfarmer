@@ -89,11 +89,23 @@ PRESCAN_MED  = 5    # 5-14 → possible item (hover but accept "empty" result)
 # ── Tooltip backend weights for voting ───────────────────────────────────────
 # Color scan is fast and very reliable for these two distinct MC colors.
 # AI is most accurate but slow. OCR is a middle ground.
-WEIGHT_COLOR = 2
-WEIGHT_HSV   = 2   # hue-space scan — orthogonal to RGB, works without AI
-WEIGHT_AI    = 3
-WEIGHT_OCR   = 1
-VOTE_THRESHOLD = 2   # minimum weighted votes needed to act
+WEIGHT_COLOR    = 2
+WEIGHT_HSV      = 2   # hue-space scan — orthogonal to RGB, works without AI
+WEIGHT_AI       = 3
+WEIGHT_OCR      = 1
+VOTE_THRESHOLD  = 2   # minimum weighted votes needed to act
+
+# ── Slot icon template matching ───────────────────────────────────────────────
+# Templates are 16×16 downsampled slot crops (box-averaged to 768 floats each).
+# Built from attached_assets/attempts.jsonl + popup screenshots at startup,
+# then accumulated online as the bot runs.  Persisted to disk after each update.
+TEMPLATE_FILE          = None           # set at runtime: ASSETS_DIR/slot_templates.json
+TEMPLATE_MAD_THRESHOLD = 70.0           # max MAD to accept a template match
+TEMPLATE_MAD_MARGIN    = 18.0           # must beat the other label by this much
+_slot_templates = {                     # averaged pixel arrays per label
+    'confirm': None, 'deny': None,
+    'n': {'confirm': 0, 'deny': 0},
+}
 
 # ── Minecraft UI colors ───────────────────────────────────────
 # Inventory background gray  ≈ rgb(198,198,198)
@@ -451,6 +463,190 @@ def ask_hsv(path):
     if rn>=3 and rn>gn: return "deny"
     return "empty"
 
+# ═══════════════════════════════════════════════════════════════
+#  SLOT ICON TEMPLATE MATCHING — pure stdlib, no AI, no OCR
+#
+#  Each slot is downsampled to a 16×16 box average (768 RGB floats).
+#  Templates are built from attached_assets/attempts.jsonl at startup
+#  and accumulated online during each run.
+# ═══════════════════════════════════════════════════════════════
+def _downsample(rows, x0, y0, w, h, bpp, size=16):
+    """Box-average a crop to size×size. Returns flat list of size²×3 floats."""
+    out = []
+    for ty in range(size):
+        sy0 = y0 + ty * h // size
+        sy1 = y0 + (ty + 1) * h // size
+        for tx in range(size):
+            sx0 = x0 + tx * w // size
+            sx1 = x0 + (tx + 1) * w // size
+            rs = gs = bs = n = 0
+            for sy in range(max(0, sy0), min(len(rows), sy1)):
+                row = rows[sy]
+                row_len = len(row) // bpp
+                for sx in range(max(0, sx0), min(row_len, sx1)):
+                    rs += row[sx * bpp]
+                    gs += row[sx * bpp + 1]
+                    bs += row[sx * bpp + 2]
+                    n += 1
+            if n: out.extend([rs / n, gs / n, bs / n])
+            else: out.extend([128.0, 128.0, 128.0])
+    return out   # length = size * size * 3 = 768
+
+def _template_mad(a, b):
+    """Mean absolute difference between two flat pixel lists."""
+    if not a or not b or len(a) != len(b): return 999.0
+    return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+
+def _load_templates():
+    """Load persisted slot icon templates from ASSETS_DIR/slot_templates.json."""
+    global _slot_templates, TEMPLATE_FILE
+    TEMPLATE_FILE = os.path.join(ASSETS_DIR, 'slot_templates.json')
+    try:
+        with open(TEMPLATE_FILE) as f:
+            data = json.load(f)
+        _slot_templates.update(data)
+        n = _slot_templates.get('n', {})
+        if _slot_templates.get('confirm') or _slot_templates.get('deny'):
+            print(f"[ templates ] Loaded — confirm×{n.get('confirm',0)}  "
+                  f"deny×{n.get('deny',0)}")
+    except Exception:
+        pass   # no templates yet — will bootstrap below
+
+def _save_templates():
+    """Persist template averages to disk."""
+    try:
+        if TEMPLATE_FILE:
+            with open(TEMPLATE_FILE, 'w') as f:
+                json.dump(_slot_templates, f)
+    except Exception:
+        pass
+
+def _update_template(label, flat_pixels):
+    """
+    Online running average — incorporate a new slot icon crop into the
+    existing template for 'label'.  Saves to disk immediately so the next
+    session starts with the accumulated knowledge.
+    """
+    n = _slot_templates['n'].get(label, 0)
+    existing = _slot_templates.get(label)
+    if existing is None or len(existing) != len(flat_pixels):
+        _slot_templates[label] = flat_pixels[:]
+    else:
+        _slot_templates[label] = [
+            e + (p - e) / (n + 1)
+            for e, p in zip(existing, flat_pixels)
+        ]
+    _slot_templates['n'][label] = n + 1
+    _save_templates()
+
+def _bootstrap_templates_from_assets():
+    """
+    Cold-start bootstrap: scan attempts.jsonl for attempts the user
+    confirmed were correct, then extract slot icon crops from the saved
+    popup screenshots to build initial 'confirm' and 'deny' templates.
+
+    Uses the image data already present in attached_assets/ — no new
+    screenshots needed, no AI, no external dependencies.
+    """
+    attempts_path = os.path.join(ASSETS_DIR, 'attempts.jsonl')
+    if not os.path.exists(attempts_path):
+        return
+
+    bootstrapped = 0
+    with open(attempts_path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line.strip())
+            except Exception:
+                continue
+
+            if rec.get('user_feedback') != 'correct':
+                continue
+
+            img_path = os.path.join(ASSETS_DIR, rec.get('screenshot', ''))
+            if not os.path.exists(img_path):
+                continue
+
+            img = decode_png(img_path)
+            if img is None:
+                continue
+            img_rows, iw, ih, bpp = img
+
+            strip = rec.get('strip', {})
+            sl = strip.get('left', 0)
+            st = strip.get('top', 0)
+            sw = strip.get('slot_w', 18)
+            sh_s = strip.get('slot_h', 35)
+
+            # Find the clicked confirm slot and up to 3 deny slots
+            confirm_pos = None
+            deny_positions = []
+            for slot in rec.get('slots_inspected', []):
+                r, c = slot.get('row', -1), slot.get('col', -1)
+                if r < 0 or c < 0: continue
+                if slot.get('clicked') and slot.get('final_answer') == 'confirm':
+                    confirm_pos = (r, c)
+                elif slot.get('final_answer') == 'deny' and len(deny_positions) < 3:
+                    deny_positions.append((r, c))
+
+            if confirm_pos is None:
+                continue
+
+            def _extract_slot(row, col):
+                pad = max(1, sw // 10)
+                x0 = sl + col * sw + pad
+                y0 = st + row * sh_s + pad
+                wi = sw - 2 * pad
+                hi = sh_s - 2 * pad
+                if x0 < 0 or y0 < 0 or x0 + wi > iw or y0 + hi > ih:
+                    return None
+                return _downsample(img_rows, x0, y0, wi, hi, bpp)
+
+            flat = _extract_slot(*confirm_pos)
+            if flat: _update_template('confirm', flat)
+            for pos in deny_positions:
+                flat = _extract_slot(*pos)
+                if flat: _update_template('deny', flat)
+
+            bootstrapped += 1
+
+    if bootstrapped:
+        n = _slot_templates.get('n', {})
+        print(f"[ templates ] Bootstrapped from {bootstrapped} attempt(s) — "
+              f"confirm×{n.get('confirm',0)}  deny×{n.get('deny',0)}")
+
+def match_slot_from_prescan(rows, iw, ih, bpp, row, col, slot_w, slot_h):
+    """
+    Compare a slot's icon in the prescan image against reference templates.
+
+    The prescan image is cropped with origin at strip (left, top), so
+    slot (row, col) starts at image pixel (col*slot_w, row*slot_h).
+
+    Returns 'confirm', 'deny', or None when confidence is too low.
+    A positive return means the slot can be classified WITHOUT hovering.
+    """
+    if _slot_templates.get('confirm') is None or _slot_templates.get('deny') is None:
+        return None   # not enough templates yet
+
+    pad = max(1, slot_w // 10)
+    x0 = col * slot_w + pad
+    y0 = row * slot_h + pad
+    w  = slot_w - 2 * pad
+    h  = slot_h - 2 * pad
+    if x0 + w > iw or y0 + h > ih or w < 4 or h < 4:
+        return None
+
+    flat = _downsample(rows, x0, y0, w, h, bpp)
+    c_mad = _template_mad(flat, _slot_templates['confirm'])
+    d_mad = _template_mad(flat, _slot_templates['deny'])
+
+    # Both must be reasonable (not just "other template is terrible")
+    best = min(c_mad, d_mad)
+    if best > TEMPLATE_MAD_THRESHOLD: return None
+    if c_mad + TEMPLATE_MAD_MARGIN <= d_mad: return 'confirm'
+    if d_mad + TEMPLATE_MAD_MARGIN <= c_mad: return 'deny'
+    return None   # too close to call
+
 # Tooltip background: MC renders it as very dark purple ~rgb(16,0,16)
 C_TOOLTIP_BG = ((0,0,0),(42,10,42))
 
@@ -460,22 +656,29 @@ def has_tooltip(path):
     rows,_,_,bpp=r
     return count_color(rows,bpp,C_TOOLTIP_BG[0],C_TOOLTIP_BG[1])>=15
 
-def _snap_tooltip(mx, my, sw, sh):
-    tx=max(0,mx-100); ty=max(0,my-110)
-    tw=min(sw-tx,460); th=min(sh-ty,145)
-    scrot(tx,ty,tw,th)
+def _snap_tooltip(mx, my, sw, sh, slot_w=29):
+    # Scale the crop offsets with the slot size so the tooltip is never
+    # clipped at GUI scale 2+ (where slots and tooltips are physically larger).
+    # At scale 1 (slot_w≈18-29) the offsets stay near the original values.
+    # At scale 2 (slot_w≈36-40) they grow to ~200px and ~220px respectively.
+    scale = max(1.0, slot_w / 18.0)
+    ox = int(100 * scale); oy = int(110 * scale)
+    tx = max(0, mx - ox); ty = max(0, my - oy)
+    tw = min(sw - tx, int(460 * min(scale, 1.5)))
+    th = min(sh - ty, int(145 * min(scale, 1.5)))
+    scrot(tx, ty, tw, th)
     return tx, ty
 
 # ═══════════════════════════════════════════════════════════════
 #  STRATEGY 1: HOVER WITH SPIRAL FALLBACK
 # ═══════════════════════════════════════════════════════════════
-def hover_spiral(sx, sy, sw, sh):
+def hover_spiral(sx, sy, sw, sh, slot_w=29):
     for dx, dy in HOVER_SPIRAL:
         nx = max(0, min(sw-1, sx+dx))
         ny = max(0, min(sh-1, sy+dy))
         xdo('mousemove', str(nx), str(ny))
         time.sleep(HOVER_WAIT + random.uniform(0, 0.03))
-        _snap_tooltip(nx, ny, sw, sh)
+        _snap_tooltip(nx, ny, sw, sh, slot_w)
         if has_tooltip(SNAP):
             return True, nx, ny
     return False, sx, sy
