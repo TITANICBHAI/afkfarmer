@@ -41,7 +41,7 @@ public class AFKPlayerTracker {
         try (FileWriter fw = new FileWriter(EVENT_LOG, true)) {
             fw.write(json + "\n");
         } catch (Exception e) {
-            AFKVerifyMod.LOGGER.warn("[AFKVerify] Failed to write event: {}", e.getMessage());
+            LOGGER.warn("[AFKVerify] Failed to write event: {}", e.getMessage());
         }
     }
 
