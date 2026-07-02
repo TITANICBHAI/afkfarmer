@@ -135,6 +135,8 @@ declare -a SYNC_FILES=(
   "afk-forge/src/main/java/com/afkverify/AFKContainer.java"       "afk-forge/src/main/java/com/afkverify/AFKContainer.java"
   "afk-forge/src/main/java/com/afkverify/AFKPlayerTracker.java"   "afk-forge/src/main/java/com/afkverify/AFKPlayerTracker.java"
   "afk-forge/src/main/java/com/afkverify/AFKVerifyMod.java"       "afk-forge/src/main/java/com/afkverify/AFKVerifyMod.java"
+
+  "replit.md"                                                                         "replit.md"
 )
 
 # ── Diff summary ─────────────────────────────────────────────────────────────
@@ -172,6 +174,15 @@ for ((i=0; i<${#SYNC_FILES[@]}; i+=2)); do
   rf="${SYNC_FILES[i+1]}"
   [[ -f "$lf" ]] && push_file "$lf" "$rf" "$COMMIT_MSG"
 done
+
+# ── Push attached_assets (screenshots + jsonl logs) ──────────────────────────
+if [[ -d "attached_assets" ]]; then
+  echo ""
+  echo "── Pushing attached_assets/ ─────────────────────────────────────────"
+  for _f in attached_assets/*.png attached_assets/*.jsonl attached_assets/*.json; do
+    [[ -f "$_f" ]] && push_file "$_f" "$_f" "$COMMIT_MSG"
+  done
+fi
 
 echo ""
 echo "Done → https://github.com/${OWNER}/${REPO}"
