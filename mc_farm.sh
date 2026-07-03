@@ -87,7 +87,7 @@ _attempt_no = 0          # incremented each time a popup is found
 
 # ── Timing ────────────────────────────────────────────────────
 POLL       = 0.35   # seconds between full-screen popup checks
-HOVER_WAIT = 0.15   # wait after moving mouse (MC tooltip appears within 1 tick = 50ms; 150ms safer)
+HOVER_WAIT = 0.22   # wait after moving mouse (MC tooltip appears within 1 tick = 50ms; 220ms = ~4 ticks, safer)
 REACT_MIN  = 0.20   # human-like pause before starting to solve (min)
 REACT_MAX  = 0.65   # human-like pause before starting to solve (max)
 SWEEP_TIMEOUT = 5.5 # abort sweep if it's been running this many seconds (server kicks ~7-10s)
@@ -158,6 +158,7 @@ C_DARK  = ((10,  10,  10), (110, 110, 110))
 # ── Detect available methods once ─────────────────────────────
 HAS_TESS     = subprocess.run(['which','tesseract'],capture_output=True).returncode==0
 HAS_CONVERT  = subprocess.run(['which','convert'],capture_output=True).returncode==0
+HAS_MAIM     = subprocess.run(['which','maim'],capture_output=True).returncode==0
 API_KEY      = os.environ.get('ANTHROPIC_API_KEY','').strip()
 HAS_AI       = bool(API_KEY)
 
@@ -219,8 +220,30 @@ def count_color(rows, bpp, lo, hi):
 #  SCREENSHOT + MOUSE
 # ═══════════════════════════════════════════════════════════════
 def scrot(x=None,y=None,w=None,h=None):
+    """
+    Capture screen to SNAP.
+
+    Capture strategy (best → fallback):
+      1. maim -i <active_window_id>  — targets the Minecraft window directly,
+         bypasses X11 compositor buffer, pixel-perfect even under Picom/Mutter.
+         Research shows scrot reads stale compositor buffers; maim reads the
+         window's actual pixels.  Only used when HAS_MAIM is True.
+      2. scrot -z  — full display, may capture up to ~100ms stale frame under
+         compositors, but works in fullscreen (no compositor) reliably.
+
+    Region capture always falls back to scrot (maim region syntax differs).
+    """
     if x is not None:
+        # Region capture: scrot only (maim region syntax is different)
         subprocess.run(['scrot','-z','-a',f'{x},{y},{w},{h}',SNAP],capture_output=True)
+    elif HAS_MAIM:
+        # Full-screen capture via maim targeting the active window
+        wid = subprocess.run(['xdotool','getactivewindow'],
+                             capture_output=True, text=True).stdout.strip()
+        if wid:
+            subprocess.run(['maim','-i',wid,SNAP],capture_output=True)
+        else:
+            subprocess.run(['maim',SNAP],capture_output=True)
     else:
         subprocess.run(['scrot','-z',SNAP],capture_output=True)
 
@@ -260,65 +283,121 @@ def _sync_cursor():
         if ln.startswith('X='): _cur_x = int(ln[2:])
         elif ln.startswith('Y='): _cur_y = int(ln[2:])
 
+# ── WindMouse cursor movement ─────────────────────────────────────────────────
+# Research finding: cosine-ease moves in a PERFECTLY STRAIGHT LINE with
+# variable speed.  Anti-cheat systems detect this via:
+#   • Zero angular variety (all steps same direction)
+#   • Discrete angular distribution (0°, 45°, 90°, etc.)
+#   • Low event count (< 100 events/second)
+#
+# WindMouse (BenLand100, 2021) models the cursor as a physical particle pulled
+# toward the target by gravity G while a smoothly-changing wind W perturbs it
+# sideways.  This produces:
+#   • Curved, non-linear paths → continuous angular distribution
+#   • Bell-curve velocity (slow at start/end, fast in middle)
+#   • ~100 Hz update rate (10 ms per step)
+#   • Per-step timing jitter ±2 ms → non-periodic events
+#
+# Parameters are distance-adaptive so short hover-spiral moves (< 30 px) use
+# low wind (precision) while cross-screen moves (> 150 px) use full wind.
+#
+# Reference: https://ben.land/post/2021/04/25/windmouse-human-mouse-movement/
+# ─────────────────────────────────────────────────────────────────────────────
+def _wind_mouse(x0, y0, x1, y1, G=9.0, W=3.0, M=15.0, D=12.0):
+    """
+    Generate a sequence of (x, y) waypoints from (x0,y0) to (x1,y1).
+
+    Physics:
+      vx,vy  = velocity (updated each step)
+      wx,wy  = wind (random walk, decays near target)
+      G      = gravity magnitude — constant pull toward (x1,y1)
+      W      = wind magnitude — lateral random force
+      M      = max speed (px per step) — caps velocity
+      D      = damping start distance — M reduced to dist/2 inside D
+    """
+    sqrt3 = math.sqrt(3.0)
+    sqrt5 = math.sqrt(5.0)
+    cx, cy   = float(x0), float(y0)
+    vx = vy  = 0.0
+    wx = wy  = 0.0
+    pts = []
+    while True:
+        dist = math.hypot(x1 - cx, y1 - cy)
+        if dist < 1.0:
+            break
+        W_cur = min(W, dist)
+        if dist >= D:
+            wx = wx / sqrt3 + (2.0 * random.random() - 1.0) * W_cur / sqrt5
+            wy = wy / sqrt3 + (2.0 * random.random() - 1.0) * W_cur / sqrt5
+        else:
+            wx /= sqrt3
+            wy /= sqrt3
+        vx = vx + wx + G * (x1 - cx) / dist
+        vy = vy + wy + G * (y1 - cy) / dist
+        spd = math.hypot(vx, vy)
+        cap = min(M, dist / 2.0) if dist < D else M
+        if spd > cap:
+            vx = vx * cap / spd
+            vy = vy * cap / spd
+        cx += vx; cy += vy
+        pts.append((round(cx), round(cy)))
+    # Guarantee landing exactly on target
+    if not pts or pts[-1] != (round(x1), round(y1)):
+        pts.append((round(x1), round(y1)))
+    return pts
+
 def smooth_move(tx, ty):
     """
-    Move cursor from its current position to (tx, ty) along a smooth
-    ease-in/ease-out path.
+    Move cursor from current position to (tx, ty) via WindMouse.
 
-    Movement profile:
-      • Cosine ease (slow start → fast middle → slow finish) — matches
-        how human wrists naturally accelerate and decelerate.
-      • Per-step Gaussian jitter (σ=0.6px) — mimics involuntary hand tremor.
-      • Final step lands exactly on (tx, ty) — no jitter on the last move.
-      • Duration scales with distance: fast for short hops (tooltip spiral),
-        slower for long cross-screen moves (new popup found far from last).
-      • Minimum 5 steps so short moves still look animated.
+    Distance-adaptive parameters:
+      < 30 px   : G=9 W=1 M=8  D=8   precision (hover spiral fine-tuning)
+      30-150 px : G=8 W=3 M=15 D=12  normal
+      ≥ 150 px  : G=7 W=5 M=20 D=20  full realism (cross-screen moves)
 
-    Speed reference — human cursor velocities (pixels/s):
-        close  (< 80px) : 400-600 px/s  → ~0.12-0.18 s
-        medium (80-250px): 700-1000 px/s → ~0.10-0.25 s
-        far   (>250px)  : 900-1400 px/s → ~0.18-0.30 s
+    Update rate: ~100 Hz (10 ms/step ± 2 ms jitter) — non-periodic events.
     """
     global _cur_x, _cur_y
     if _cur_x is None: _sync_cursor()
     cx = _cur_x if _cur_x is not None else tx
     cy = _cur_y if _cur_y is not None else ty
-    dx = tx - cx; dy = ty - cy
-    dist = math.hypot(dx, dy)
-    if dist < 1.5:                     # already there
+    dist = math.hypot(tx - cx, ty - cy)
+    if dist < 1.5:
         _cur_x, _cur_y = tx, ty; return
 
-    steps    = max(5, min(22, int(dist / 9)))
-    duration = max(0.07, min(0.28, dist / 950.0))
-    step_t   = duration / steps
+    if   dist <  30: G, W, M, D = 9.0, 1.0,  8.0,  8.0
+    elif dist < 150: G, W, M, D = 8.0, 3.0, 15.0, 12.0
+    else:            G, W, M, D = 7.0, 5.0, 20.0, 20.0
 
-    for i in range(1, steps + 1):
-        t  = 0.5 * (1.0 - math.cos(math.pi * i / steps))  # cosine ease
-        jx = random.gauss(0, 0.6) if i < steps else 0.0
-        jy = random.gauss(0, 0.6) if i < steps else 0.0
-        xdo('mousemove', str(round(cx + dx * t + jx)),
-                         str(round(cy + dy * t + jy)))
-        time.sleep(step_t)
+    for nx, ny in _wind_mouse(cx, cy, tx, ty, G, W, M, D):
+        xdo('mousemove', str(nx), str(ny))
+        time.sleep(0.010 + random.uniform(-0.002, 0.002))   # ~100 Hz ± jitter
 
     _cur_x, _cur_y = tx, ty
 
 def _wait_for_tooltip(timeout=None):
     """
     Poll for a tooltip in SNAP after a hover move.
-    Returns True as soon as the tooltip appears; False on timeout.
-    Polls every 30 ms — MC renders tooltips within 1 game tick (50 ms)
-    so we almost always catch it on the first or second poll.
-    Falls back to a single snapshot + check if timeout ≤ 0.
+    Returns True as soon as tooltip pixels are detected; False on timeout.
+
+    Timing notes (from X11 capture research):
+      • MC renders tooltips within 1 game tick = 50 ms at 20 TPS.
+      • scrot latency ≈ 99 ms; maim ≈ 134 ms.
+      • Therefore: wait 60 ms first (tooltip MUST be rendered by then),
+        then poll every 65 ms until deadline.
+      • With HOVER_WAIT=0.22 s: 0.22 − 0.06 = 0.16 s window → 2-3 polls.
     """
-    deadline = time.time() + (timeout if timeout is not None else HOVER_WAIT)
-    while time.time() < deadline:
+    t = timeout if timeout is not None else HOVER_WAIT
+    time.sleep(0.06)   # Give MC 60 ms to render the tooltip (> 1 game tick)
+    deadline = time.time() + max(0.0, t - 0.06)
+    while True:
         _snap_tooltip(0, 0, 9999, 9999)
         if has_tooltip():
             return True
-        time.sleep(0.03)
-    # One last check at deadline
-    _snap_tooltip(0, 0, 9999, 9999)
-    return has_tooltip()
+        if time.time() >= deadline:
+            break
+        time.sleep(0.065)
+    return False
 
 # ═══════════════════════════════════════════════════════════════
 #  FIND THE "AFK GRINDING" STRIP  (full-screen, smart separator)
@@ -895,18 +974,27 @@ def hover_spiral(sx, sy, sw, sh, slot_w=29):
     Returns (True, mx, my) as soon as a tooltip is detected.
     Falls back to (False, sx, sy) if none of the spiral positions work.
 
-    Improvements vs old version:
-      • smooth_move() — cosine-eased path, not instant teleport
-      • _wait_for_tooltip() — polls every 30 ms instead of fixed sleep,
-        returns as soon as tooltip appears (saves ~50-100 ms per slot)
-      • Spiral covers ±8px in two rings — finds tooltip even when strip
-        coordinates are a few pixels off
+    Timeout strategy:
+      Position 0 (center): full HOVER_WAIT (0.15 s) — most items show here
+      Positions 1-8 (ring 1): HOVER_WAIT * 0.5 (0.075 s) — short but fair
+      Positions 9-16 (ring 2): HOVER_WAIT * 0.4 (0.060 s) — quick last resort
+
+    Worst-case (no tooltip found at any of 17 positions):
+      0.15 + 8×0.075 + 8×0.060 = 0.15 + 0.60 + 0.48 = 1.23 s per empty slot
+    vs the old fixed 17×0.15 = 2.55 s.  This keeps sweep time well under
+    the 5.5 s SWEEP_TIMEOUT even with multiple empty slots.
     """
-    for dx, dy in HOVER_SPIRAL:
+    for i, (dx, dy) in enumerate(HOVER_SPIRAL):
         nx = max(0, min(sw-1, sx+dx))
         ny = max(0, min(sh-1, sy+dy))
         smooth_move(nx, ny)
-        if _wait_for_tooltip(HOVER_WAIT):
+        if i == 0:
+            t = HOVER_WAIT              # center: full patience
+        elif i <= 8:
+            t = HOVER_WAIT * 0.5       # ring 1: half
+        else:
+            t = HOVER_WAIT * 0.4       # ring 2: quick
+        if _wait_for_tooltip(t):
             return True, nx, ny
     return False, sx, sy
 
@@ -1052,16 +1140,29 @@ def click_and_verify(mx, my):
 #  QUICK POPUP PRESENCE CHECK  (gray-mass scan, no full analysis)
 # ═══════════════════════════════════════════════════════════════
 def popup_open():
-    sw,sh=screen_wh()
-    if sw and sh:
-        ox=sw//2-200; oy=sh//2-150
-        scrot(ox, oy, 400, 300)
-    else:
-        scrot()   # full-screen fallback when display size is unknown
+    """
+    Detect if the AFK Grinding popup is open.
+
+    Always takes a full-screen screenshot so the popup is captured regardless
+    of where it appears — the center-crop approach previously used was too
+    sensitive to the popup being slightly off-center or the display size being
+    unknown.
+
+    Gray pixel threshold lowered from 1200 to 400: a full-screen shot of a
+    Minecraft world contains very few gray pixels when no GUI is open (terrain,
+    sky, entities are all colourful or white/dark, not mid-gray).  The AFK
+    popup adds thousands of mid-gray pixels, so 400 is a safe floor.
+    """
+    scrot()   # always full-screen — popup guaranteed to be in frame
     r=decode_png(SNAP)
-    if r is None: return False
+    if r is None:
+        print("  [popup_open] scrot/decode failed")
+        return False
     rows,_,_,bpp=r
-    return count_color(rows,bpp,C_GRAY[0],C_GRAY[1])>1200
+    n = count_color(rows,bpp,C_GRAY[0],C_GRAY[1])
+    # Uncomment to debug threshold:
+    # print(f"  [popup_open] gray_px={n}")
+    return n > 400
 
 # ═══════════════════════════════════════════════════════════════
 #  PRESCAN — find which slots have items WITHOUT hovering
@@ -1533,31 +1634,36 @@ def main():
                 time.sleep(POLL)
                 continue
 
-            strip = find_afk_strip()
-            if strip is None:
-                time.sleep(POLL)
-                continue
+            # ── Popup detected ────────────────────────────────────────────
+            idle = 0
+            print("[ AFK solver ] popup detected — pausing spam loop")
 
-            sl,st,sr,sb,slot_w,slot_h=strip
-            print(f"[ AFK solver ] Afk strip found — width={sr-sl}px  "
-                  f"slot_w={slot_w}px  slot_h={slot_h}px")
-
-            # Pause the bash spam loop for the ENTIRE solve window —
-            # prescan, hover, tooltip read, and click — not just the
-            # click itself.  sweep_strip() manages the lock internally
-            # for sub-phases (click_and_verify, failure-watcher) too;
-            # those paths are idempotent (same file, same semantics).
+            # Create LOCK NOW so the bash spam loop stops immediately.
+            # This must happen as soon as the popup is confirmed — before
+            # strip parsing — so we don't misclick during analysis.
             open(LOCK, 'w').close()
 
             time.sleep(random.uniform(REACT_MIN, REACT_MAX))
 
-            idle=0
+            # ── Parse the exact strip geometry ───────────────────────────
+            strip = find_afk_strip()
+            if strip is None:
+                print("[ AFK solver ] strip parse failed — waiting for popup to close")
+                _log("STRIP_FAIL could_not_parse")
+                t_wp = time.time()
+                while popup_open() and time.time()-t_wp < 30.0:
+                    time.sleep(0.5)
+                try: os.remove(LOCK)
+                except: pass
+                continue
+
+            sl,st,sr,sb,slot_w,slot_h=strip
+            print(f"[ AFK solver ] strip → left={sl} top={st} right={sr} bot={sb}  "
+                  f"slot_w={slot_w}px  slot_h={slot_h}px")
+
             solved = sweep_strip(strip)
 
-            # Belt-and-suspenders cleanup: sweep_strip() removes the
-            # lock when it clicks successfully or after the failure-
-            # watcher exits.  If it returns via timeout or an
-            # unexpected path the lock stays set, so we clear it here.
+            # Belt-and-suspenders LOCK cleanup
             try: os.remove(LOCK)
             except: pass
 
@@ -1569,7 +1675,11 @@ def main():
         except KeyboardInterrupt:
             break
         except Exception as e:
+            import traceback
             print(f"[ AFK solver ] error: {e}")
+            print(traceback.format_exc())
+            try: os.remove(LOCK)
+            except: pass
             time.sleep(1)
 
     print("[ AFK solver ] stopped")
@@ -1583,6 +1693,7 @@ if _missing_tools:
 _sw0,_sh0 = screen_wh()
 _res = f"{_sw0}×{_sh0}" if _sw0 else "unknown(full-screen mode)"
 print(f"[ init ] screen={_res}  scrot=✓  xdotool=✓"
+      + ("  maim=✓(better capture)" if HAS_MAIM else "  maim=✗(using scrot)")
       + ("  AI=✓" if HAS_AI else "  AI=✗(no key)")
       + ("  OCR=✓" if HAS_TESS else "  OCR=✗"))
 
