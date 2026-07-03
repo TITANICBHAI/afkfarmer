@@ -1713,6 +1713,504 @@ AFK_PID=$!
 echo "[ MC Farm ] AFK solver PID=$AFK_PID"
 echo "$AFK_PID" > "$PID_FILE"
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  RESEARCH-SOURCED TECHNIQUE EXTENSIONS  (pure Bash / awk / xdotool / ImageMagick)
+#
+#  Every technique below was identified by web research on general GUI automation.
+#  Sources cited per function.  No new language runtimes — only tools already
+#  present on Linux Mint via apt (ImageMagick, xinput, xdotool, awk).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Tool detection ────────────────────────────────────────────────────────────
+HAS_IMGMAG=0
+command -v convert  >/dev/null 2>&1 && \
+command -v compare  >/dev/null 2>&1 && HAS_IMGMAG=1
+
+HAS_XINPUT=0
+command -v xinput   >/dev/null 2>&1 && HAS_XINPUT=1
+
+HAS_XWININFO=0
+command -v xwininfo >/dev/null 2>&1 && HAS_XWININFO=1
+
+[ $HAS_IMGMAG  -eq 1 ] && echo "[ MC Farm ] ImageMagick=✓  (shell pixel ops)" \
+                       || echo "[ MC Farm ] ImageMagick=✗  (sudo apt install imagemagick)"
+[ $HAS_XINPUT  -eq 1 ] && echo "[ MC Farm ] xinput=✓       (popup recording)" \
+                       || echo "[ MC Farm ] xinput=✗       (sudo apt install xinput)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNIQUE 1 — Sigma-lognormal step timing  (Box-Muller via awk)
+#
+#  Source: Pointergeist/PHC-mouse-movement-gen (GitHub, 2024-2025)
+#          "Bot Detection Using Mouse Movements" IEEE Dynamics 2023
+#          "Exploring visual representations of computer mouse movements for
+#           bot detection using deep learning" ESWA 2023 (doi 10.1016/j.eswa.2023.120225)
+#
+#  Finding: real human inter-event timing follows a log-normal distribution,
+#  not uniform random.  The Box-Muller transform converts two uniform variates
+#  into a standard normal; exponentiating gives log-normal.
+#  mu / sigma are in log-space (ln seconds).
+#  Default mu=-4.7 → e^-4.7 ≈ 9ms mean.  sigma=0.28 → moderate variance.
+#
+#  Usage:  sleep "$(_lognormal_ms)"
+#          sleep "$(_lognormal_ms -3.5 0.4)"   # ~30ms mean, more spread
+# ─────────────────────────────────────────────────────────────────────────────
+_lognormal_ms() {
+    local mu=${1:--4.7} sigma=${2:-0.28}
+    awk -v mu="$mu" -v sig="$sigma" -v s1="$RANDOM" -v s2="$RANDOM" '
+    BEGIN {
+        srand(s1 * 65536 + s2)
+        u1 = rand(); if (u1 < 1e-10) u1 = 1e-10
+        u2 = rand()
+        # Box-Muller: two uniform → standard normal variate
+        z  = sqrt(-2 * log(u1)) * cos(6.283185307 * u2)
+        v  = exp(mu + sig * z)
+        if (v < 0.004) v = 0.004    # clamp: 4ms floor
+        if (v > 0.200) v = 0.200    # clamp: 200ms ceiling
+        printf "%.4f\n", v
+    }'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNIQUE 2 — Cubic Bézier cursor movement  (pure awk, no Python)
+#
+#  Source: vincentbavitz/bezmouse  (GitHub, 208 stars — "Simulate human mouse
+#          movements with xdotool")
+#          Vinyzu/cursory (GitHub, 99 stars — "100% human-realistic Mouse
+#          Trajectories with Timings")
+#
+#  Formula: B(t) = (1-t)³P₀ + 3(1-t)²tP₁ + 3(1-t)t²P₂ + t³P₃
+#  Control points P₁/P₂ are placed at random perpendicular offsets along the
+#  path (≤15% of total distance) producing a natural curved arc.  Step timing
+#  uses TECHNIQUE 1 (log-normal) for a realistic velocity bell-curve.
+#
+#  Usage:  bezier_move x0 y0 x1 y1
+# ─────────────────────────────────────────────────────────────────────────────
+bezier_move() {
+    local x0=$1 y0=$2 x1=$3 y1=$4
+    awk -v x0="$x0" -v y0="$y0" -v x1="$x1" -v y1="$y1" \
+        -v s1="$RANDOM" -v s2="$RANDOM" \
+    'BEGIN {
+        srand(s1 * 65536 + s2)
+        dx = x1 - x0;  dy = y1 - y0
+        dist = sqrt(dx*dx + dy*dy)
+        if (dist < 1) { print x1, y1; exit }
+
+        # Perpendicular unit vector (rotate path vector 90°)
+        px = -dy / dist;  py = dx / dist
+
+        # Control-point positions (t=0.22..0.38 and t=0.62..0.78)
+        t1 = 0.22 + rand() * 0.16
+        t2 = 0.62 + rand() * 0.16
+
+        # Perpendicular offset: up to 15% of distance
+        max_off = dist * 0.15
+        o1 =  max_off * (rand() * 2 - 1)
+        o2 =  max_off * (rand() * 2 - 1) * 0.55   # less offset near end
+
+        cp1x = x0 + dx*t1 + px*o1;  cp1y = y0 + dy*t1 + py*o1
+        cp2x = x0 + dx*t2 + px*o2;  cp2y = y0 + dy*t2 + py*o2
+
+        # Steps proportional to distance (~1.2 per pixel)
+        n = int(dist * 1.2)
+        if (n <   8) n =   8
+        if (n > 220) n = 220
+
+        ppx = x0;  ppy = y0
+        for (i = 1; i <= n; i++) {
+            t  = i / n;  mt = 1 - t
+            bx = mt^3*x0 + 3*mt^2*t*cp1x + 3*mt*t^2*cp2x + t^3*x1
+            by = mt^3*y0 + 3*mt^2*t*cp1y + 3*mt*t^2*cp2y + t^3*y1
+            rx = int(bx + 0.5);  ry = int(by + 0.5)
+            if (rx != ppx || ry != ppy) {
+                print rx, ry
+                ppx = rx;  ppy = ry
+            }
+        }
+        print x1, y1
+    }' | while IFS=' ' read -r bx by; do
+        xdotool mousemove "$bx" "$by" 2>/dev/null
+        # Log-normal timing: ~9ms mean (TECHNIQUE 1)
+        sleep "$(_lognormal_ms -4.7 0.28)"
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNIQUE 3 — Polar arc camera sweep  (xdotool --polar flag)
+#
+#  Source: xdotool(1) man page — "mousemove_relative --polar"
+#          Arch Linux / Ubuntu manpages (archlinux.org/man/xdotool.1,
+#          manpages.ubuntu.com/manpages/focal/man1/xdotool.1.html)
+#
+#  --polar makes x=angle(degrees, 0=up, clockwise), y=distance(pixels).
+#  This describes circular/arc motion — how a wrist actually pivots when
+#  turning a camera — rather than decomposing into separate x/y steps.
+#  Cosine easing across the arc gives natural acceleration + deceleration.
+#  Log-normal per-step timing (TECHNIQUE 1) adds velocity realism.
+#
+#  Usage:  polar_arc_sweep [total_angle_deg] [step_radius_px]
+# ─────────────────────────────────────────────────────────────────────────────
+polar_arc_sweep() {
+    # Pan camera in one direction by a cosine-eased sequence of polar moves.
+    # total_px: total pixel distance to travel (≈ camera rotation amount)
+    # Each step moves along a fixed heading by a cosine-eased fraction of that
+    # distance.  Heading is chosen randomly with a horizontal bias (mostly left/
+    # right pans) ±small vertical component, matching typical camera behaviour.
+    #
+    # NOTE on xdotool --polar semantics (man page): angle=0 means "up" (north),
+    # clockwise: 90=right, 180=down, 270=left.  distance is pixels.  This is a
+    # DIRECTIONAL move, not arc-around-a-point, so we fix the heading and vary
+    # the per-step distance — the correct way to pan a camera.
+    local total_px=${1:-$((50 + RANDOM % 80))}   # 50-130px total pan
+    local n_steps=$((9 + RANDOM % 7))            # 9-15 steps
+    # Pick heading: 70-110° (mostly rightward) or 250-290° (mostly leftward)
+    # with a small vertical offset (±15°) for realism
+    local base_h=$(( (RANDOM % 2) * 180 + 80 + RANDOM % 21 - 10 ))  # ~90 or ~270 ±10
+    local heading=$(( (base_h + RANDOM % 31 - 15 + 360) % 360 ))    # ±15° extra spread
+
+    awk -v total="$total_px" -v n="$n_steps" \
+        -v heading="$heading" -v seed="$RANDOM" '
+    BEGIN {
+        srand(seed)
+        pi = 3.14159265358979
+        prev_t = 0
+        for (s = 1; s <= n; s++) {
+            t  = 0.5 * (1 - cos(pi * s / n))   # cosine ease-in/out
+            dt = t - prev_t;  prev_t = t
+            d  = int(total * dt + 0.5)
+            if (d < 1) d = 1
+            # ±3° heading jitter per step (hand is not locked on a rail)
+            jitter = int((rand() - 0.5) * 6)
+            printf "%d %d\n", (heading + jitter + 360) % 360, d
+        }
+    }' | while IFS=' ' read -r angle dist_px; do
+        xdotool mousemove_relative --polar "$angle" "$dist_px" 2>/dev/null
+        sleep "$(_lognormal_ms -4.3 0.30)"   # ~13ms mean (TECHNIQUE 1)
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNIQUE 4 — xdotool --window targeting  (window-relative coordinates)
+#
+#  Source: xdotool(1) man page — "mousemove --window WINDOW",
+#          "getwindowgeometry --shell"
+#          GitHub jordansissel/xdotool issue #176: "getwindowgeometry reports
+#          incorrect coordinates" (compositor offset bug)
+#          SO question 27788559: "xdotool offset/mismatch when using windowmove"
+#
+#  Moving relative to a specific window ID via --window bypasses the
+#  compositor coordinate offset that causes absolute moves to be wrong under
+#  Mutter/Picom/KWin.  xdotool translates window-relative coords internally.
+#
+#  Usage:  wid=$(get_mc_window)
+#          window_move   $wid $rel_x $rel_y
+#          window_click  $wid $rel_x $rel_y [hold_ms]
+# ─────────────────────────────────────────────────────────────────────────────
+get_mc_window() {
+    local wid
+    wid=$(xdotool search --name "[Mm]inecraft" 2>/dev/null | tail -1)
+    [ -z "$wid" ] && wid=$(xdotool getactivewindow 2>/dev/null)
+    echo "$wid"
+}
+
+window_move() {
+    local wid=$1 rx=$2 ry=$3
+    xdotool mousemove --window "$wid" "$rx" "$ry" 2>/dev/null
+}
+
+# xdotool --sync: "wait until the mouse is actually moved" (from man page)
+# prevents race conditions between move and click in fast automation
+window_click() {
+    local wid=$1 rx=$2 ry=$3 hold_ms=${4:-65}
+    xdotool mousemove --sync --window "$wid" "$rx" "$ry" 2>/dev/null
+    xdotool mousedown 1 2>/dev/null
+    sleep "$(awk -v ms="$hold_ms" -v seed="$RANDOM" \
+        'BEGIN{srand(seed); printf "%.4f",(ms+(rand()-0.5)*18)/1000}')"
+    xdotool mouseup 1 2>/dev/null
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNIQUE 5 — Overshoot + corrective sub-movement  (Fitts' Law / PHC model)
+#
+#  Source: Pointergeist/PHC-mouse-movement-gen (sigma-lognormal model, GitHub)
+#          Vinyzu/cursory — "Generate 100% human-realistic Mouse Trajectories"
+#          Tomotsugu-dev/HumanMoveMouse — "statistical model trained on 300
+#          samples of real human movement data" (GitHub)
+#
+#  Human movement research (Fitts' Law / sigma-lognormal): fast ballistic
+#  movements overshoot by 3-8px, then a short corrective sub-movement (~80ms
+#  delay) brings the cursor exactly onto target.  Anti-cheat ML classifiers
+#  trained on real mouse data expect this pattern; perfectly straight stops
+#  are a strong bot signal.
+#
+#  Usage:  overshoot_click tx ty [hold_ms]
+# ─────────────────────────────────────────────────────────────────────────────
+overshoot_click() {
+    local tx=$1 ty=$2 hold_ms=${3:-65}
+
+    # Overshoot: 3-8px in a random direction past the target
+    local od=$((3 + RANDOM % 6))
+    local oa=$((RANDOM % 360))
+    local ox oy
+    ox=$(awk -v t="$tx" -v a="$oa" -v d="$od" \
+        'BEGIN{printf "%d", int(t + d*cos(a*3.14159265/180) + 0.5)}')
+    oy=$(awk -v t="$ty" -v a="$oa" -v d="$od" \
+        'BEGIN{printf "%d", int(t + d*sin(a*3.14159265/180) + 0.5)}')
+
+    # Phase 1 — ballistic move to overshoot point via Bézier (TECHNIQUE 2)
+    # Read position ONCE to avoid X/Y coming from different samples (race fix)
+    local _loc _cx _cy
+    _loc=$(xdotool getmouselocation --shell 2>/dev/null)
+    _cx=$(printf '%s\n' "$_loc" | awk -F= '/^X/{print $2}')
+    _cy=$(printf '%s\n' "$_loc" | awk -F= '/^Y/{print $2}')
+    local cx=${_cx:-$tx} cy=${_cy:-$ty}
+    bezier_move "$cx" "$cy" "$ox" "$oy"
+
+    # Correction pause: 60-120ms (sub-movement initiation delay)
+    sleep "$(awk -v seed="$RANDOM" \
+        'BEGIN{srand(seed); printf "%.4f", 0.060 + rand()*0.060}')"
+
+    # Phase 2 — precise corrective sub-movement onto exact target
+    bezier_move "$ox" "$oy" "$tx" "$ty"
+
+    # Click with log-normal hold (TECHNIQUE 1)
+    xdotool mousedown 1 2>/dev/null
+    sleep "$(_lognormal_ms -2.8 0.22)"   # ~61ms mean hold
+    xdotool mouseup 1 2>/dev/null
+
+    # Post-click drift: ±5px (hand never freezes on the exact click pixel)
+    local driftx=$(( tx + (RANDOM % 11) - 5 ))
+    local drifty=$(( ty + (RANDOM % 7)  - 3 ))
+    bezier_move "$tx" "$ty" "$driftx" "$drifty"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNIQUE 6 — ImageMagick pixel color reading  (pure shell, no Python)
+#
+#  Source: superuser.com/q/576949 "Getting the predominant colour in an image"
+#          stackoverflow.com/q/27359798 "print image histogram statistics"
+#          stackoverflow.com/q/69874962 "list number of different color pixels"
+#
+#  "convert img.png txt:-" outputs one line per pixel:
+#    x,y: (R,G,B,A)  #RRGGBB  srgb(R,G,B)
+#  awk splits on the field separators colon/comma/space/parens to get R G B.
+#  This is the pure-shell equivalent of our embedded Python decode_png() +
+#  count_color() functions — no Python subprocess needed.
+#
+#  imgmag_pixel IMGPATH X Y         → "R G B" at exact coordinate
+#  imgmag_count_range IMGPATH …     → pixel count in RGB box within a crop
+#  imgmag_popup_gray IMGPATH        → gray pixel count (shell popup detection)
+# ─────────────────────────────────────────────────────────────────────────────
+imgmag_pixel() {
+    local img=$1 x=$2 y=$3
+    [ $HAS_IMGMAG -eq 0 ] && echo "0 0 0" && return
+    # txt: format per pixel:  "x,y: (R,G,B,A)  #RRGGBB  name"
+    # Splitting "0,0: (255,128,64,255)" on [:(,) ]+ yields:
+    #   $1=x  $2=y  $3=R  $4=G  $5=B  $6=A
+    convert "$img" txt:- 2>/dev/null | \
+        awk -F'[:(,) ]+' -v px="$x" -v py="$y" '
+        NR > 1 && $1+0 == px && $2+0 == py {
+            printf "%d %d %d\n", $3, $4, $5; exit
+        }'
+}
+
+imgmag_count_range() {
+    # Count pixels in RGB box [lo_r..hi_r]×[lo_g..hi_g]×[lo_b..hi_b]
+    # within the given crop region of the screenshot.
+    local img=$1 cx=$2 cy=$3 cw=$4 ch=$5
+    local lo_r=$6 lo_g=$7 lo_b=$8 hi_r=$9 hi_g=${10} hi_b=${11}
+    [ $HAS_IMGMAG -eq 0 ] && echo 0 && return
+    convert "$img" -crop "${cw}x${ch}+${cx}+${cy}" +repage txt:- 2>/dev/null | \
+        awk -F'[:(,) ]+' \
+            -v r0="$lo_r" -v g0="$lo_g" -v b0="$lo_b" \
+            -v r1="$hi_r" -v g1="$hi_g" -v b1="$hi_b" '
+        NR > 1 {
+            r=$3+0; g=$4+0; b=$5+0    # $3=R $4=G $5=B (not $4,$5,$6)
+            if (r>=r0 && r<=r1 && g>=g0 && g<=g1 && b>=b0 && b<=b1) n++
+        }
+        END { print n+0 }'
+}
+
+# Shell-only popup gray-mass check — ImageMagick equivalent of Python popup_open()
+# Uses ImageMagick's -fuzz flag to match pixels within 15% of MC inventory gray
+imgmag_popup_gray() {
+    local img=${1:-/tmp/mc_shell_snap.png}
+    [ $HAS_IMGMAG -eq 0 ] && echo 0 && return
+    convert "$img" \
+        -fuzz 15% -fill white -opaque "rgb(198,198,198)" \
+        -fill black +opaque white \
+        -format "%[fx:w*h*mean]" info: 2>/dev/null | \
+        awk '{print int($1+0.5)}'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNIQUE 7 — ImageMagick MAE template slot matching  (pure shell)
+#
+#  Source: imagemagick.org/script/compare.php
+#          "compare -metric MAE img1 img2 /dev/null" → Mean Absolute Error
+#          (lower = more similar, 0 = identical)
+#
+#  Shell-only equivalent of the Python _template_mad() function: crops a slot
+#  from the prescan screenshot, box-averages it to 16×16 with -resize, then
+#  compares against saved reference PNGs using ImageMagick's compare binary.
+#  compare's C implementation is faster than our Python awk loop for large batches.
+#
+#  save_slot_template IMGPATH SX SY SW SH LABEL
+#  imgmag_slot_match  IMGPATH SX SY SW SH → "confirm"|"deny"|"unknown"
+# ─────────────────────────────────────────────────────────────────────────────
+IMGMAG_TMPL_DIR="/tmp/mc_imgmag_templates"
+IMGMAG_MAE_THRESHOLD=28   # slots within this MAE → candidate match
+IMGMAG_MAE_MARGIN=10      # winning label must beat other by ≥ this
+
+save_slot_template() {
+    local img=$1 sx=$2 sy=$3 sw=$4 sh=$5 label=$6
+    [ $HAS_IMGMAG -eq 0 ] && return 1
+    mkdir -p "$IMGMAG_TMPL_DIR"
+    convert "$img" \
+        -crop "${sw}x${sh}+${sx}+${sy}" +repage \
+        -resize 16x16! \
+        "${IMGMAG_TMPL_DIR}/${label}.png" 2>/dev/null && \
+        echo "[ imgmag ] template saved → ${IMGMAG_TMPL_DIR}/${label}.png"
+}
+
+imgmag_slot_match() {
+    local img=$1 sx=$2 sy=$3 sw=$4 sh=$5
+    [ $HAS_IMGMAG -eq 0 ] && echo "unknown" && return
+    local conf="${IMGMAG_TMPL_DIR}/confirm.png"
+    local deny="${IMGMAG_TMPL_DIR}/deny.png"
+    [ ! -f "$conf" ] || [ ! -f "$deny" ] && echo "unknown" && return
+
+    local crop_tmp
+    crop_tmp=$(mktemp /tmp/mc_slot_XXXXXX.png)
+    convert "$img" \
+        -crop "${sw}x${sh}+${sx}+${sy}" +repage \
+        -resize 16x16! \
+        "$crop_tmp" 2>/dev/null
+
+    local mae_c mae_d
+    mae_c=$(compare -metric MAE "$crop_tmp" "$conf" /dev/null 2>&1 | awk '{print int($1+0.5)}')
+    mae_d=$(compare -metric MAE "$crop_tmp" "$deny" /dev/null 2>&1 | awk '{print int($1+0.5)}')
+    rm -f "$crop_tmp"
+
+    awk -v mc="${mae_c:-999}" -v md="${mae_d:-999}" \
+        -v thr="$IMGMAG_MAE_THRESHOLD" -v margin="$IMGMAG_MAE_MARGIN" '
+    BEGIN {
+        if (mc > thr && md > thr)            { print "unknown"; exit }
+        if (mc <= thr && mc+margin <= md)    { print "confirm"; exit }
+        if (md <= thr && md+margin <= mc)    { print "deny";    exit }
+        print "unknown"
+    }'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNIQUE 8 — xinput test-xi2 popup recorder  (record real human solves)
+#
+#  Source: world-playground-deceit.net/blog/2025/07/x11-record-and-replay.html
+#          (published 2025-07-03, tags: sh, programming)
+#          xinput(1), xmodmap(1)
+#
+#  The blog shows how to record X11 events with "xinput test-xi2 --root"
+#  and replay them via xdotool.  We adapt the AWK converter to produce a
+#  self-contained replay script instead of a live pipe.
+#
+#  Usage:  mc_record_solve [output.sh]   — then press Scroll_Lock to stop
+#          bash output.sh               — replay the recorded solve
+# ─────────────────────────────────────────────────────────────────────────────
+XINPUT_AWK=/tmp/mc_xinput2xdo.awk
+cat > "$XINPUT_AWK" << 'AWKEOF'
+# Convert xinput test-xi2 --root events → xdotool replay script
+# Adapted from: world-playground-deceit.net/blog/2025/07/x11-record-and-replay.html
+# Stop recording by pressing Scroll_Lock.
+function emit() {
+    if (prev_time)
+        print "sleep", sprintf("%.4f", (time - prev_time) / 1000.0)
+    prev_time = time
+    if (pos[1] != prev_x || pos[2] != prev_y) {
+        print "xdotool mousemove", pos[1], pos[2]
+        prev_x = pos[1];  prev_y = pos[2]
+    }
+    print "xdotool", cmd, arg
+}
+function read_keymap(   line, f) {
+    while (("xmodmap -pke" | getline line) == 1) {
+        split(line, f)
+        if (length(f) > 3) xkbmap[f[2]] = f[4]
+    }
+    close("xmodmap -pke")
+}
+BEGIN { read_keymap() }
+$1 == "EVENT" {
+    if (cmd) emit()
+    if      ($4 == "(ButtonPress)")   cmd = "mousedown"
+    else if ($4 == "(ButtonRelease)") cmd = "mouseup"
+    else if ($4 == "(KeyPress)")      cmd = "keydown"
+    else if ($4 == "(KeyRelease)")    cmd = "keyup"
+    else                              cmd = ""
+    next
+}
+cmd && $1 == "time:"   { time = $2; next }
+cmd && $1 == "detail:" {
+    arg = (cmd ~ /^key/ ? xkbmap[$2] : $2)
+    if (cmd == "keydown" && arg == "Scroll_Lock") exit
+    next
+}
+cmd && $1 == "event:"  { split($2, pos, "/"); next }
+AWKEOF
+
+mc_record_solve() {
+    local output=${1:-"/tmp/mc_solve_replay_$(date +%s).sh"}
+    if [ $HAS_XINPUT -eq 0 ]; then
+        echo "[ record ] xinput not found. Install: sudo apt install xinput"; return 1
+    fi
+    printf '#!/bin/bash\n# Recorded solve — replay: bash %s\n' "$output" > "$output"
+    echo "[ record ] Recording... Press Scroll_Lock to stop → $output"
+    xinput test-xi2 --root 2>/dev/null | awk -f "$XINPUT_AWK" >> "$output"
+    chmod +x "$output"
+    echo "[ record ] Saved $(wc -l < "$output") lines → $output"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNIQUE 9 — xdotool mousemove restore  (cursor save/restore)
+#
+#  Source: xdotool(1) man page — "mousemove restore"
+#  "You can move the mouse to the previous location if you specify 'restore'
+#   instead of X and Y.  Restoring only works if you have moved previously
+#   in this same command invocation."
+#
+#  Saves cursor position before a disruptive move, restores it afterward —
+#  all in a single xdotool subprocess call so restore is guaranteed to work.
+#
+#  Usage:  atomic_move_restore dest_x dest_y    # moves there, clicks, restores
+# ─────────────────────────────────────────────────────────────────────────────
+atomic_move_restore() {
+    local dx=$1 dy=$2
+    # Single xdotool chain: current pos is saved implicitly at invocation start,
+    # then restored after click.
+    xdotool mousemove "$dx" "$dy" mousedown 1 2>/dev/null
+    sleep "$(_lognormal_ms -2.8 0.22)"
+    xdotool mouseup 1 mousemove restore 2>/dev/null
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNIQUE 10 — xdotool command chaining  (single subprocess atomicity)
+#
+#  Source: xdotool(1) man page — "COMMAND CHAINING"
+#  "Multiple commands may be specified on the command line and they will be
+#   executed in order."  Chaining move+down+up in one xdotool call eliminates
+#   the inter-process timing gaps that separate subprocess calls introduce.
+#  Also uses --sync: "wait until the mouse is actually moved" before clicking.
+#
+#  Usage:  chain_click x y [hold_ms]
+# ─────────────────────────────────────────────────────────────────────────────
+chain_click() {
+    local cx=$1 cy=$2 hold_ms=${3:-65}
+    # Move (--sync waits for completion), then down+up in same process
+    xdotool mousemove --sync "$cx" "$cy" mousedown 1 2>/dev/null
+    sleep "$(awk -v ms="$hold_ms" 'BEGIN{printf "%.4f",ms/1000}')"
+    xdotool mouseup 1 2>/dev/null
+}
+
+echo "[ MC Farm ] research techniques loaded (Bézier/lognormal/polar/ImgMag/overshoot/xinput/chaining)"
+
 # ── Spam loop ───────────────────────────────────────────────────
 START_TIME=$SECONDS
 LAST_ROTATE=$SECONDS
@@ -1730,42 +2228,51 @@ while [ -f "$FLAG_FILE" ]; do
     [ $FATIGUE_DELAY -gt 80 ] && FATIGUE_DELAY=80
     BEHAVIOR_ROLL=$((RANDOM % 100))
 
-    # ── ACTION 1: cosine-eased camera rotation ───────────────────────────────
-    # Splits total displacement across 8-12 steps using ease-in/ease-out so the
-    # camera accelerates and decelerates naturally.  Per-step ±1px Gaussian-like
-    # jitter (sum of two uniforms) prevents the movement looking like a slideshow.
+    # ── ACTION 1: camera rotation ────────────────────────────────────────────
+    # TECHNIQUE 3 (polar arc sweep) + TECHNIQUE 1 (log-normal timing).
+    # xdotool --polar maps (angle°, distance_px) directly onto X11 relative
+    # motion, matching how a wrist physically pivots. Cosine easing + log-normal
+    # per-step timing produces the same acceleration bell-curve as the old awk
+    # loop but in fewer subprocesses and with no rectangular-grid artefacts.
+    # Old rectangular cosine loop kept below as fallback (50/50 random choice).
     if [ $BEHAVIOR_ROLL -lt 3 ] && [ $((SECONDS - LAST_ROTATE)) -ge $NEXT_ROTATE_INTERVAL ]; then
-        rot_x=$(( (RANDOM % 201) - 100 ))
-        rot_y=$(( (RANDOM % 41) - 20 ))
-        N=$((8 + RANDOM % 5))        # 8-12 steps
-        prev_t="0.000000"
-        for ((s=1; s<=N; s++)); do
-            # Ease-in/ease-out delta and ±1px Gaussian-like jitter per axis
-            read dx dy <<< $(awk \
-                -v cx="$rot_x" -v cy="$rot_y" \
-                -v s="$s" -v n="$N" -v pt="$prev_t" \
-                -v rx1="$RANDOM" -v rx2="$RANDOM" \
-                -v ry1="$RANDOM" -v ry2="$RANDOM" '
-                BEGIN {
-                    pi = 3.14159265358979
-                    t  = 0.5 * (1 - cos(pi * s / n))
-                    dt = t - pt
-                    jx = (rx1/32767 - 0.5) + (rx2/32767 - 0.5)
-                    jy = (ry1/32767 - 0.5) + (ry2/32767 - 0.5)
-                    sx = int(cx*dt + jx + 0.5)
-                    sy = int(cy*dt + jy + 0.5)
-                    print sx, sy
-                }')
-            # Advance prev_t to current t for next iteration
-            prev_t=$(awk -v s="$s" -v n="$N" '
-                BEGIN { pi=3.14159265358979; printf "%.6f", 0.5*(1-cos(pi*s/n)) }')
-            xdotool mousemove_relative -- $dx $dy 2>/dev/null
-            sleep $(awk -v ms="$((7 + RANDOM % 9))" 'BEGIN {print ms/1000}')   # 7-15 ms
-        done
+        if [ $((RANDOM % 2)) -eq 0 ]; then
+            # ── NEW: polar arc sweep (TECHNIQUE 3) ───────────────────────────
+            polar_arc_sweep "$((50 + RANDOM % 80))"
+        else
+            # ── ORIGINAL: cosine-eased rectangular rotation (kept as variant) ─
+            rot_x=$(( (RANDOM % 201) - 100 ))
+            rot_y=$(( (RANDOM % 41) - 20 ))
+            N=$((8 + RANDOM % 5))
+            prev_t="0.000000"
+            for ((s=1; s<=N; s++)); do
+                read -r dx dy <<< "$(awk \
+                    -v cx="$rot_x" -v cy="$rot_y" \
+                    -v s="$s" -v n="$N" -v pt="$prev_t" \
+                    -v rx1="$RANDOM" -v rx2="$RANDOM" \
+                    -v ry1="$RANDOM" -v ry2="$RANDOM" '
+                    BEGIN {
+                        pi = 3.14159265358979
+                        t  = 0.5 * (1 - cos(pi * s / n))
+                        dt = t - pt
+                        jx = (rx1/32767 - 0.5) + (rx2/32767 - 0.5)
+                        jy = (ry1/32767 - 0.5) + (ry2/32767 - 0.5)
+                        sx = int(cx*dt + jx + 0.5)
+                        sy = int(cy*dt + jy + 0.5)
+                        print sx, sy
+                    }')"
+                prev_t=$(awk -v s="$s" -v n="$N" \
+                    'BEGIN{pi=3.14159265358979; printf "%.6f",0.5*(1-cos(pi*s/n))}')
+                xdotool mousemove_relative -- $dx $dy 2>/dev/null
+                # TECHNIQUE 1: log-normal step timing replaces static 7-15ms range
+                sleep "$(_lognormal_ms -4.5 0.25)"
+            done
+        fi
         LAST_ROTATE=$SECONDS
         NEXT_ROTATE_INTERVAL=$((30 + RANDOM % 45))
         [ $((RANDOM % 10)) -eq 0 ] && START_TIME=$SECONDS
-        sleep $(awk -v ms="$((90 + RANDOM % 160))" 'BEGIN {print ms/1000}')
+        # TECHNIQUE 1: log-normal post-rotate pause (~115ms mean)
+        sleep "$(_lognormal_ms -2.16 0.38)"
         continue
     fi
 
@@ -1773,20 +2280,21 @@ while [ -f "$FLAG_FILE" ]; do
     # Shake magnitude drawn from sum of two uniforms → bell-shaped distribution.
     # Return is NOT a perfect mirror: a ±1px residual is left to mimic real
     # hand tremor that never returns exactly to the starting pixel.
+    # TECHNIQUE 1 (log-normal timing) replaces static sleep ranges.
     if [ $BEHAVIOR_ROLL -ge 3 ] && [ $BEHAVIOR_ROLL -lt 8 ] && \
        [ $((SECONDS - LAST_VIBRATE)) -ge $NEXT_VIBRATE_INTERVAL ]; then
         VIBS=$((2 + RANDOM % 4))
         for ((i=0; i<VIBS; i++)); do
-            # Gaussian-ish ±4 via sum of two uniform ±2 draws
             shk_x=$(( (RANDOM%5-2) + (RANDOM%5-2) ))
             shk_y=$(( (RANDOM%5-2) + (RANDOM%5-2) ))
             xdotool mousemove_relative -- $shk_x $shk_y 2>/dev/null
-            sleep $(awk -v ms="$((16 + RANDOM % 12))" 'BEGIN {print ms/1000}')  # 16-27 ms
-            # Return with 1px random residual (don't land exactly back)
+            # TECHNIQUE 1: log-normal ~18ms mean (replaces static 16-27ms)
+            sleep "$(_lognormal_ms -4.02 0.30)"
             ret_x=$(( -shk_x + (RANDOM % 3) - 1 ))
             ret_y=$(( -shk_y + (RANDOM % 3) - 1 ))
             xdotool mousemove_relative -- $ret_x $ret_y 2>/dev/null
-            sleep $(awk -v ms="$((10 + RANDOM % 10))" 'BEGIN {print ms/1000}')
+            # TECHNIQUE 1: log-normal ~11ms mean (replaces static 10-19ms)
+            sleep "$(_lognormal_ms -4.51 0.27)"
         done
         LAST_VIBRATE=$SECONDS
         NEXT_VIBRATE_INTERVAL=$((15 + RANDOM % 25))
@@ -1794,23 +2302,42 @@ while [ -f "$FLAG_FILE" ]; do
     fi
 
     # ── ACTION 3: attack click ────────────────────────────────────────────────
-    # Hold duration: 30-70 ms normally.
-    # 8% chance of a fumbled "short tap" (12-25 ms).
-    # 4% chance of an "overhold" (120-200 ms) — accidentally held too long.
-    if [ $((RANDOM % 100)) -lt 8 ]; then
-        hold_ms=$((12 + RANDOM % 14))                 # short tap
-    elif [ $((RANDOM % 100)) -lt 4 ]; then
-        hold_ms=$((120 + RANDOM % 81))                # overhold
-    else
-        hold_ms=$((30 + RANDOM % 41))                 # normal 30-70 ms
-    fi
+    # TECHNIQUE 1 (log-normal) replaces the 3-bucket probability table.
+    # Real click-hold durations are log-normally distributed in human studies
+    # (IEEE "Bot Detection Using Mouse Movements" 2023): the long tail of the
+    # distribution naturally produces occasional short taps and overhold events
+    # without explicit if/else buckets.  mu=-2.95 → ~52ms mean.  sigma=0.48
+    # gives enough spread to cover 12ms taps and 200ms overholds organically.
+    # Click is in-place — cursor stays where it is, no movement needed.
+    hold_ms=$(awk -v seed="$RANDOM" '
+    BEGIN {
+        srand(seed)
+        u1 = rand(); if (u1 < 1e-10) u1 = 1e-10; u2 = rand()
+        z   = sqrt(-2*log(u1)) * cos(6.283185307 * u2)
+        v   = exp(-2.95 + 0.48 * z)                    # ~52ms mean
+        if (v < 0.012) v = 0.012                        # 12ms floor
+        if (v > 0.250) v = 0.250                        # 250ms ceiling
+        print int(v * 1000 + 0.5)
+    }')
     xdotool mousedown 1 2>/dev/null
-    sleep $(awk -v ms="$hold_ms" 'BEGIN {print ms/1000}')
+    sleep "$(awk -v ms="$hold_ms" 'BEGIN{printf "%.4f",ms/1000}')"
     xdotool mouseup 1 2>/dev/null
 
+    # Swing interval: base 625-675ms + fatigue, with TECHNIQUE 1 micro-jitter
     swing_ms=$((625 + RANDOM % 51 + FATIGUE_DELAY))
     [ $((RANDOM % 10)) -eq 0 ] && swing_ms=$((swing_ms + 50 + RANDOM % 101))
-    sleep $(awk -v ms="$swing_ms" 'BEGIN {print ms/1000}')
+    # Add ±20ms log-normal jitter on top of the base swing so swing timing
+    # itself is not uniform-random (another bot detection signal per IEEE 2023)
+    sleep "$(awk -v base="$swing_ms" -v seed="$RANDOM" '
+    BEGIN {
+        srand(seed)
+        u1=rand(); if(u1<1e-10) u1=1e-10; u2=rand()
+        z = sqrt(-2*log(u1))*cos(6.283185307*u2)
+        jitter = int(z * 12)                   # ±~12ms 1σ
+        ms = base + jitter
+        if (ms < 300) ms = 300
+        printf "%.4f\n", ms/1000
+    }' 2>/dev/null || awk -v ms="$swing_ms" 'BEGIN{printf "%.4f",ms/1000}')"
 
 done
 

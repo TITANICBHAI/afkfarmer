@@ -1,0 +1,1 @@
+- [Research techniques in mc_farm.sh](research-techniques.md) — 10 shell/awk/ImageMagick/xdotool techniques added to bash section; key gotchas documented.
