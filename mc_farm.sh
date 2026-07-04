@@ -2242,8 +2242,29 @@ SH_LOG="/tmp/mc_sh_afk_log.txt"      # backup solver diagnostic log
 SH_POLL_S="0.40"                     # seconds between popup polls
 SH_HOVER_MS=220                      # ms total to wait for tooltip
 SH_SWEEP_TIMEOUT=5                   # seconds before aborting a sweep
-SH_GRAY_THRESH=400                   # gray-pixel count → popup open
-SH_TIP_THRESH=15                     # dark-purple px count → tooltip visible
+#
+# ── Calibrated from attached_assets/ screenshots (1366×694, JartexNetwork) ──
+#
+# SH_POPUP_MIN_W / SH_POPUP_MIN_H:
+#   The AFK popup bbox is consistently 346x328 on this screen.
+#   A bare hotbar strip is ~1366x45 — PH never reaches 200 without a popup.
+#   Require ≥200×200 so a thin UI strip never false-triggers.
+SH_POPUP_MIN_W=200
+SH_POPUP_MIN_H=200
+#
+# SH_TIP_THRESH — dark-purple tooltip background pixel count threshold.
+#   Measured from all 68 screenshots:
+#     Tooltip VISIBLE  → 21,045 – 45,084 dark-purple px  (r≤42, g≤10, b≤42)
+#     Tooltip ABSENT   →      0 –    383 dark-purple px
+#   Gap is enormous.  2000 sits safely in the middle.
+SH_TIP_THRESH=2000
+#
+# SH_GRAY_THRESH — legacy value kept only for documentation.
+#   Full-screen gray count is NOT a reliable popup detector:
+#   popup-open images have 45k–86k gray px AND no-tooltip images have 74k–86k.
+#   The overlap makes 400 (the old threshold) trivially always-true.
+#   sh_popup_open now uses the bbox size check instead.
+SH_GRAY_THRESH=400   # unused by sh_popup_open; kept for reference
 
 _sh_log() {
     local ts; ts=$(date +%H:%M:%S 2>/dev/null || echo "??")
@@ -2268,14 +2289,34 @@ sh_take_snap() {
 
 # ── sh_popup_open ─────────────────────────────────────────────────────────────
 # Returns 0 if the AFK popup appears to be open.
-# Uses imgmag_popup_gray (TECHNIQUE 6 function above): counts pixels in the
-# inventory gray range (100-230, 100-230, 100-230) via ImageMagick txt: format.
-# Threshold 400 mirrors Python popup_open() (same comment in Python src).
+#
+# Strategy: use ImageMagick -trim to find the bounding box of the largest gray
+# region and check that it is at least SH_POPUP_MIN_W × SH_POPUP_MIN_H pixels.
+#
+#   WHY NOT gray pixel count?
+#     Full-screen gray count is unreliable: measured from 68 real screenshots,
+#     both popup-open and normal-game images have 45k–86k gray pixels (overlap).
+#     The old threshold of 400 was always true.
+#
+#   WHY bbox size?
+#     The AFK popup is a compact rectangle (~346×328 on 1366×694).
+#     After -fuzz 15% -opaque the gray region trims to exactly that box.
+#     The Minecraft hotbar is a ~1366×45 thin strip — PH never ≥ 200 without popup.
+#     Caveat: an open player inventory (pressing E) is also a large gray box and
+#     would false-trigger.  The solver is only launched when the AFK popup fires,
+#     not during normal play, so this is acceptable.
+#
 sh_popup_open() {
     [ "$HAS_IMGMAG" -eq 0 ] && return 1
     sh_take_snap "$SH_SNAP"
-    local n; n=$(imgmag_popup_gray "$SH_SNAP")
-    [ "${n:-0}" -gt "$SH_GRAY_THRESH" ]
+    local bbox PW PH
+    bbox=$(convert "$SH_SNAP" \
+        -fuzz 15% -fill white -opaque "rgb(198,198,198)" \
+        -fill black +opaque white \
+        -trim -format "%wx%h" info: 2>/dev/null)
+    PW=$(printf '%s' "$bbox" | awk -F'x' '{print $1+0}')
+    PH=$(printf '%s' "$bbox" | awk -F'x' '{print $2+0}')
+    [ "${PW:-0}" -ge "$SH_POPUP_MIN_W" ] && [ "${PH:-0}" -ge "$SH_POPUP_MIN_H" ]
 }
 
 # ── sh_find_strip ─────────────────────────────────────────────────────────────
@@ -2310,11 +2351,15 @@ sh_find_strip() {
         -trim -format "%wx%h+%X+%Y" info: 2>/dev/null)
     [ -z "$bbox" ] && return 1
 
+    # ImageMagick emits "%wx%h+%X+%Y" where %X/%Y already carry their sign,
+    # so positive offsets produce "346x328++508++180" (double-plus).
+    # -F'[x+]+' (one-or-more) collapses "++" to a single separator so
+    # $3=508 and $4=180 correctly; plain -F'[x+]' leaves an empty $3 (=0).
     local PW PH PX PY
-    PW=$(printf '%s' "$bbox" | awk -F'[x+]' '{print $1+0}')
-    PH=$(printf '%s' "$bbox" | awk -F'[x+]' '{print $2+0}')
-    PX=$(printf '%s' "$bbox" | awk -F'[x+]' '{print $3+0}')
-    PY=$(printf '%s' "$bbox" | awk -F'[x+]' '{print $4+0}')
+    PW=$(printf '%s' "$bbox" | awk -F'[x+]+' '{print $1+0}')
+    PH=$(printf '%s' "$bbox" | awk -F'[x+]+' '{print $2+0}')
+    PX=$(printf '%s' "$bbox" | awk -F'[x+]+' '{print $3+0}')
+    PY=$(printf '%s' "$bbox" | awk -F'[x+]+' '{print $4+0}')
 
     { [ "${PW:-0}" -ge 80 ] && [ "${PH:-0}" -ge 50 ]; } 2>/dev/null || return 1
 
@@ -2479,25 +2524,42 @@ sh_read_tooltip() {
         -fill black +opaque white \
         -trim -format "%wx%h+%X+%Y" info: 2>/dev/null)
 
+    # Same double-plus issue as sh_find_strip: use [x+]+ to collapse "++N" → "N"
     local TW TH TX TY zone_x zone_y zone_w zone_h
-    TW=$(printf '%s' "$tip_bbox" | awk -F'[x+]' '{print $1+0}')
-    TH=$(printf '%s' "$tip_bbox" | awk -F'[x+]' '{print $2+0}')
-    TX=$(printf '%s' "$tip_bbox" | awk -F'[x+]' '{print $3+0}')
-    TY=$(printf '%s' "$tip_bbox" | awk -F'[x+]' '{print $4+0}')
+    TW=$(printf '%s' "$tip_bbox" | awk -F'[x+]+' '{print $1+0}')
+    TH=$(printf '%s' "$tip_bbox" | awk -F'[x+]+' '{print $2+0}')
+    TX=$(printf '%s' "$tip_bbox" | awk -F'[x+]+' '{print $3+0}')
+    TY=$(printf '%s' "$tip_bbox" | awk -F'[x+]+' '{print $4+0}')
 
-    if [ -n "$TW" ] && { [ "$TW" -ge 20 ] 2>/dev/null; }; then
-        # Tooltip found: scan top 25% (title line only, like Python)
+    # ── Determine scan zone ──────────────────────────────────────────────────
+    #
+    # WHY NOT bbox detect via -fuzz -opaque?
+    #   Tested against real screenshots: -fuzz 8% -opaque "rgb(21,5,21)" on a
+    #   1366×694 JartexNetwork screenshot produces a bbox of 1362×690 (nearly
+    #   the entire screen) because the dark Minecraft night-sky / cave pixels
+    #   sit within fuzz range of the tooltip bg color.
+    #
+    # FIX: derive the scan zone from the hover position instead.
+    #   In Minecraft, the tooltip renders ABOVE and slightly right of the cursor.
+    #   For the AFK popup strip (y ≈ 198–508 on 1366×694), hovering any slot
+    #   puts the tooltip fully within the popup box (y 180–508).
+    #   We scan a 260×130 window centered above the hover point — wide enough
+    #   to catch the tooltip at any slot position, narrow enough to exclude the
+    #   game world below/around the popup.
+    #
+    if [ -n "$hover_x" ] && [ -n "$hover_y" ]; then
+        # Primary: hover-relative zone above the cursor (where Minecraft renders tooltip)
+        zone_x=$(( hover_x - 130 )); [ "$zone_x" -lt 0 ] && zone_x=0
+        zone_y=$(( hover_y - 210 )); [ "$zone_y" -lt 0 ] && zone_y=0
+        zone_w=260; zone_h=130
+    elif [ -n "$TW" ] && { [ "$TW" -ge 20 ] && [ "$TW" -lt 1200 ] 2>/dev/null; }; then
+        # Secondary: bbox result is plausible (not full-screen), use top 25%
         local title_h=$(( TH / 4 ))
         [ "$title_h" -lt 6 ] && title_h=6
         zone_x=$TX; zone_y=$TY; zone_w=$TW; zone_h=$title_h
-    elif [ -n "$hover_x" ] && [ -n "$hover_y" ]; then
-        # Fallback: 600×400 region around hover point (avoids game-world FP)
-        zone_x=$(( hover_x - 300 )); [ "$zone_x" -lt 0 ] && zone_x=0
-        zone_y=$(( hover_y - 150 )); [ "$zone_y" -lt 0 ] && zone_y=0
-        zone_w=600; zone_h=400
     else
-        # Last resort: scan everything (may produce false positives)
-        zone_x=0; zone_y=0; zone_w=99999; zone_h=99999
+        # Last resort: center-screen strip (popup is always near screen center)
+        zone_x=300; zone_y=100; zone_w=800; zone_h=400
     fi
 
     # Crop the scan zone once; run all 3 backends in a single awk pass
@@ -2595,8 +2657,18 @@ sh_hover_spiral() {
 
 # ── sh_click_verify ────────────────────────────────────────────────────────────
 # Click at (tx, ty) using overshoot_click (TECHNIQUE 5), then verify the
-# popup closed by checking that the gray-pixel count drops below threshold.
-# Up to 3 retries with 150ms gaps (mirrors Python click_and_verify()).
+# popup closed.  Mirrors Python click_and_verify(): up to 3 retries, 150ms gap.
+#
+# WHY NOT gray pixel count?
+#   After clicking, the popup closes but the farm scene still has 74k–86k gray
+#   pixels (stone, hotbar, etc.).  The old SH_GRAY_THRESH=400 check would
+#   never trigger since even a bare farm scene exceeds 400.
+#
+# FIX: re-use sh_popup_open (bbox size check).
+#   When the popup closes the gray rectangle vanishes → -trim finds only the
+#   hotbar strip (PH ≈ 45) which fails the ≥200 height requirement → sh_popup_open
+#   returns 1 (closed) → we return success.
+#
 sh_click_verify() {
     local tx=$1 ty=$2
 
@@ -2606,14 +2678,13 @@ sh_click_verify() {
     local retries=0
     while [ $retries -lt 3 ]; do
         sleep 0.15
-        sh_take_snap "$SH_SNAP"
-        local n; n=$(imgmag_popup_gray "$SH_SNAP")
-        if [ "${n:-9999}" -lt "$SH_GRAY_THRESH" ]; then
-            _sh_log "  click OK — popup closed (gray_px=$n)"
+        # sh_popup_open takes its own fresh screenshot internally
+        if ! sh_popup_open; then
+            _sh_log "  click OK — popup closed"
             return 0
         fi
         retries=$(( retries + 1 ))
-        _sh_log "  click retry $retries (gray_px=$n, threshold=$SH_GRAY_THRESH)"
+        _sh_log "  click retry $retries — popup still open"
         sleep "$(awk -v s="$RANDOM" 'BEGIN{srand(s);printf"%.3f",0.15+rand()*0.10}')"
     done
     _sh_log "  click FAILED — popup still open after 3 retries"
@@ -2649,9 +2720,7 @@ shell_afk_solver() {
             local wt=$SECONDS
             while [ -f "$FLAG_FILE" ] && [ $(( SECONDS - wt )) -lt 30 ]; do
                 sleep 0.5
-                sh_take_snap "$SH_SNAP"
-                local n; n=$(imgmag_popup_gray "$SH_SNAP")
-                [ "${n:-9999}" -lt "$SH_GRAY_THRESH" ] && break
+                ! sh_popup_open && break   # sh_popup_open takes its own fresh snap
             done
             rm -f "$AFK_LOCK"; continue
         fi
@@ -2737,9 +2806,7 @@ shell_afk_solver() {
             local wt2=$SECONDS
             while [ -f "$FLAG_FILE" ] && [ $(( SECONDS - wt2 )) -lt 30 ]; do
                 sleep 0.5
-                sh_take_snap "$SH_SNAP"
-                local n2; n2=$(imgmag_popup_gray "$SH_SNAP")
-                [ "${n2:-9999}" -lt "$SH_GRAY_THRESH" ] && break
+                ! sh_popup_open && break   # sh_popup_open takes its own fresh snap
             done
         fi
 
