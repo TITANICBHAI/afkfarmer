@@ -2,16 +2,16 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # github_push.sh — sync local files to TITANICBHAI/afkfarmer via GitHub API
 #
-# No git binary, no python3 — uses curl + bash + awk + sed only.
+# No git binary, no python3 — uses curl + bash + awk + sed + sha1sum only.
+# Speed: fetches the entire remote tree in ONE call, skips unchanged files.
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -uo pipefail
-# NOTE: deliberately no -e so grep "no match" exit codes don't kill the script.
 
 OWNER="TITANICBHAI"
 REPO="afkfarmer"
 BRANCH="main"
-API="https://api.github.com/repos/${OWNER}/${REPO}/contents"
+API="https://api.github.com/repos/${OWNER}/${REPO}"
 TOKEN="${GITHUB_PERSONAL_ACCESS_TOKEN:-}"
 
 if [[ -z "$TOKEN" ]]; then
@@ -19,82 +19,60 @@ if [[ -z "$TOKEN" ]]; then
   exit 1
 fi
 
-# ── Extract a JSON string field (handles spaces around colon, multi-line) ────
-# Usage: json_str FIELD <<< "$json"
-json_str() {
-  local field="$1"
-  # Match: "field" ... : ... "value"  (value may have backslash-escaped chars)
-  sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
-    | head -1
+# ── Git blob SHA (same algorithm GitHub uses for file SHAs) ──────────────────
+# sha1("blob <size>\0<content>")
+blob_sha() {
+  local f="$1"
+  local size
+  size=$(wc -c < "$f")
+  { printf "blob %d\0" "$size"; cat "$f"; } | sha1sum | cut -d' ' -f1
 }
 
-# ── Build a JSON PUT body without printf (handles huge strings) ───────────────
-# Writes the body to a temp file to avoid shell arg-length limits.
+# ── Extract a JSON string field ───────────────────────────────────────────────
+json_str() {
+  local field="$1"
+  sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
+}
+
+# ── Build JSON PUT body into a temp file ─────────────────────────────────────
 make_body() {
   local msg="$1" content="$2" sha="$3" branch="$4"
   local tmp; tmp=$(mktemp /tmp/gh_body_XXXXXX.json)
   {
-    printf '{"message":"%s","content":"%s","branch":"%s"' \
-           "$msg" "$content" "$branch"
-    if [[ -n "$sha" ]]; then
-      printf ',"sha":"%s"' "$sha"
-    fi
+    printf '{"message":"%s","content":"%s","branch":"%s"' "$msg" "$content" "$branch"
+    [[ -n "$sha" ]] && printf ',"sha":"%s"' "$sha"
     printf '}'
   } > "$tmp"
   echo "$tmp"
 }
 
-# ── Push a single file ───────────────────────────────────────────────────────
+# ── Push a single file — returns 0 on success, 1 on API error ────────────────
 push_file() {
-  local local_path="$1"
-  local repo_path="$2"
-  local message="$3"
+  local local_path="$1" repo_path="$2" message="$3" remote_sha="$4"
+  local content body_file result errmsg
 
-  if [[ ! -f "$local_path" ]]; then
-    echo "  skip: $local_path not found"
-    return 0
-  fi
-
-  local content
   content=$(base64 -w0 < "$local_path" 2>/dev/null || base64 < "$local_path")
+  body_file=$(make_body "$message" "$content" "$remote_sha" "$BRANCH")
 
-  # Fetch current SHA (needed for updates)
-  local existing sha
-  existing=$(curl -s -H "Authorization: token $TOKEN" \
-                  "${API}/${repo_path}?ref=${BRANCH}" 2>/dev/null || true)
-  sha=$(echo "$existing" | json_str sha || true)
-
-  # Write body to temp file (avoids shell limits for large files)
-  local body_file
-  body_file=$(make_body "$message" "$content" "$sha" "$BRANCH")
-
-  local result
   result=$(curl -s -X PUT \
     -H "Authorization: token $TOKEN" \
     -H "Content-Type: application/json" \
     --data-binary "@${body_file}" \
-    "${API}/${repo_path}" 2>/dev/null || true)
+    "${API}/contents/${repo_path}" 2>/dev/null || true)
 
   rm -f "$body_file"
 
   if echo "$result" | grep -q '"html_url"'; then
     echo "  ✓ $repo_path"
+    return 0
   else
-    local errmsg
     errmsg=$(echo "$result" | json_str message || true)
     echo "  ✗ $repo_path — ${errmsg:-unknown error}"
+    return 1
   fi
 }
 
-# ── Quick remote SHA lookup for diff summary ──────────────────────────────────
-remote_sha() {
-  local f="$1"
-  curl -s -H "Authorization: token $TOKEN" \
-       "${API}/${f}?ref=${BRANCH}" 2>/dev/null \
-  | json_str sha || true
-}
-
-# ── All files to sync ────────────────────────────────────────────────────────
+# ── All files to sync ─────────────────────────────────────────────────────────
 # Format: "local_path" "remote_path_in_repo"
 declare -a SYNC_FILES=(
   "mc_farm.sh"                                                                        "mc_farm.sh"
@@ -139,50 +117,75 @@ declare -a SYNC_FILES=(
   "replit.md"                                                                         "replit.md"
 )
 
-# ── Diff summary ─────────────────────────────────────────────────────────────
-diff_summary() {
-  echo ""
-  echo "── Local vs GitHub diff ─────────────────────────────────────────────"
-  for ((i=0; i<${#SYNC_FILES[@]}; i+=2)); do
-    local lf="${SYNC_FILES[i]}"
-    local rf="${SYNC_FILES[i+1]}"
-    [[ -f "$lf" ]] || continue
-    local rsha
-    rsha=$(remote_sha "$rf" || true)
-    if [[ -z "$rsha" ]]; then
-      echo "  $rf : NEW FILE"
-    else
-      echo "  $rf : exists (sha=${rsha:0:8}…)"
-    fi
-  done
-  echo "──────────────────────────────────────────────────────────────────────"
-  echo ""
-}
-
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "Pushing to https://github.com/${OWNER}/${REPO}"
+echo "→ https://github.com/${OWNER}/${REPO}"
 
-diff_summary
+# Fetch entire remote tree in ONE call (avoids N separate SHA lookups)
+TREE_JSON=$(curl -s \
+  -H "Authorization: token $TOKEN" \
+  "${API}/git/trees/${BRANCH}?recursive=1" 2>/dev/null || true)
 
-COMMIT_MSG="chore: sync $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Build a lookup: path→sha from the flat tree array.
+# GitHub returns pretty-printed JSON (spaces, newlines) so we use a stateful
+# gawk parser that buffers path/type/sha per object and emits on closing '}'.
+# gawk 3-arg match() is standard on Ubuntu/Mint LTS.
+declare -A REMOTE_SHA
+while IFS=' ' read -r _path _sha; do
+  REMOTE_SHA["$_path"]="$_sha"
+done < <(echo "$TREE_JSON" | gawk '
+  { line = $0; gsub(/^[[:space:]]+/, "", line) }
+  match(line, /"path"[[:space:]]*:[[:space:]]*"([^"]*)"/, a) { p = a[1] }
+  match(line, /"type"[[:space:]]*:[[:space:]]*"([^"]*)"/, a) { t = a[1] }
+  match(line, /"sha"[[:space:]]*:[[:space:]]*"([^"]*)"/, a)  { s = a[1] }
+  line ~ /^\}/ {
+    if (t == "blob" && p != "" && s != "") print p, s
+    p = ""; t = ""; s = ""
+  }
+')
 
-for ((i=0; i<${#SYNC_FILES[@]}; i+=2)); do
-  lf="${SYNC_FILES[i]}"
-  rf="${SYNC_FILES[i+1]}"
-  [[ -f "$lf" ]] && push_file "$lf" "$rf" "$COMMIT_MSG"
-done
-
-# ── Push attached_assets (screenshots + jsonl logs) ──────────────────────────
-if [[ -d "attached_assets" ]]; then
-  echo ""
-  echo "── Pushing attached_assets/ ─────────────────────────────────────────"
-  for _f in attached_assets/*.png attached_assets/*.jsonl attached_assets/*.json; do
-    [[ -f "$_f" ]] && push_file "$_f" "$_f" "$COMMIT_MSG"
-  done
+# Sanity check: if the map is empty the tree fetch or parse failed entirely.
+# Fall back to pushing everything rather than silently skipping all files.
+_tree_count=${#REMOTE_SHA[@]}
+if [[ $_tree_count -eq 0 ]]; then
+  echo "  ⚠ tree parse returned 0 blobs — SHA skipping disabled (will push all)"
 fi
 
-echo ""
-echo "Done → https://github.com/${OWNER}/${REPO}"
+COMMIT_MSG="chore: sync $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+pushed=0 failed=0 skipped=0
+
+# ── helper: push one path pair, update counters ───────────────────────────────
+_sync_one() {
+  local lf="$1" rf="$2"
+  [[ -f "$lf" ]] || return
+
+  local local_sha remote
+  local_sha=$(blob_sha "$lf")
+  remote="${REMOTE_SHA[$rf]:-}"
+
+  # Skip only when tree parse succeeded (map non-empty) and SHAs match
+  if [[ $_tree_count -gt 0 && "$local_sha" == "$remote" ]]; then
+    (( skipped++ )) || true
+    return
+  fi
+
+  if push_file "$lf" "$rf" "$COMMIT_MSG" "$remote"; then
+    (( pushed++ )) || true
+  else
+    (( failed++ )) || true
+  fi
+}
+
+# ── Sync declared files ───────────────────────────────────────────────────────
+for ((i=0; i<${#SYNC_FILES[@]}; i+=2)); do
+  _sync_one "${SYNC_FILES[i]}" "${SYNC_FILES[i+1]}"
+done
+
+# ── Sync attached_assets/ ─────────────────────────────────────────────────────
+for _f in attached_assets/*.png attached_assets/*.jsonl attached_assets/*.json; do
+  _sync_one "$_f" "$_f"
+done
+
+echo "Done — pushed $pushed, failed $failed, skipped $skipped unchanged"

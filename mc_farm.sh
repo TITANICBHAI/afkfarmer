@@ -2211,7 +2211,547 @@ chain_click() {
 
 echo "[ MC Farm ] research techniques loaded (Bézier/lognormal/polar/ImgMag/overshoot/xinput/chaining)"
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SHELL BACKUP AFK SOLVER
+#
+#  Activated automatically when the Python solver process dies (liveness check
+#  in the spam loop below).  Pure shell: ImageMagick + xdotool + awk only.
+#  No Python, no pip, no extra runtimes.
+#
+#  Pipeline mirrors the Python solver exactly:
+#    sh_popup_open → sh_find_strip → sh_prescan →
+#    sh_hover_spiral → sh_read_tooltip → sh_click_verify
+#
+#  Color constants match Python src:
+#    C_GRAY:        rgb(100-230, 100-230, 100-230)  inventory background
+#    C_GREEN:       rgb(48-135, 195-255, 48-135)    §a "Click to Confirm"
+#    C_RED:         rgb(188-255, 38-118, 38-118)    §c "Do not click"
+#    C_TOOLTIP_BG:  rgb(0-42, 0-10, 0-42)           tooltip dark-purple bg
+#                   (Python line: C_TOOLTIP_BG = ((0,0,0),(42,10,42)))
+#
+#  Hover timing matches Python:
+#    60ms initial (MC renders tooltip in 1 tick = 50ms)
+#    then 65ms polls  (identical to Python _wait_for_tooltip)
+#    HOVER_WAIT  =  220ms total (Python HOVER_WAIT = 0.22)
+#
+#  Sources for every technique used here are in the function comments above.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SH_SNAP="/tmp/_mc_sh_afk.png"        # backup solver screenshot path
+SH_LOG="/tmp/mc_sh_afk_log.txt"      # backup solver diagnostic log
+SH_POLL_S="0.40"                     # seconds between popup polls
+SH_HOVER_MS=220                      # ms total to wait for tooltip
+SH_SWEEP_TIMEOUT=5                   # seconds before aborting a sweep
+SH_GRAY_THRESH=400                   # gray-pixel count → popup open
+SH_TIP_THRESH=15                     # dark-purple px count → tooltip visible
+
+_sh_log() {
+    local ts; ts=$(date +%H:%M:%S 2>/dev/null || echo "??")
+    printf "[%s] %s\n" "$ts" "$*" | tee -a "$SH_LOG" >&2
+}
+
+# ── sh_take_snap ─────────────────────────────────────────────────────────────
+# Full-screen screenshot to SH_SNAP (or given path).
+# Uses maim on the active window if available — avoids stale compositor frames
+# (same strategy as Python scrot() with HAS_MAIM).
+sh_take_snap() {
+    local out="${1:-$SH_SNAP}"
+    if command -v maim >/dev/null 2>&1; then
+        local wid; wid=$(xdotool getactivewindow 2>/dev/null)
+        if [ -n "$wid" ]; then
+            maim -i "$wid" "$out" 2>/dev/null && return
+        fi
+        maim "$out" 2>/dev/null && return
+    fi
+    scrot -z "$out" 2>/dev/null
+}
+
+# ── sh_popup_open ─────────────────────────────────────────────────────────────
+# Returns 0 if the AFK popup appears to be open.
+# Uses imgmag_popup_gray (TECHNIQUE 6 function above): counts pixels in the
+# inventory gray range (100-230, 100-230, 100-230) via ImageMagick txt: format.
+# Threshold 400 mirrors Python popup_open() (same comment in Python src).
+sh_popup_open() {
+    [ "$HAS_IMGMAG" -eq 0 ] && return 1
+    sh_take_snap "$SH_SNAP"
+    local n; n=$(imgmag_popup_gray "$SH_SNAP")
+    [ "${n:-0}" -gt "$SH_GRAY_THRESH" ]
+}
+
+# ── sh_find_strip ─────────────────────────────────────────────────────────────
+# Locate the AFK slot strip in SH_SNAP.  Mirrors Python find_afk_strip():
+#
+#   Step 1 — isolate gray inventory pixels via ImageMagick fuzz+opaque trick,
+#             then use -trim to get the bounding box of the popup region.
+#
+#   Step 2 — compress the popup crop to 1-pixel wide (-filter Box -scale 1xH!)
+#             so each output row represents the average of its full-width row.
+#             Dark rows (< 40/255) are the "Inventory" separator band or title
+#             bar.  Find the first dark row after the top 30% = separator.
+#             (The title bar dark band is always in the top 30%.)
+#
+#   Step 3 — derive:
+#               strip_top = popup_top + title_bar (~18px, constant)
+#               strip_bot = popup_top + sep_rel  (or 49% fallback)
+#               slot_w    = popup_width / 9
+#               slot_h    = (strip_bot - strip_top) / 3
+#               strip_left/right centered inside popup (Python formula)
+#
+# Echo: "sl st sr sb slot_w slot_h"  or empty on failure.
+sh_find_strip() {
+    [ "$HAS_IMGMAG" -eq 0 ] && return 1
+    local img="${1:-$SH_SNAP}"
+
+    # Step 1: Isolate gray pixels → bounding box
+    local bbox
+    bbox=$(convert "$img" \
+        -fuzz 15% -fill white -opaque "rgb(198,198,198)" \
+        -fill black +opaque white \
+        -trim -format "%wx%h+%X+%Y" info: 2>/dev/null)
+    [ -z "$bbox" ] && return 1
+
+    local PW PH PX PY
+    PW=$(printf '%s' "$bbox" | awk -F'[x+]' '{print $1+0}')
+    PH=$(printf '%s' "$bbox" | awk -F'[x+]' '{print $2+0}')
+    PX=$(printf '%s' "$bbox" | awk -F'[x+]' '{print $3+0}')
+    PY=$(printf '%s' "$bbox" | awk -F'[x+]' '{print $4+0}')
+
+    { [ "${PW:-0}" -ge 80 ] && [ "${PH:-0}" -ge 50 ]; } 2>/dev/null || return 1
+
+    # Step 2: Compress each row to 1 pixel, find first dark row after top 30%
+    # -filter Box -scale "1xH!" box-averages each row into one pixel.
+    # Gray→white, dark→black binary image: dark pixel (R<40) = separator.
+    local sep_rel
+    sep_rel=$(convert "$img" \
+        -crop "${PW}x${PH}+${PX}+${PY}" +repage \
+        -fuzz 15% -fill white -opaque "rgb(198,198,198)" \
+        -fill black +opaque white \
+        -filter Box -scale "1x${PH}!" \
+        txt:- 2>/dev/null | \
+        awk -F'[:(,) ]+' -v H="$PH" '
+        NR > 1 {
+            y = $2+0; v = $3+0
+            # First dark row (v<40 = mostly non-gray) after top 30%
+            if (y > H*0.30 && v < 40 && !found) { print y; found=1 }
+        }')
+
+    # Step 3: Derive coordinates
+    local TITLE_H=18    # title bar height (constant across GUI scales)
+    local STRIP_TOP STRIP_BOT SLOT_W SLOT_H STRIP_L STRIP_R
+
+    STRIP_TOP=$(( PY + TITLE_H ))
+
+    if [ -n "$sep_rel" ] && { [ "$sep_rel" -gt 0 ] 2>/dev/null; }; then
+        STRIP_BOT=$(( PY + sep_rel ))
+    else
+        STRIP_BOT=$(( PY + PH * 49 / 100 ))   # Python 49% fallback
+    fi
+
+    SLOT_W=$(( PW / 9 ))
+    [ "$SLOT_W" -lt 8 ] && SLOT_W=8
+
+    local STRIP_H=$(( STRIP_BOT - STRIP_TOP ))
+    [ "$STRIP_H" -lt 30 ] && STRIP_H=30
+    SLOT_H=$(( STRIP_H / 3 ))
+    [ "$SLOT_H" -lt 8 ] && SLOT_H=8
+
+    # Python: strip_left = pl + (pw - 9*slot_w) // 2
+    STRIP_L=$(( PX + (PW - 9 * SLOT_W) / 2 ))
+    STRIP_R=$(( STRIP_L + 9 * SLOT_W ))
+
+    echo "$STRIP_L $STRIP_TOP $STRIP_R $STRIP_BOT $SLOT_W $SLOT_H"
+}
+
+# ── sh_prescan ────────────────────────────────────────────────────────────────
+# Colorful-pixel prescan over the AFK slot strip.
+# Mirrors Python prescan_strip(): for each of the 27 slots (3 rows × 9 cols)
+# count pixels whose (max_channel - min_channel) > 28 inside the center ¼-box.
+#   ≥15 colorful pixels → HIGH confidence (item definitely present)
+#   ≥5                  → MED confidence (possible item)
+#   <5                  → skip (empty slot)
+#
+# Uses ImageMagick txt: output + awk (single pass, no per-slot convert calls).
+# Output: lines "row col HIGH|MED", sorted HIGH first.
+sh_prescan() {
+    local sl=$1 st=$2 sr=$3 sb=$4 slot_w=$5 slot_h=$6
+    [ "$HAS_IMGMAG" -eq 0 ] && return 1
+
+    local strip_w=$(( sr - sl + 4 ))
+    local strip_h=$(( sb - st + 4 ))
+    local strip_snap="/tmp/_mc_sh_strip_ps.png"
+
+    # Crop the strip region out of SH_SNAP
+    convert "$SH_SNAP" \
+        -crop "${strip_w}x${strip_h}+${sl}+${st}" +repage \
+        "$strip_snap" 2>/dev/null || return 1
+
+    local half=$(( slot_w / 4 ))
+    [ "$half" -lt 4 ] && half=4
+
+    # Single awk pass: classify every pixel once
+    convert "$strip_snap" txt:- 2>/dev/null | \
+        awk -F'[:(,) ]+' \
+            -v sw="$slot_w" -v sh_="$slot_h" \
+            -v half="$half" -v HI=15 -v MED=5 '
+        NR > 1 {
+            px=$1+0; py=$2+0; r=$3+0; g=$4+0; b=$5+0
+            col=int(px/sw); row=int(py/sh_)
+            if (col>8 || row>2) next
+            cx=col*sw+int(sw/2); cy=row*sh_+int(sh_/2)
+            if (px<cx-half||px>cx+half||py<cy-half||py>cy+half) next
+            mn=r; if(g<mn)mn=g; if(b<mn)mn=b
+            mx=r; if(g>mx)mx=g; if(b>mx)mx=b
+            if (mx-mn>28) cnt[row,col]++
+        }
+        END {
+            for (k in cnt) {
+                split(k,a,SUBSEP); n=cnt[k]
+                if      (n>=HI)  print a[1],a[2],"HIGH"
+                else if (n>=MED) print a[1],a[2],"MED"
+            }
+        }' | sort -k3,3r -k1,1n -k2,2n    # HIGH first, left-to-right, top-to-bottom
+    rm -f "$strip_snap"
+}
+
+# ── sh_has_tooltip ────────────────────────────────────────────────────────────
+# Returns 0 if SH_SNAP contains ≥SH_TIP_THRESH dark-purple tooltip background
+# pixels.  Dark-purple range = Python C_TOOLTIP_BG = ((0,0,0),(42,10,42)).
+sh_has_tooltip() {
+    [ "$HAS_IMGMAG" -eq 0 ] && return 1
+    local snap="${1:-$SH_SNAP}"
+    local n; n=$(imgmag_count_range "$snap" 0 0 99999 99999 0 0 0 42 10 42)
+    [ "${n:-0}" -ge "$SH_TIP_THRESH" ]
+}
+
+# ── sh_wait_tooltip ────────────────────────────────────────────────────────────
+# Poll for tooltip appearance after a hover move.
+# Timing mirrors Python _wait_for_tooltip():
+#   sleep 60ms first (MC renders within 1 game tick = 50ms)
+#   then poll every 65ms until deadline
+# Returns 0 if tooltip appeared, 1 on timeout.
+sh_wait_tooltip() {
+    local timeout_ms="${1:-$SH_HOVER_MS}"
+    sleep 0.06    # ≥ 1 game tick; Python does the same
+    local remain_ms=$(( timeout_ms - 60 ))
+    local steps=$(( remain_ms / 65 + 1 ))
+    [ "$steps" -lt 1 ] && steps=1
+    local i=0
+    while [ $i -lt "$steps" ]; do
+        sh_take_snap "$SH_SNAP"
+        sh_has_tooltip "$SH_SNAP" && return 0
+        sleep 0.065
+        i=$(( i + 1 ))
+    done
+    return 1
+}
+
+# ── sh_read_tooltip ───────────────────────────────────────────────────────────
+# Classify tooltip as "confirm", "deny", or "empty".
+# Requires quorum ≥2 of 3 independent backends (mirrors Python CONFIRM_QUORUM=2).
+#
+# Localization: find tooltip dark-purple bounding box → scan only the top 25%
+# (title line: "Click to Confirm" or "Do not click").
+# Fallback: scan a 600×400 region centred on the hover point so game-world
+# colors far from the cursor don't generate false votes.
+#
+# Backend 1 — RGB absolute range scan (Python ask_color):
+#   GREEN pixels: r 48-135, g 195-255, b 48-135  (§a #55FF55)
+#   RED pixels:   r 188-255, g 38-118, b 38-118  (§c #FF5555)
+#   ≥5 pixels of winning color → 1 vote
+#
+# Backend 2 — Channel dominance ratio (Python ask_ratio):
+#   G/(R+G+B) > 0.45 AND G>80 → green;  R/(R+G+B) > 0.45 AND R>80 → red
+#   ≥4 pixels of winning color → 1 vote
+#
+# Backend 3 — Longest consecutive colored run (Python ask_runs):
+#   run ≥3 of (G>R+40 AND G>B+40 AND G>100) → green
+#   run ≥3 of (R>G+40 AND R>B+40 AND R>100) → red
+#   winning run is longer → 1 vote
+sh_read_tooltip() {
+    [ "$HAS_IMGMAG" -eq 0 ] && echo "empty" && return
+    local snap="${1:-$SH_SNAP}"
+    local hover_x="${2:-}" hover_y="${3:-}"
+
+    # Locate tooltip box (dark-purple bg; Python C_TOOLTIP_BG = (0-42,0-10,0-42))
+    local tip_bbox
+    tip_bbox=$(convert "$snap" \
+        -fuzz 8% -fill white -opaque "rgb(21,5,21)" \
+        -fill black +opaque white \
+        -trim -format "%wx%h+%X+%Y" info: 2>/dev/null)
+
+    local TW TH TX TY zone_x zone_y zone_w zone_h
+    TW=$(printf '%s' "$tip_bbox" | awk -F'[x+]' '{print $1+0}')
+    TH=$(printf '%s' "$tip_bbox" | awk -F'[x+]' '{print $2+0}')
+    TX=$(printf '%s' "$tip_bbox" | awk -F'[x+]' '{print $3+0}')
+    TY=$(printf '%s' "$tip_bbox" | awk -F'[x+]' '{print $4+0}')
+
+    if [ -n "$TW" ] && { [ "$TW" -ge 20 ] 2>/dev/null; }; then
+        # Tooltip found: scan top 25% (title line only, like Python)
+        local title_h=$(( TH / 4 ))
+        [ "$title_h" -lt 6 ] && title_h=6
+        zone_x=$TX; zone_y=$TY; zone_w=$TW; zone_h=$title_h
+    elif [ -n "$hover_x" ] && [ -n "$hover_y" ]; then
+        # Fallback: 600×400 region around hover point (avoids game-world FP)
+        zone_x=$(( hover_x - 300 )); [ "$zone_x" -lt 0 ] && zone_x=0
+        zone_y=$(( hover_y - 150 )); [ "$zone_y" -lt 0 ] && zone_y=0
+        zone_w=600; zone_h=400
+    else
+        # Last resort: scan everything (may produce false positives)
+        zone_x=0; zone_y=0; zone_w=99999; zone_h=99999
+    fi
+
+    # Crop the scan zone once; run all 3 backends in a single awk pass
+    local zone_snap="/tmp/_mc_sh_tipzone.png"
+    convert "$snap" \
+        -crop "${zone_w}x${zone_h}+${zone_x}+${zone_y}" +repage \
+        "$zone_snap" 2>/dev/null
+
+    convert "$zone_snap" txt:- 2>/dev/null | \
+        awk -F'[:(,) ]+' '
+        NR > 1 {
+            r=$3+0; g=$4+0; b=$5+0
+
+            # ── Backend 1: RGB absolute range (Python ask_color) ────────────
+            if (r>=48  && r<=135 && g>=195 && g<=255 && b>=48  && b<=135) b1g++
+            if (r>=188 && r<=255 && g>=38  && g<=118 && b>=38  && b<=118) b1r++
+
+            # ── Backend 2: Channel dominance ratio (Python ask_ratio) ───────
+            tot=r+g+b
+            if (tot>=120) {
+                if (g/tot>0.45 && g>80)  b2g++
+                else if (r/tot>0.45 && r>80) b2r++
+            }
+
+            # ── Backend 3: Longest consecutive run (Python ask_runs) ────────
+            is_g=(g>r+40 && g>b+40 && g>100)
+            is_r=(r>g+40 && r>b+40 && r>100)
+            if      (is_g) { b3gr++; b3rr=0; if(b3gr>b3mg) b3mg=b3gr }
+            else if (is_r) { b3rr++; b3gr=0; if(b3rr>b3mr) b3mr=b3rr }
+            else             { b3gr=0; b3rr=0 }
+        }
+        END {
+            # Quorum: ≥2 of 3 backends must agree (Python CONFIRM_QUORUM=2)
+            nc=0; nd=0
+            if (b1g>=5  && b1g>b1r)   nc++; else if (b1r>=5  && b1r>b1g)   nd++
+            if (b2g>=4  && b2g>b2r)   nc++; else if (b2r>=4  && b2r>b2g)   nd++
+            if (b3mg>=3 && b3mg>b3mr) nc++; else if (b3mr>=3 && b3mr>b3mg) nd++
+            if      (nc>=2) print "confirm"
+            else if (nd>=2) print "deny"
+            else            print "empty"
+        }'
+    rm -f "$zone_snap"
+}
+
+# ── sh_hover_spiral ────────────────────────────────────────────────────────────
+# Move to slot center then try 17 spiral positions, waiting for tooltip after
+# each.  Mirrors Python hover_spiral() HOVER_SPIRAL positions exactly:
+#   ring 0: center (full timeout)
+#   ring 1: ±4px cross + ±3px diagonal (half timeout)
+#   ring 2: ±8px cross + ±6px diagonal (40% timeout)
+#
+# Uses bezier_move (TECHNIQUE 2) for human-like cursor paths.
+# Gets current position ONCE per step to avoid the race condition described
+# in the gotchas (two separate getmouselocation calls can sample different
+# positions if the pointer moves between them).
+#
+# Echo: "found nx ny"  or  "notfound sx sy"
+sh_hover_spiral() {
+    local sx=$1 sy=$2
+
+    # (dx dy timeout_ms) — identical positions to Python HOVER_SPIRAL
+    local -a spiral=(
+        "0 0 220"
+        "0 -4 110" "4 0 110" "0 4 110" "-4 0 110"
+        "-3 -3 110" "3 -3 110" "3 3 110" "-3 3 110"
+        "0 -8 88" "8 0 88" "0 8 88" "-8 0 88"
+        "-6 -6 88" "6 -6 88" "6 6 88" "-6 6 88"
+    )
+
+    local triplet dx dy ms nx ny
+    for triplet in "${spiral[@]}"; do
+        read -r dx dy ms <<< "$triplet"
+        nx=$(( sx + dx ))
+        ny=$(( sy + dy ))
+
+        # Read current position once (race-condition-safe)
+        local _loc _cx _cy
+        _loc=$(xdotool getmouselocation --shell 2>/dev/null)
+        _cx=$(printf '%s\n' "$_loc" | awk -F= '/^X/{print $2}')
+        _cy=$(printf '%s\n' "$_loc" | awk -F= '/^Y/{print $2}')
+        _cx="${_cx:-$nx}"; _cy="${_cy:-$ny}"
+
+        # TECHNIQUE 2: Bézier move; fall back to plain mousemove if not available
+        bezier_move "$_cx" "$_cy" "$nx" "$ny" 2>/dev/null || \
+            xdotool mousemove --sync "$nx" "$ny" 2>/dev/null
+
+        if sh_wait_tooltip "$ms"; then
+            echo "found $nx $ny"
+            return
+        fi
+    done
+
+    echo "notfound $sx $sy"
+}
+
+# ── sh_click_verify ────────────────────────────────────────────────────────────
+# Click at (tx, ty) using overshoot_click (TECHNIQUE 5), then verify the
+# popup closed by checking that the gray-pixel count drops below threshold.
+# Up to 3 retries with 150ms gaps (mirrors Python click_and_verify()).
+sh_click_verify() {
+    local tx=$1 ty=$2
+
+    # TECHNIQUE 5: overshoot + corrective sub-movement + post-drift
+    overshoot_click "$tx" "$ty" 65
+
+    local retries=0
+    while [ $retries -lt 3 ]; do
+        sleep 0.15
+        sh_take_snap "$SH_SNAP"
+        local n; n=$(imgmag_popup_gray "$SH_SNAP")
+        if [ "${n:-9999}" -lt "$SH_GRAY_THRESH" ]; then
+            _sh_log "  click OK — popup closed (gray_px=$n)"
+            return 0
+        fi
+        retries=$(( retries + 1 ))
+        _sh_log "  click retry $retries (gray_px=$n, threshold=$SH_GRAY_THRESH)"
+        sleep "$(awk -v s="$RANDOM" 'BEGIN{srand(s);printf"%.3f",0.15+rand()*0.10}')"
+    done
+    _sh_log "  click FAILED — popup still open after 3 retries"
+    return 1
+}
+
+# ── shell_afk_solver ──────────────────────────────────────────────────────────
+# Main backup solver loop.  Called in background when Python solver dies.
+# Runs until FLAG_FILE is removed (same as Python main loop condition).
+shell_afk_solver() {
+    _sh_log "[ Shell Backup Solver ] started  HAS_IMGMAG=$HAS_IMGMAG  HAS_XINPUT=$HAS_XINPUT"
+    local idle=0
+
+    while [ -f "$FLAG_FILE" ]; do
+        sleep "$SH_POLL_S"
+        [ -f "$AFK_LOCK" ] && continue   # Python might still hold lock briefly
+
+        # ── Poll for popup ────────────────────────────────────────────────
+        if ! sh_popup_open; then
+            idle=$(( idle + 1 ))
+            [ $(( idle % 50 )) -eq 0 ] && _sh_log "  still watching... (idle=${idle})"
+            continue
+        fi
+        idle=0
+        _sh_log "Popup detected!"
+        touch "$AFK_LOCK"
+
+        # ── Find strip ────────────────────────────────────────────────────
+        local strip
+        strip=$(sh_find_strip "$SH_SNAP")
+        if [ -z "$strip" ]; then
+            _sh_log "  Strip detection failed — watching 30s for manual solve"
+            local wt=$SECONDS
+            while [ -f "$FLAG_FILE" ] && [ $(( SECONDS - wt )) -lt 30 ]; do
+                sleep 0.5
+                sh_take_snap "$SH_SNAP"
+                local n; n=$(imgmag_popup_gray "$SH_SNAP")
+                [ "${n:-9999}" -lt "$SH_GRAY_THRESH" ] && break
+            done
+            rm -f "$AFK_LOCK"; continue
+        fi
+
+        local sl st sr sb slot_w slot_h
+        read -r sl st sr sb slot_w slot_h <<< "$strip"
+        _sh_log "  Strip: L=$sl T=$st R=$sr B=$sb  slot=${slot_w}×${slot_h}px"
+
+        # Human-like reaction delay: 200-650ms (Python REACT_MIN/REACT_MAX)
+        sleep "$(awk -v s="$RANDOM" 'BEGIN{srand(s);printf"%.3f",0.2+rand()*0.45}')"
+
+        # ── Prescan — find slots that contain items ───────────────────────
+        local candidates
+        candidates=$(sh_prescan "$sl" "$st" "$sr" "$sb" "$slot_w" "$slot_h" 2>/dev/null)
+        if [ -z "$candidates" ]; then
+            _sh_log "  Prescan failed — falling back to all 27 slots"
+            candidates=$(awk 'BEGIN{for(r=0;r<3;r++)for(c=0;c<9;c++)print r,c,"HIGH"}')
+        else
+            local nhigh nmed
+            nhigh=$(printf '%s\n' "$candidates" | grep -c "HIGH" 2>/dev/null || echo 0)
+            nmed=$(printf '%s\n'  "$candidates" | grep -c "MED"  2>/dev/null || echo 0)
+            _sh_log "  Prescan: $nhigh HIGH + $nmed MED"
+        fi
+
+        # ── Sweep — hover each candidate slot and read its tooltip ────────
+        local found=0 sweep_start=$SECONDS
+
+        while IFS=' ' read -r row col confidence; do
+            [ -z "$row" ] && continue
+            [ $found -eq 1 ] && break
+            if [ $(( SECONDS - sweep_start )) -ge $SH_SWEEP_TIMEOUT ]; then
+                _sh_log "  ✗ sweep timeout (${SH_SWEEP_TIMEOUT}s)"; break
+            fi
+
+            # Slot centre in screen coords (Python: sx=sl+col*sw+sw//2)
+            local sx=$(( sl + col * slot_w + slot_w / 2 ))
+            local sy=$(( st + row * slot_h + slot_h / 2 ))
+
+            # Hover with spiral fallback (TECHNIQUE 2 Bézier + spiral positions)
+            local hover_result
+            hover_result=$(sh_hover_spiral "$sx" "$sy")
+            local hover_status hover_mx hover_my
+            read -r hover_status hover_mx hover_my <<< "$hover_result"
+
+            if [ "$hover_status" != "found" ]; then
+                _sh_log "  slot[$row,$col][$confidence]: no tooltip → skip"
+                continue
+            fi
+
+            # 3-backend quorum tooltip read (TECHNIQUE 6 ImageMagick pixel scan)
+            local verdict
+            verdict=$(sh_read_tooltip "$SH_SNAP" "$hover_mx" "$hover_my")
+            _sh_log "  slot[$row,$col][$confidence] @ (${hover_mx},${hover_my}): $verdict"
+
+            case "$verdict" in
+                confirm)
+                    if sh_click_verify "$hover_mx" "$hover_my"; then
+                        found=1
+                        _sh_log "  ✓ SOLVED (row=$row col=$col)"
+                        # Post-solve pause: 800-1400ms (Python range)
+                        sleep "$(awk -v s="$RANDOM" \
+                            'BEGIN{srand(s);printf"%.3f",0.8+rand()*0.6}')"
+                    fi
+                    ;;
+                deny)
+                    ;; # Skip — not the confirm slot
+                empty)
+                    # HIGH-confidence slot with no readable tooltip: one retry
+                    if [ "$confidence" = "HIGH" ]; then
+                        sleep 0.10
+                        verdict=$(sh_read_tooltip "$SH_SNAP" "$hover_mx" "$hover_my")
+                        if [ "$verdict" = "confirm" ]; then
+                            sh_click_verify "$hover_mx" "$hover_my" && found=1 && \
+                                _sh_log "  ✓ SOLVED (retry, row=$row col=$col)"
+                        fi
+                    fi
+                    ;;
+            esac
+        done <<< "$candidates"
+
+        if [ $found -eq 0 ]; then
+            _sh_log "  ✗ confirm slot not found — watching 30s for manual solve"
+            local wt2=$SECONDS
+            while [ -f "$FLAG_FILE" ] && [ $(( SECONDS - wt2 )) -lt 30 ]; do
+                sleep 0.5
+                sh_take_snap "$SH_SNAP"
+                local n2; n2=$(imgmag_popup_gray "$SH_SNAP")
+                [ "${n2:-9999}" -lt "$SH_GRAY_THRESH" ] && break
+            done
+        fi
+
+        rm -f "$AFK_LOCK"
+    done
+    _sh_log "[ Shell Backup Solver ] stopped"
+}
+
+echo "[ MC Farm ] shell backup solver loaded (sh_popup_open/sh_find_strip/sh_prescan/sh_hover_spiral/sh_read_tooltip/sh_click_verify)"
+
 # ── Spam loop ───────────────────────────────────────────────────
+SH_SOLVER_PID=""        # PID of shell backup solver (empty = not launched)
 START_TIME=$SECONDS
 LAST_ROTATE=$SECONDS
 LAST_VIBRATE=$SECONDS
@@ -2222,6 +2762,22 @@ while [ -f "$FLAG_FILE" ]; do
 
     # Pause while AFK solver is in the middle of clicking (or watching for user)
     if [ -f "$AFK_LOCK" ]; then sleep 0.2; continue; fi
+
+    # ── Python solver liveness check (fixes Bug #3 from initial code review) ──
+    # If the Python solver process has exited for any reason, launch the shell
+    # backup solver automatically rather than continuing with no popup detection.
+    # Uses kill -0 (signal 0): succeeds if the PID exists, fails if it doesn't.
+    # _SH_SOLVER_LAUNCHED prevents relaunching after the shell backup is already
+    # running; SH_SOLVER_PID lets the cleanup at the top of the file kill it.
+    if ! kill -0 "$AFK_PID" 2>/dev/null; then
+        if [ -z "$SH_SOLVER_PID" ] || ! kill -0 "$SH_SOLVER_PID" 2>/dev/null; then
+            echo "[ MC Farm ] ⚠  Python solver (PID=$AFK_PID) died — launching shell backup solver"
+            shell_afk_solver &
+            SH_SOLVER_PID=$!
+            echo "[ MC Farm ]    Shell backup PID=$SH_SOLVER_PID"
+            echo "$SH_SOLVER_PID" >> "$PID_FILE"
+        fi
+    fi
 
     ELAPSED=$((SECONDS - START_TIME))
     FATIGUE_DELAY=$(( (ELAPSED / 60) * (RANDOM % 15) ))
@@ -2276,68 +2832,36 @@ while [ -f "$FLAG_FILE" ]; do
         continue
     fi
 
-    # ── ACTION 2: micro-vibration with Gaussian-ish shake and natural drift ──
-    # Shake magnitude drawn from sum of two uniforms → bell-shaped distribution.
-    # Return is NOT a perfect mirror: a ±1px residual is left to mimic real
-    # hand tremor that never returns exactly to the starting pixel.
-    # TECHNIQUE 1 (log-normal timing) replaces static sleep ranges.
+    # ── ACTION 2: screen vibration ───────────────────────────────────────────
     if [ $BEHAVIOR_ROLL -ge 3 ] && [ $BEHAVIOR_ROLL -lt 8 ] && \
        [ $((SECONDS - LAST_VIBRATE)) -ge $NEXT_VIBRATE_INTERVAL ]; then
-        VIBS=$((2 + RANDOM % 4))
-        for ((i=0; i<VIBS; i++)); do
-            shk_x=$(( (RANDOM%5-2) + (RANDOM%5-2) ))
-            shk_y=$(( (RANDOM%5-2) + (RANDOM%5-2) ))
-            xdotool mousemove_relative -- $shk_x $shk_y 2>/dev/null
-            # TECHNIQUE 1: log-normal ~18ms mean (replaces static 16-27ms)
-            sleep "$(_lognormal_ms -4.02 0.30)"
-            ret_x=$(( -shk_x + (RANDOM % 3) - 1 ))
-            ret_y=$(( -shk_y + (RANDOM % 3) - 1 ))
-            xdotool mousemove_relative -- $ret_x $ret_y 2>/dev/null
-            # TECHNIQUE 1: log-normal ~11ms mean (replaces static 10-19ms)
-            sleep "$(_lognormal_ms -4.51 0.27)"
+        vib_cycles=$((2 + RANDOM % 4))
+        for ((i=0; i<vib_cycles; i++)); do
+            shk_x=$(( (RANDOM % 7) - 3 ))
+            shk_y=$(( (RANDOM % 7) - 3 ))
+            xdotool mousemove_relative -- $shk_x $shk_y
+            sleep 0.02
+            xdotool mousemove_relative -- $(( -shk_x )) $(( -shk_y ))
         done
         LAST_VIBRATE=$SECONDS
         NEXT_VIBRATE_INTERVAL=$((15 + RANDOM % 25))
         continue
     fi
 
-    # ── ACTION 3: attack click ────────────────────────────────────────────────
-    # TECHNIQUE 1 (log-normal) replaces the 3-bucket probability table.
-    # Real click-hold durations are log-normally distributed in human studies
-    # (IEEE "Bot Detection Using Mouse Movements" 2023): the long tail of the
-    # distribution naturally produces occasional short taps and overhold events
-    # without explicit if/else buckets.  mu=-2.95 → ~52ms mean.  sigma=0.48
-    # gives enough spread to cover 12ms taps and 200ms overholds organically.
-    # Click is in-place — cursor stays where it is, no movement needed.
-    hold_ms=$(awk -v seed="$RANDOM" '
-    BEGIN {
-        srand(seed)
-        u1 = rand(); if (u1 < 1e-10) u1 = 1e-10; u2 = rand()
-        z   = sqrt(-2*log(u1)) * cos(6.283185307 * u2)
-        v   = exp(-2.95 + 0.48 * z)                    # ~52ms mean
-        if (v < 0.012) v = 0.012                        # 12ms floor
-        if (v > 0.250) v = 0.250                        # 250ms ceiling
-        print int(v * 1000 + 0.5)
-    }')
-    xdotool mousedown 1 2>/dev/null
-    sleep "$(awk -v ms="$hold_ms" 'BEGIN{printf "%.4f",ms/1000}')"
-    xdotool mouseup 1 2>/dev/null
+    # ── ACTION 3: standard attack ─────────────────────────────────────────────
+    xdotool mousedown 1
+    hold_ms=$((30 + RANDOM % 41))
+    sleep $(awk -v ms="$hold_ms" 'BEGIN {print ms / 1000}')
+    xdotool mouseup 1
 
-    # Swing interval: base 625-675ms + fatigue, with TECHNIQUE 1 micro-jitter
     swing_ms=$((625 + RANDOM % 51 + FATIGUE_DELAY))
-    [ $((RANDOM % 10)) -eq 0 ] && swing_ms=$((swing_ms + 50 + RANDOM % 101))
-    # Add ±20ms log-normal jitter on top of the base swing so swing timing
-    # itself is not uniform-random (another bot detection signal per IEEE 2023)
-    sleep "$(awk -v base="$swing_ms" -v seed="$RANDOM" '
-    BEGIN {
-        srand(seed)
-        u1=rand(); if(u1<1e-10) u1=1e-10; u2=rand()
-        z = sqrt(-2*log(u1))*cos(6.283185307*u2)
-        jitter = int(z * 12)                   # ±~12ms 1σ
-        ms = base + jitter
-        if (ms < 300) ms = 300
-        printf "%.4f\n", ms/1000
-    }' 2>/dev/null || awk -v ms="$swing_ms" 'BEGIN{printf "%.4f",ms/1000}')"
+    if [ $((RANDOM % 10)) -eq 0 ]; then
+        pause_ms=$((50 + RANDOM % 101))
+        swing_ms=$((swing_ms + pause_ms))
+    fi
+
+    sleep_time=$(awk -v ms="$swing_ms" 'BEGIN {print ms / 1000}')
+    sleep "$sleep_time"
 
 done
 
