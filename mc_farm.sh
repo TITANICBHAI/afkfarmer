@@ -120,6 +120,17 @@ SWEEP_TIMEOUT = 5.5 # abort sweep if it's been running this many seconds (server
 MC_POPUP_TIMEOUT = 12.0     # seconds JartexNetwork allows for a click
 MC_WINDOW_TITLE  = "Minecraft"  # xdotool window-name search string
 
+# ── Calibration resolution ────────────────────────────────────────────────────
+# Every hardcoded pixel measurement in this file (slot sizes, popup bbox,
+# tooltip scan zones, strip geometry fallbacks) was measured from screenshots
+# taken with the Minecraft window at exactly this size. If the actual game
+# window is a different size, slot/strip detection math will be wrong even
+# though popup detection may still work — this is checked at startup below.
+CALIB_W = 1366
+CALIB_H = 694
+RES_TOLERANCE_PX = 20   # allow small window-border/decoration differences
+CALIB_RECHECK_S = 60    # re-verify window size every 1 min in case it's resized mid-farm
+
 # ── Ban guard ─────────────────────────────────────────────────────────────────
 # JartexNetwork: 5 consecutive failures (wrong click or timeout) = 1-hour ban.
 # The script tracks consecutive non-solved popups and stops itself before
@@ -367,6 +378,71 @@ def focus_mc_window():
     except Exception as e:
         print(f"  [focus] could not focus MC window: {e}")
         return False
+
+def get_mc_window_size():
+    """
+    Return (width, height) of the actual Minecraft window (not the full
+    screen — MC may run windowed/smaller than the display), or (None, None)
+    if it can't be determined.
+
+    Uses 'xdotool getwindowgeometry --shell <wid>' which prints WIDTH=.. and
+    HEIGHT=.. lines. This is the real render size the popup/slot geometry
+    was measured against, so it's the correct thing to validate against
+    CALIB_W/CALIB_H — not the monitor resolution.
+    """
+    try:
+        result = subprocess.run(
+            ['xdotool', 'search', '--name', MC_WINDOW_TITLE],
+            capture_output=True, text=True, timeout=3
+        )
+        wids = [w.strip() for w in result.stdout.splitlines() if w.strip()]
+        if not wids:
+            return None, None
+        wid = wids[-1]
+        geo = subprocess.run(
+            ['xdotool', 'getwindowgeometry', '--shell', wid],
+            capture_output=True, text=True, timeout=2
+        ).stdout
+        w = h = None
+        for line in geo.splitlines():
+            if line.startswith('WIDTH='):
+                w = int(line.split('=', 1)[1])
+            elif line.startswith('HEIGHT='):
+                h = int(line.split('=', 1)[1])
+        return w, h
+    except Exception:
+        return None, None
+
+def check_calibration_resolution():
+    """
+    Compare the real Minecraft window size against CALIB_W/CALIB_H and warn
+    LOUDLY (but don't exit — popup detection alone may still work) when they
+    don't match. This does not fix geometry mismatches; it only makes them
+    visible instead of failing silently as wrong clicks / missed popups.
+    """
+    w, h = get_mc_window_size()
+    if w is None or h is None:
+        print("[ CALIBRATION ] could not read Minecraft window size "
+              "(is the game running / is xdotool able to find it?) — "
+              "slot/strip geometry accuracy cannot be verified.")
+        return
+    dw, dh = abs(w - CALIB_W), abs(h - CALIB_H)
+    if dw <= RES_TOLERANCE_PX and dh <= RES_TOLERANCE_PX:
+        print(f"[ CALIBRATION ] Minecraft window {w}x{h} matches calibrated "
+              f"{CALIB_W}x{CALIB_H} (±{RES_TOLERANCE_PX}px) ✓")
+    else:
+        print("=" * 70)
+        print(f"[ CALIBRATION WARNING ] Minecraft window is {w}x{h}, but all "
+              f"slot/strip/tooltip pixel math in this script was measured at "
+              f"{CALIB_W}x{CALIB_H}.")
+        print("  Popup detection (gray-box search) may still work, but slot "
+              "positions, tooltip scan zones, and click coordinates were "
+              "derived from the calibrated resolution and are NOT guaranteed "
+              "to line up. Expect missed clicks / wrong-slot clicks.")
+        print(f"  Fix: resize the Minecraft window to {CALIB_W}x{CALIB_H} "
+              f"(GUI scale 2), or re-calibrate SLOT_H_DEFAULT / strip "
+              f"detection constants for your actual window size.")
+        print("=" * 70)
 
 # ── Cursor position tracking ──────────────────────────────────────────────────
 _cur_x = None
@@ -1473,6 +1549,22 @@ def _ensure_assets():
     pathlib.Path(ASSETS_DIR).mkdir(parents=True, exist_ok=True)
 
 
+# NOTE ON SCREENSHOT RETENTION:
+# Every popup screenshot saved here is raw training material — it's the only
+# way join_training_data.py (run later, offline, against the mod's
+# afkverify_events.jsonl ground truth) can be re-examined and turned into
+# better backend weights. Auto-deleting screenshots *during farming* would
+# silently destroy attempts that haven't been joined with the mod's log yet,
+# which directly undermines accuracy improvement — so this script does NOT
+# delete any screenshot on its own.
+#
+# Cleanup only happens in join_training_data.py, AFTER a screenshot's data
+# has already been safely merged into training_data.jsonl (see
+# --prune-screenshots there). Attempts that were never matched to a mod
+# event are never touched, no matter how old, since they may still be
+# joinable against a later/different mod log export.
+
+
 def save_popup_screenshot(strip):
     """
     Capture full screen, draw the detected strip rect on top (green box via
@@ -1924,6 +2016,7 @@ def main():
     _chat_ctr      = 0   # counts up; chat scan fires when it reaches CHAT_DETECT_EVERY
     _consec_fails  = 0   # consecutive non-solved popups (ban guard)
     _history       = []  # last 10 outcomes: True=solved, False=missed (streak display)
+    _last_calib_check = time.time()
 
     while os.path.exists(FLAG):
         try:
@@ -1931,6 +2024,18 @@ def main():
 
             if not _popup_now:
                 idle += 1
+
+                # ── Periodic re-calibration check ─────────────────────────
+                # The window can be resized mid-farm (user drags a corner,
+                # alt-tabs into a different layout, etc). Re-verify every
+                # CALIB_RECHECK_S seconds so a mismatch is caught immediately
+                # instead of silently degrading click accuracy for hours.
+                # Skipped while a popup is open/being solved.
+                _now = time.time()
+                if _now - _last_calib_check >= CALIB_RECHECK_S:
+                    _last_calib_check = _now
+                    check_calibration_resolution()
+
                 if idle % 40 == 0:
                     # Show running solve streak so user can see accuracy at a glance
                     if _history:
@@ -2060,6 +2165,7 @@ if _missing_tools:
     sys.exit(1)
 _sw0,_sh0 = screen_wh()
 _res = f"{_sw0}×{_sh0}" if _sw0 else "unknown(full-screen mode)"
+check_calibration_resolution()
 print(f"[ init ] screen={_res}  scrot=✓  xdotool=✓"
       + ("  maim=✓(better capture)" if HAS_MAIM else "  maim=✗(using scrot)")
       + ("  AI=✓" if HAS_AI else "  AI=✗(no key)")
@@ -2634,9 +2740,45 @@ SH_TIP_THRESH=2000
 #   sh_popup_open now uses the bbox size check instead.
 SH_GRAY_THRESH=400   # unused by sh_popup_open; kept for reference
 
+# CALIB_W / CALIB_H — same calibration resolution as the Python solver.
+# All the pixel math above (popup min size, slot geometry, tooltip scan
+# zone) was measured at this Minecraft window size.
+SH_CALIB_W=1366
+SH_CALIB_H=694
+SH_RES_TOLERANCE_PX=20
+
 _sh_log() {
     local ts; ts=$(date +%H:%M:%S 2>/dev/null || echo "??")
     printf "[%s] %s\n" "$ts" "$*" | tee -a "$SH_LOG" >&2
+}
+
+# ── sh_check_calibration_resolution ────────────────────────────────────────
+# Warns (does not exit) if the real Minecraft window size doesn't match the
+# resolution all the shell solver's pixel math (SH_POPUP_MIN_*, slot size,
+# tooltip scan zone) was calibrated against. Mirrors the Python solver's
+# check_calibration_resolution() so both backends surface the same warning.
+sh_check_calibration_resolution() {
+    local wid geo w h
+    wid=$(xdotool search --name "[Mm]inecraft" 2>/dev/null | tail -1)
+    if [ -z "$wid" ]; then
+        _sh_log "[ CALIBRATION ] no Minecraft window found — cannot verify slot/strip geometry accuracy"
+        return
+    fi
+    geo=$(xdotool getwindowgeometry --shell "$wid" 2>/dev/null)
+    w=$(printf '%s\n' "$geo" | awk -F= '/^WIDTH=/{print $2}')
+    h=$(printf '%s\n' "$geo" | awk -F= '/^HEIGHT=/{print $2}')
+    if [ -z "$w" ] || [ -z "$h" ]; then
+        _sh_log "[ CALIBRATION ] could not read Minecraft window geometry — cannot verify slot/strip geometry accuracy"
+        return
+    fi
+    local dw dh
+    dw=$(( w > SH_CALIB_W ? w - SH_CALIB_W : SH_CALIB_W - w ))
+    dh=$(( h > SH_CALIB_H ? h - SH_CALIB_H : SH_CALIB_H - h ))
+    if [ "$dw" -le "$SH_RES_TOLERANCE_PX" ] && [ "$dh" -le "$SH_RES_TOLERANCE_PX" ]; then
+        _sh_log "[ CALIBRATION ] Minecraft window ${w}x${h} matches calibrated ${SH_CALIB_W}x${SH_CALIB_H} (±${SH_RES_TOLERANCE_PX}px) ✓"
+    else
+        _sh_log "[ CALIBRATION WARNING ] Minecraft window is ${w}x${h}, but shell solver pixel math (popup bbox, slot size, tooltip zone) was calibrated at ${SH_CALIB_W}x${SH_CALIB_H}. Popup detection may still work; slot/click accuracy is NOT guaranteed. Resize the window to ${SH_CALIB_W}x${SH_CALIB_H} (GUI scale 2) for reliable results."
+    fi
 }
 
 # ── sh_take_snap ─────────────────────────────────────────────────────────────
@@ -3146,9 +3288,12 @@ sh_chat_says_teleported() {
 # Runs until FLAG_FILE is removed (same as Python main loop condition).
 shell_afk_solver() {
     _sh_log "[ Shell Backup Solver ] started  HAS_IMGMAG=$HAS_IMGMAG  HAS_XINPUT=$HAS_XINPUT"
+    sh_check_calibration_resolution
     local idle=0
     local sh_chat_ctr=0   # chat scan fires every SH_CHAT_EVERY polls
     local SH_CHAT_EVERY=2 # mirror of Python CHAT_DETECT_EVERY
+    local SH_CALIB_RECHECK_S=60    # re-verify window size every 1 min (mirrors Python)
+    local _last_calib_check=$SECONDS
 
     while [ -f "$FLAG_FILE" ]; do
         sleep "$SH_POLL_S"
@@ -3158,6 +3303,14 @@ shell_afk_solver() {
         if ! sh_popup_open; then
             idle=$(( idle + 1 ))
             [ $(( idle % 50 )) -eq 0 ] && _sh_log "  still watching... (idle=${idle})"
+
+            # ── Periodic re-calibration check ────────────────────────────
+            # Catches a mid-farm window resize instead of silently degrading
+            # click accuracy. Skipped while a popup is open/being solved.
+            if [ $(( SECONDS - _last_calib_check )) -ge "$SH_CALIB_RECHECK_S" ]; then
+                _last_calib_check=$SECONDS
+                sh_check_calibration_resolution
+            fi
 
             # ── Chat early-warning (every SH_CHAT_EVERY polls) ───────────
             sh_chat_ctr=$(( sh_chat_ctr + 1 ))
