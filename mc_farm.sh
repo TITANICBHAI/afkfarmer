@@ -1952,18 +1952,36 @@ def main():
                     if chat_says_teleported():
                         print("[ AFK solver ] ⚡ teleport detected in chat — "
                               "pre-focusing MC and waiting for popup...")
+                        # ── BUG FIX: set lock IMMEDIATELY on chat detection ──
+                        # The old flow only set LOCK after popup_open() returned
+                        # True (line ~1979 below).  During the 1-3s gap before
+                        # the popup appears the bash spam loop was still running
+                        # with the cursor at screen-centre — inside the popup
+                        # zone — so it could misclick a slot before we started.
+                        # Setting lock here pauses spam for the whole pre-popup
+                        # wait.  If no popup appears (false positive) we release
+                        # the lock at the end of the tight-poll block below.
+                        open(LOCK, 'w').close()
                         focus_mc_window()
-                        # Move cursor to screen centre so it lands inside the
-                        # popup area when the GUI opens (avoids wasted first hover).
+                        # ── BUG FIX: safe corner, NOT screen centre ──────────
+                        # Popup occupies roughly x=378-646, y=141-375 on the
+                        # typical 1366×694 screen.  Moving to screen centre
+                        # put the cursor INSIDE the popup area.  Bottom-left
+                        # corner (50, sh-50) is always outside the popup.
                         _psw, _psh = screen_wh()
                         if _psw and _psh:
-                            xdo('mousemove', str(_psw // 2), str(_psh // 2))
+                            xdo('mousemove', '50', str(_psh - 50))
                         # Tight poll: 80ms × 37 iterations = up to 3s wait
                         for _ in range(37):
                             time.sleep(0.08)
                             if popup_open():
                                 _popup_now = True
                                 break
+                        if not _popup_now:
+                            # False positive — popup never appeared.
+                            # Release lock so spam loop resumes normally.
+                            try: os.remove(LOCK)
+                            except OSError: pass
 
                 if not _popup_now:
                     time.sleep(POLL)
