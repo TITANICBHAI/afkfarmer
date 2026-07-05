@@ -57,6 +57,7 @@ DEFAULT_ATTEMPTS = os.path.join('attached_assets', 'attempts.jsonl')
 DEFAULT_OUT      = os.path.join('attached_assets', 'training_data.jsonl')
 DEFAULT_WEIGHTS  = os.path.join('attached_assets', 'weights.json')
 DEFAULT_TOLERANCE = 1.0   # seconds
+DEFAULT_KEEP_SCREENSHOTS = 10   # used only with --prune-screenshots
 
 BACKENDS = ['color', 'hsv', 'ai', 'ocr', 'template']
 
@@ -356,6 +357,39 @@ def write_weights_file(path, weights, accuracies, n_popups, mode):
     print(f"\n[ weights ] Written → {path}")
 
 
+def prune_matched_screenshots(matched, attempts_dir, keep=DEFAULT_KEEP_SCREENSHOTS):
+    """
+    Delete popup screenshot PNGs, but ONLY for attempts that were
+    successfully matched to a mod ground-truth event AND already written
+    into training_data.jsonl — their pixel data has served its purpose
+    once the ground-truth labels are captured there.
+
+    Never touches:
+      - screenshots for unmatched attempts (no mod event found — may still
+        be joinable later against a different/later mod log export)
+      - the most recent `keep` matched screenshots (kept as a rolling
+        sample for manual visual sanity-checks)
+
+    Returns the number of files deleted.
+    """
+    matched_shots = sorted(
+        attempt.get('screenshot') for attempt, _shown, _outcome in matched
+        if attempt.get('screenshot')
+    )
+    excess = len(matched_shots) - keep
+    if excess <= 0:
+        return 0
+    deleted = 0
+    for name in matched_shots[:excess]:
+        fp = os.path.join(attempts_dir, name)
+        try:
+            os.remove(fp)
+            deleted += 1
+        except OSError:
+            pass
+    return deleted
+
+
 def write_training_data_file(path, matched):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     n = 0
@@ -472,6 +506,15 @@ def main():
     ap.add_argument('--summary',   action='store_true',
                     help='Print a compact accuracy table to stdout and exit (no files written). '
                          'Useful for a quick mid-session health check.')
+    ap.add_argument('--prune-screenshots', action='store_true',
+                    help='After a successful join, delete popup screenshot PNGs for attempts '
+                         'that were matched to a mod event and written into training_data.jsonl, '
+                         f'keeping the {DEFAULT_KEEP_SCREENSHOTS} most recent. Unmatched attempts '
+                         'are never pruned — their ground truth is not captured anywhere yet. '
+                         'Off by default; nothing is ever deleted unless you pass this flag.')
+    ap.add_argument('--keep-screenshots', type=int, default=DEFAULT_KEEP_SCREENSHOTS,
+                    help=f'How many matched screenshots to keep when --prune-screenshots is set '
+                         f'(default {DEFAULT_KEEP_SCREENSHOTS})')
     args = ap.parse_args()
 
     # ── Load attempts ─────────────────────────────────────────────────────────
@@ -507,6 +550,14 @@ def main():
 
         if not args.summary:
             write_training_data_file(args.out, matched)
+
+            if args.prune_screenshots:
+                attempts_dir = os.path.dirname(os.path.abspath(args.attempts))
+                deleted = prune_matched_screenshots(
+                    matched, attempts_dir, keep=args.keep_screenshots)
+                print(f"[ prune ] deleted {deleted} matched screenshot(s) "
+                      f"(kept {args.keep_screenshots} most recent matched + "
+                      f"all unmatched — their ground truth isn't saved anywhere yet)")
 
     # ── Mode B: user-feedback fallback (no mod events) ────────────────────────
     else:
