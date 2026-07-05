@@ -420,6 +420,40 @@ def print_report(weights, accuracies, n_matched, n_unmatched, mode):
     print(sep)
 
 
+def print_summary(weights, accuracies, n_matched, mode):
+    """
+    Compact single-line accuracy summary for quick health checks.
+
+    Printed when --summary is passed.  No files are written.
+    Format:
+      [n=42 | mode] color:87% hsv:91% ai:100% ocr:74% template:89%
+      weights → color=2 hsv=2 ai=3 ocr=1 template=2
+    """
+    def pct(v):
+        return f'{v:.0%}' if v is not None else '—'
+
+    parts = []
+    for b in BACKENDS:
+        a = accuracies[b]
+        p = pct(a['precision'])
+        w = weights.get(b, DEFAULT_WEIGHT.get(b, '?'))
+        flag = ''
+        if a['n_labelled'] < MIN_SAMPLES_TO_OVERRIDE:
+            flag = '*'   # asterisk = not enough samples, using default weight
+        parts.append(f"{b}:{p}{flag}(w={w})")
+
+    wline = '  '.join(
+        f"{b}={weights.get(b, DEFAULT_WEIGHT.get(b,'?'))}" for b in BACKENDS
+    )
+    sep = '─' * 66
+    print(sep)
+    print(f"  AFK accuracy check  [{n_matched} popup(s) | {mode}]")
+    print(f"  " + "  ".join(parts))
+    print(f"  weights → {wline}")
+    print(f"  (* = <{MIN_SAMPLES_TO_OVERRIDE} samples, weight is hardcoded default)")
+    print(sep)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -435,6 +469,9 @@ def main():
                     help='Max timestamp gap in seconds for joining (default 1.0)')
     ap.add_argument('--player',    default=None,
                     help='Filter attempts to this player name (optional)')
+    ap.add_argument('--summary',   action='store_true',
+                    help='Print a compact accuracy table to stdout and exit (no files written). '
+                         'Useful for a quick mid-session health check.')
     args = ap.parse_args()
 
     # ── Load attempts ─────────────────────────────────────────────────────────
@@ -468,7 +505,8 @@ def main():
         n_matched   = len(matched)
         n_unmatched = len(unmatched)
 
-        write_training_data_file(args.out, matched)
+        if not args.summary:
+            write_training_data_file(args.out, matched)
 
     # ── Mode B: user-feedback fallback (no mod events) ────────────────────────
     else:
@@ -483,11 +521,13 @@ def main():
     # ── Calibrate weights ─────────────────────────────────────────────────────
     weights, accuracies = calibrate_weights(stats)
 
-    # ── Write outputs ─────────────────────────────────────────────────────────
-    write_weights_file(args.weights, weights, accuracies, n_matched, mode)
-
-    # ── Print report ──────────────────────────────────────────────────────────
-    print_report(weights, accuracies, n_matched, n_unmatched, mode)
+    # ── Write outputs / print report ──────────────────────────────────────────
+    if args.summary:
+        # --summary: compact stdout table only, no file writes
+        print_summary(weights, accuracies, n_matched, mode)
+    else:
+        write_weights_file(args.weights, weights, accuracies, n_matched, mode)
+        print_report(weights, accuracies, n_matched, n_unmatched, mode)
 
 
 if __name__ == '__main__':
