@@ -115,6 +115,7 @@ declare -a SYNC_FILES=(
   "afk-forge/src/main/java/com/afkverify/AFKVerifyMod.java"       "afk-forge/src/main/java/com/afkverify/AFKVerifyMod.java"
 
   "replit.md"                                                                         "replit.md"
+  "SHELL_SOLVER.md"                                                                   "SHELL_SOLVER.md"
 )
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -129,22 +130,25 @@ TREE_JSON=$(curl -s \
   "${API}/git/trees/${BRANCH}?recursive=1" 2>/dev/null || true)
 
 # Build a lookup: path→sha from the flat tree array.
-# GitHub returns pretty-printed JSON (spaces, newlines) so we use a stateful
-# gawk parser that buffers path/type/sha per object and emits on closing '}'.
-# gawk 3-arg match() is standard on Ubuntu/Mint LTS.
+# Uses python3 (guaranteed present) to parse the GitHub JSON response.
+# Previous gawk 3-arg match() approach failed on systems with mawk/nawk
+# (Ubuntu default) — those lack the GNU awk extension.
 declare -A REMOTE_SHA
 while IFS=' ' read -r _path _sha; do
   REMOTE_SHA["$_path"]="$_sha"
-done < <(echo "$TREE_JSON" | gawk '
-  { line = $0; gsub(/^[[:space:]]+/, "", line) }
-  match(line, /"path"[[:space:]]*:[[:space:]]*"([^"]*)"/, a) { p = a[1] }
-  match(line, /"type"[[:space:]]*:[[:space:]]*"([^"]*)"/, a) { t = a[1] }
-  match(line, /"sha"[[:space:]]*:[[:space:]]*"([^"]*)"/, a)  { s = a[1] }
-  line ~ /^\}/ {
-    if (t == "blob" && p != "" && s != "") print p, s
-    p = ""; t = ""; s = ""
-  }
-')
+done < <(printf '%s' "$TREE_JSON" | python3 -c "
+import sys, json
+try:
+    data = json.loads(sys.stdin.read())
+    for item in data.get('tree', []):
+        if item.get('type') == 'blob':
+            p = item.get('path', '')
+            s = item.get('sha',  '')
+            if p and s:
+                print(p, s)
+except Exception as e:
+    import sys as _s; print('# tree_parse_error:', e, file=_s.stderr)
+")
 
 # Sanity check: if the map is empty the tree fetch or parse failed entirely.
 # Fall back to pushing everything rather than silently skipping all files.
