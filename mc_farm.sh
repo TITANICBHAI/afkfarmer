@@ -87,15 +87,56 @@ _attempt_no = 0          # incremented each time a popup is found
 
 # ── Timing ────────────────────────────────────────────────────
 POLL       = 0.35   # seconds between full-screen popup checks
-HOVER_WAIT = 0.22   # wait after moving mouse (MC tooltip appears within 1 tick = 50ms; 220ms = ~4 ticks, safer)
+HOVER_WAIT = 0.30   # wait after moving mouse (MC tooltip appears within 1 tick = 50ms; 300ms = ~6 ticks, safer on 14-FPS servers)
 REACT_MIN  = 0.20   # human-like pause before starting to solve (min)
 REACT_MAX  = 0.65   # human-like pause before starting to solve (max)
+# Chat early-warning: how often to run the chat scan (every N poll cycles).
+# At POLL=0.35s and N=2, we check chat every ~0.70s — fast enough to catch
+# the teleport message before the popup appears (~1-2s later).
+CHAT_DETECT_EVERY = 2
 SWEEP_TIMEOUT = 5.5 # abort sweep if it's been running this many seconds (server kicks ~7-10s)
 
-# Measured from screenshots (all sessions, 1024×576 screen):
-#   slot_w = 29 px  (column width  = popup_w / 9)
-#   slot_h = 35 px  (row height    = spacing between row centers, CONSTANT)
-# These are DIFFERENT — the AFK grid is NOT square in this server's GUI.
+# ── Minecraft / JartexNetwork OneBlock AFK-check knowledge ────────────────
+#
+#  How the check works:
+#   • The "Afk Grinding" popup fires every ~5 minutes of continuous AFK play.
+#   • JartexNetwork gives ~10-15 seconds to click the correct item.
+#     SWEEP_TIMEOUT is deliberately set below that window.
+#   • The confirm item is a RANDOM food item — changes every popup.
+#     Its tooltip title: "Click to Confirm" in §a green (#55FF55 / rgb 85,255,85).
+#     All other (decoy) items say: "Do not click" in §c red (#FF5555 / rgb 255,85,85).
+#   • Clicking the wrong item = immediate server kick (same as timeout).
+#   • Pressing Escape closes the popup without confirming = treated as timeout = kick.
+#   • The popup is a 9-column inventory strip placed ABOVE the player's inventory.
+#     It has up to 3 rows (27 slots); usually only 4-8 slots contain items.
+#   • GUI scale 2 is standard at 1366×694: slot icons are 16×16 native px,
+#     doubled to 32×32 on screen; slot bounding boxes measured at ~30×35 px.
+#   • CRITICAL: Minecraft must own the X11 focus before any click registers.
+#     xdotool can move the mouse anywhere on screen, but inventory clicks are
+#     silently discarded by Java's AWT event queue when another window has focus.
+#   • The popup title bar ("Afk Grinding") is a DARK band at the very top of the
+#     popup box — distinguishes this GUI from chests, crafting tables, etc.
+#
+MC_POPUP_TIMEOUT = 12.0     # seconds JartexNetwork allows for a click
+MC_WINDOW_TITLE  = "Minecraft"  # xdotool window-name search string
+
+# ── Ban guard ─────────────────────────────────────────────────────────────────
+# JartexNetwork: 5 consecutive failures (wrong click or timeout) = 1-hour ban.
+# The script tracks consecutive non-solved popups and stops itself before
+# reaching the ban threshold.  A "solve" is counted only when the popup
+# actually closed after the click (click_success=True AND popup_closed=True).
+# Strip-parse failures also count as a miss because the server sees a timeout.
+BAN_WARN_AT = 3    # print a loud warning after this many consecutive misses
+BAN_STOP_AT = 5    # remove FLAG (stop bot) after this many — stay 1 under limit
+
+# ── Unattended mode ───────────────────────────────────────────────────────────
+# Set MC_UNATTENDED=1 in the environment to skip the 20-second post-popup
+# feedback prompt.  Useful for overnight farming; disables accuracy labelling.
+MC_UNATTENDED = bool(os.environ.get('MC_UNATTENDED', '').strip())
+
+# Measured from screenshots (1366×694 screen, JartexNetwork resource pack):
+#   slot_w ≈ 30 px  (popup_width / 9 columns)
+#   slot_h ≈ 35 px  (row-center spacing — AFK strip is NOT square)
 SLOT_H_DEFAULT = 35  # initial estimate; recalculated dynamically from detected strip height
 
 # ── Hover spiral: positions to try (dx,dy) around the slot center ────────────
@@ -150,10 +191,20 @@ C_GRAY  = ((100,100,100), (230,230,230))
 # "Click to Confirm" title   §a = #55FF55 = rgb(85,255,85)
 C_GREEN = ((48, 195, 48),  (135, 255, 135))
 # "Do not click" title       §c = #FF5555 = rgb(255,85,85)
-C_RED   = ((188,  38, 38), (255, 118, 118))
+# Widened lower bound to catch dimmer/resource-pack-shifted red renders
+C_RED   = ((120,  20, 20), (255, 120, 120))
 # MC popup title bar + "Inventory" label dark background ≈ rgb(55,55,55)
 # These dark bands separate the AFK test strip from the player inventory.
 C_DARK  = ((10,  10,  10), (110, 110, 110))
+# Chat early-warning: §6 Gold (#FFAA00 = rgb(255,170,0)) is used by JartexNetwork
+# to color the "Console" prefix in server-generated messages like:
+#   "Console teleported you to spawn."
+# Tolerances widened by ±25 to handle anti-aliasing and JPEG compression.
+C_CHAT_GOLD = ((200, 130,  0), (255, 200, 50))
+# Chat area geometry as fractions of screen size (measured from screenshots):
+#   x: left 45% of screen, y: bottom 20% of screen
+CHAT_AREA_X_FRAC = 0.45   # width of chat area relative to screen width
+CHAT_AREA_Y_FRAC = 0.80   # top of chat area relative to screen height (0=top, 1=bottom)
 
 # ── Detect available methods once ─────────────────────────────
 HAS_TESS     = subprocess.run(['which','tesseract'],capture_output=True).returncode==0
@@ -270,6 +321,53 @@ def screen_wh():
 def xdo(*a):
     subprocess.run(['xdotool']+list(a),capture_output=True)
 
+def focus_mc_window():
+    """
+    Find and raise the Minecraft window so it owns the X11 input focus.
+
+    WHY THIS IS CRITICAL:
+      xdotool can move the cursor anywhere on screen even when Minecraft
+      doesn't have focus, BUT Minecraft's Java AWT input queue only processes
+      inventory clicks when the game window is the ACTIVE window.  Without
+      focus, every click lands at the right screen coordinate yet the game
+      silently ignores it — the popup stays open and we get a timeout kick.
+
+    HOW IT WORKS:
+      1. 'xdotool search --name Minecraft' returns all window IDs whose title
+         contains "Minecraft".  On a fresh install there is exactly one.
+      2. windowfocus --sync  → tells X11 to give keyboard+pointer focus.
+      3. windowactivate --sync → also raises the window to the top of the
+         stacking order (prevents it being obscured by a terminal/IDE).
+      4. 100ms settle pause → ensures the OS has transferred focus before the
+         first mousemove event, which some X11 compositors delay slightly.
+
+    Returns True if a Minecraft window was found and focused, False if not.
+    Running on a headless / non-X11 system always returns False gracefully.
+    """
+    try:
+        result = subprocess.run(
+            ['xdotool', 'search', '--name', MC_WINDOW_TITLE],
+            capture_output=True, text=True, timeout=3
+        )
+        wids = [w.strip() for w in result.stdout.splitlines() if w.strip()]
+        if not wids:
+            print(f"  [focus] no window named '{MC_WINDOW_TITLE}' — is Minecraft running?")
+            return False
+        wid = wids[-1]   # last match = most recently created/active
+        subprocess.run(['xdotool', 'windowfocus',   '--sync', wid],
+                       capture_output=True, timeout=2)
+        subprocess.run(['xdotool', 'windowactivate','--sync', wid],
+                       capture_output=True, timeout=2)
+        # Research-confirmed: Minecraft's LWJGL needs 200ms to process the X11
+        # focus transfer before it will accept XTEST mouse/click events.
+        # 100ms was marginal; 200ms is the value cited in xdotool+LWJGL guides.
+        time.sleep(0.20)
+        print(f"  [focus] MC window (id={wid}) focused ✓")
+        return True
+    except Exception as e:
+        print(f"  [focus] could not focus MC window: {e}")
+        return False
+
 # ── Cursor position tracking ──────────────────────────────────────────────────
 _cur_x = None
 _cur_y = None
@@ -385,7 +483,7 @@ def _wait_for_tooltip(timeout=None):
       • scrot latency ≈ 99 ms; maim ≈ 134 ms.
       • Therefore: wait 60 ms first (tooltip MUST be rendered by then),
         then poll every 65 ms until deadline.
-      • With HOVER_WAIT=0.22 s: 0.22 − 0.06 = 0.16 s window → 2-3 polls.
+      • With HOVER_WAIT=0.30 s: 0.30 − 0.06 = 0.24 s window → 3-4 polls.
     """
     t = timeout if timeout is not None else HOVER_WAIT
     time.sleep(0.06)   # Give MC 60 ms to render the tooltip (> 1 game tick)
@@ -419,6 +517,31 @@ def _wait_for_tooltip(timeout=None):
 #  all in SCREEN coordinates, or None if no popup found.
 # ═══════════════════════════════════════════════════════════════
 def find_afk_strip():
+    """
+    Locate the AFK Grinding popup's item strip in the current screenshot.
+
+    Minecraft GUI structure for the "Afk Grinding" check (GUI scale 2):
+      ┌─────────────────────────────────────┐  ← dark title bar (~14px tall)
+      │           Afk Grinding              │    colour: near-black rgb(30,20,30)
+      ├─────────────────────────────────────┤  ← strip_top (first AFK item row)
+      │  [slot][slot][slot]...(9 cols wide) │
+      │  [slot][slot][slot]...(up to 3 rows)│
+      ├─────────────────────────────────────┤  ← "Inventory" separator label
+      │  [player inventory rows...]         │  ← NOT part of the AFK strip
+      └─────────────────────────────────────┘
+
+    Detection strategy:
+      • Scan each row for the longest contiguous run of C_GRAY pixels.
+        The popup background is a solid mid-gray; world terrain rarely has
+        a horizontal gray run longer than 75 px.
+      • Walk that center column up/down to find the full popup bounding box.
+      • Inside the bbox, find the dark "Inventory" separator label to locate
+        exactly where the AFK rows end and player inventory begins.
+      • Slot width = popup_width / 9; slot height = strip_height / 3.
+
+    Returns (strip_left, strip_top, strip_right, strip_bottom, slot_w, slot_h)
+    or None if the popup is not visible.
+    """
     sw,sh = screen_wh()
 
     # ── 1. Capture screen — use 90% crop when size is known, full screen otherwise ──
@@ -624,7 +747,7 @@ def _tooltip_title_rows(rows, ih, bpp):
             tb = iy
     if tt < 0 or tb - tt < 6:
         return rows          # no tooltip box visible — scan everything
-    title_bot = tt + max(6, (tb - tt) // 4)
+    title_bot = tt + max(8, (tb - tt) // 3)   # top 33% (was 25%) — ensures title line included
     return rows[tt:title_bot]
 
 def ask_color(path=None):
@@ -946,15 +1069,27 @@ def match_slot_from_prescan(rows, iw, ih, bpp, row, col, slot_w, slot_h):
     if d_mad + TEMPLATE_MAD_MARGIN <= c_mad: return 'deny'
     return None   # too close to call
 
-# Tooltip background: MC renders it as very dark (near-black) ~rgb(16,0,16).
-# Keep the range tight to avoid false-positives on other dark game areas.
-C_TOOLTIP_BG = ((0,0,0),(42,10,42))
+# Tooltip background: MC renders it as very dark near-black with slight purple tint.
+# Measured from JartexNetwork screenshots: rgb(27,12,27), rgb(23,8,23), rgb(30,15,30).
+# Max G widened from 10→18 to catch rgb(27,12,27) variants.
+# Game world dark bg is rgb(24,22,22) — g=22 > 18, so still excluded correctly.
+C_TOOLTIP_BG = ((0,0,0),(50,18,50))
 
 def has_tooltip(path=None):
     r=decode_png_cached()
     if r is None: return False
     rows,_,_,bpp=r
-    return count_color(rows,bpp,C_TOOLTIP_BG[0],C_TOOLTIP_BG[1])>=15
+    # Primary: dark-purple tooltip background pixels (≥8 is enough for a partial frame)
+    if count_color(rows,bpp,C_TOOLTIP_BG[0],C_TOOLTIP_BG[1]) >= 8:
+        return True
+    # Fallback: detect tooltip by its colored title text directly.
+    # Robust when tooltip bg is near-invisible or partially off-screen.
+    # Threshold 8 = at least 2 letters worth of colored pixels at GUI scale 2.
+    if count_color(rows,bpp,C_GREEN[0],C_GREEN[1]) >= 8:
+        return True
+    if count_color(rows,bpp,C_RED[0],C_RED[1]) >= 8:
+        return True
+    return False
 
 def _snap_tooltip(mx, my, sw, sh, slot_w=29):
     """Full-screen capture.
@@ -975,13 +1110,13 @@ def hover_spiral(sx, sy, sw, sh, slot_w=29):
     Falls back to (False, sx, sy) if none of the spiral positions work.
 
     Timeout strategy:
-      Position 0 (center): full HOVER_WAIT (0.15 s) — most items show here
-      Positions 1-8 (ring 1): HOVER_WAIT * 0.5 (0.075 s) — short but fair
-      Positions 9-16 (ring 2): HOVER_WAIT * 0.4 (0.060 s) — quick last resort
+      Position 0 (center): full HOVER_WAIT (0.30 s) — most items show here
+      Positions 1-8 (ring 1): HOVER_WAIT * 0.5 (0.15 s) — short but fair
+      Positions 9-16 (ring 2): HOVER_WAIT * 0.4 (0.12 s) — quick last resort
 
     Worst-case (no tooltip found at any of 17 positions):
-      0.15 + 8×0.075 + 8×0.060 = 0.15 + 0.60 + 0.48 = 1.23 s per empty slot
-    vs the old fixed 17×0.15 = 2.55 s.  This keeps sweep time well under
+      0.30 + 8×0.15 + 8×0.12 = 0.30 + 1.20 + 0.96 = 2.46 s per empty slot
+    vs the old fixed 17×0.30 = 5.10 s.  This keeps sweep time well under
     the 5.5 s SWEEP_TIMEOUT even with multiple empty slots.
     """
     for i, (dx, dy) in enumerate(HOVER_SPIRAL):
@@ -1139,6 +1274,86 @@ def click_and_verify(mx, my):
 # ═══════════════════════════════════════════════════════════════
 #  QUICK POPUP PRESENCE CHECK  (gray-mass scan, no full analysis)
 # ═══════════════════════════════════════════════════════════════
+def chat_says_teleported():
+    """
+    Detect the "Console teleported you to spawn." chat message.
+
+    JartexNetwork flow — ALWAYS in this order:
+      1. Server teleports player to Spawn.
+      2. Chat message appears: "Console teleported you to spawn."
+      3. ~1-2 seconds later the "Afk Grinding" popup GUI opens.
+
+    Detecting step 2 lets us:
+      • Pre-focus the MC window immediately (before the popup appears).
+      • Position the cursor center-screen so it's inside the popup area.
+      • Poll popup_open() at 80ms intervals instead of waiting POLL=0.35s.
+    Net result: up to ~1.5s head start, which is significant on a 12s timer.
+
+    Detection strategy (two independent backends):
+      1. Tesseract OCR on the chat crop (if installed) — most accurate.
+         Looks for "teleport" + "spawn" anywhere in the cropped text.
+      2. §6 Gold pixel count — "Console" prefix color is #FFAA00.
+         ≥12 gold pixels in the chat area strongly suggests a console
+         message is present.  False positives are harmless (worst case:
+         focus_mc_window() is called a few ms early, which is fine).
+
+    Returns True if the teleport message is detected by either backend.
+    Guaranteed to not raise — returns False on any error.
+    """
+    sw, sh = screen_wh()
+    if not sw or not sh:
+        return False
+    try:
+        # ── Crop: left 45% × bottom 20% of screen (chat area) ────────────
+        cx  = 0
+        cy  = max(0, int(sh * CHAT_AREA_Y_FRAC))
+        cw  = int(sw * CHAT_AREA_X_FRAC)
+        ch  = sh - cy
+        if cw < 50 or ch < 10:
+            return False
+
+        chat_snap = "/tmp/_mc_chat.png"
+        subprocess.run(
+            ['scrot', '-z', '-a', f'{cx},{cy},{cw},{ch}', chat_snap],
+            capture_output=True, timeout=3
+        )
+        if not os.path.exists(chat_snap):
+            return False
+
+        # ── Backend 1: Tesseract OCR ──────────────────────────────────────
+        if HAS_TESS:
+            try:
+                out = subprocess.run(
+                    ['tesseract', chat_snap, 'stdout', '--psm', '6'],
+                    capture_output=True, text=True, timeout=4
+                )
+                text = out.stdout.lower()
+                # Both "teleport*" and "spawn" must appear — "Console" alone
+                # could be any admin message; requiring both keeps FP rate low.
+                if ('teleport' in text or 'teleported' in text) and 'spawn' in text:
+                    print("  [chat-warn] 'teleport…spawn' via OCR ✓")
+                    return True
+            except Exception:
+                pass
+
+        # ── Backend 2: §6 Gold pixel count ───────────────────────────────
+        # "Console" in JartexNetwork messages is formatted in §6 gold (#FFAA00).
+        # Count gold pixels in the chat crop — ≥12 means a console message
+        # label is likely visible.  Harmless false-positive if another gold
+        # message happens to be in chat; the extra window focus costs ~300ms.
+        r = decode_png(chat_snap)
+        if r is not None:
+            rows, iw, ih, bpp = r
+            n_gold = count_color(rows, bpp, C_CHAT_GOLD[0], C_CHAT_GOLD[1])
+            if n_gold >= 12:
+                print(f"  [chat-warn] gold_px={n_gold} in chat → likely Console message")
+                return True
+
+    except Exception as e:
+        print(f"  [chat-warn] error: {e}")
+    return False
+
+
 def popup_open():
     """
     Detect if the AFK Grinding popup is open.
@@ -1169,7 +1384,14 @@ def popup_open():
 # ═══════════════════════════════════════════════════════════════
 def prescan_strip(strip):
     sl, st, sr, sb, slot_w, slot_h = strip
-    N_ROWS = 3
+    # Research finding (Jul 2026 screenshot analysis, 8 popups across 2 sessions):
+    # JartexNetwork's Afk Grinding GUI uses a 27-slot (3×9) inventory container,
+    # but items are ONLY ever placed in the top 2 rows (rows 0 and 1).  Row 2 is
+    # always empty gray slots.  Scanning only 2 rows cuts worst-case sweep time
+    # by 33% (9 fewer empty slots × ~0.30s each = ~2.7s saved).
+    # Safety: if prescan finds nothing in 2 rows it falls back to hovering ALL
+    # slots including row 2, so a future popup using row 3 is still handled.
+    N_ROWS = 2
     sw, sh = screen_wh()
 
     px = max(0, sl);  py = max(0, st)
@@ -1185,8 +1407,8 @@ def prescan_strip(strip):
 
     r = decode_png(SNAP)
     if r is None:
-        print("  Prescan: decode failed — hovering ALL slots")
-        all_s = [(row,col) for row in range(N_ROWS) for col in range(9)]
+        print("  Prescan: decode failed — hovering ALL slots (3 rows for safety)")
+        all_s = [(row,col) for row in range(3) for col in range(9)]
         return all_s, [], None
 
     img_rows, iw, ih, bpp = r
@@ -1197,7 +1419,11 @@ def prescan_strip(strip):
             cx = col * slot_w + slot_w // 2
             cy = row * slot_h + slot_h // 2
 
-            half = max(5, slot_w // 4)   # scale with GUI scale
+            # At GUI scale 2 (1366×694) each slot icon is 32×32 px on screen.
+            # Scanning slot_w//3 (≈10px) radius = a 20×20 px box — covers the
+            # centre of the item icon while avoiding the 2-px dark slot border.
+            # Old slot_w//4 (≈7px) gave a 14×14 box which missed icon edges.
+            half = max(6, slot_w // 3)
             x0 = max(0, cx - half);  x1 = min(iw, cx + half)
             y0 = max(0, cy - half);  y1 = min(ih, cy + half)
 
@@ -1220,8 +1446,11 @@ def prescan_strip(strip):
           f"({9*N_ROWS - len(high) - len(med)} empty skipped)")
 
     if not high and not med:
-        print("  Prescan found nothing — hovering ALL as safety fallback")
-        all_s = [(row,col) for row in range(N_ROWS) for col in range(9)]
+        # Nothing found in the normal 2-row scan — fall back to all 3 rows in
+        # case JartexNetwork ever places items in the 3rd row or the prescan
+        # crop missed them.  This is a safety net, not the normal path.
+        print("  Prescan found nothing — hovering ALL 27 slots (3 rows) as safety fallback")
+        all_s = [(row,col) for row in range(3) for col in range(9)]
         return all_s, [], (img_rows, iw, ih, bpp)
 
     return high, med, (img_rows, iw, ih, bpp)
@@ -1302,7 +1531,13 @@ def ask_feedback(context=''):
     stdin) because /dev/tty connects directly to the controlling terminal.
 
     Returns 'correct' | 'incorrect' | 'skipped'.  20-second timeout.
+
+    When MC_UNATTENDED=1 is set, returns 'skipped' immediately without
+    prompting — useful for overnight/unattended farming runs where no one
+    is watching the terminal.  Accuracy labels are simply not collected.
     """
+    if MC_UNATTENDED:
+        return 'skipped'
     sep = '─' * 62
     msg = (f"\n{sep}\n"
            f"[FEEDBACK]  {context}\n"
@@ -1355,6 +1590,19 @@ def sweep_strip(strip):
     sw = _sw if _sw else 9999
     sh = _sh if _sh else 9999
     sweep_start = time.time()
+
+    # ── CRITICAL: ensure Minecraft has X11 focus before any mouse event ──
+    # If the game is not the active window, xdotool clicks land at the right
+    # screen pixel but Java's AWT input queue discards them — the popup never
+    # closes and the server kicks us for timeout.  We focus even if we think
+    # the window is already active, because alt-tab or a system dialog can
+    # silently steal focus between the popup detection and the sweep.
+    focus_mc_window()
+
+    # Budget check — JartexNetwork allows ~MC_POPUP_TIMEOUT seconds total.
+    # If our sweep takes longer than SWEEP_TIMEOUT we abort and let the
+    # bash backup solver handle it, rather than rushing a potentially wrong click.
+    # SWEEP_TIMEOUT (5.5s) < MC_POPUP_TIMEOUT (12s) leaves 6+ seconds of margin.
 
     # ── Save popup screenshot and start the attempt record ────────────────
     ts_str, base_name = save_popup_screenshot(strip)
@@ -1608,6 +1856,43 @@ def sweep_strip(strip):
     return False
 
 # ═══════════════════════════════════════════════════════════════
+#  BAN GUARD
+# ═══════════════════════════════════════════════════════════════
+def _ban_check(consec_fails):
+    """
+    Emit a warning or stop the bot based on consecutive-failure count.
+
+    JartexNetwork bans players for 1 hour after 5 consecutive AFK-check
+    failures (timeout or wrong click).  This function:
+      • Prints a loud warning at BAN_WARN_AT (default 3) misses.
+      • Removes the FLAG file at BAN_STOP_AT (default 5) misses,
+        which causes the main while-loop to exit gracefully on its
+        next iteration — stopping the bot BEFORE the ban triggers.
+
+    Called after every popup that the script did NOT successfully solve.
+    """
+    if consec_fails <= 0:
+        return
+    bar = '!' * 60
+    if consec_fails >= BAN_STOP_AT:
+        print(f"\n{bar}")
+        print(f"  BAN GUARD: {consec_fails} consecutive misses — STOPPING BOT")
+        print(f"  JartexNetwork bans at 5 misses.  Remove the flag and")
+        print(f"  restart only after fixing the detection issue.")
+        print(f"{bar}\n")
+        _log(f"BAN_GUARD_STOP consec_fails={consec_fails}")
+        try: os.remove(FLAG)
+        except: pass
+    elif consec_fails >= BAN_WARN_AT:
+        print(f"\n{'═'*60}")
+        print(f"  ⚠ WARNING: {consec_fails} consecutive misses "
+              f"({BAN_STOP_AT - consec_fails} left before auto-stop).")
+        print(f"  Check detection accuracy or stop the bot manually.")
+        print(f"{'═'*60}\n")
+        _log(f"BAN_GUARD_WARN consec_fails={consec_fails}")
+
+
+# ═══════════════════════════════════════════════════════════════
 #  MAIN LOOP
 # ═══════════════════════════════════════════════════════════════
 def main():
@@ -1615,7 +1900,17 @@ def main():
     print(f"[ AFK solver ] mode: {mode}")
     print(f"[ AFK solver ] session: {SESSION_ID}")
     print(f"[ AFK solver ] calibration data → {ASSETS_DIR}/")
+    print(f"[ AFK solver ] server popup timeout: {MC_POPUP_TIMEOUT}s  "
+          f"sweep budget: {SWEEP_TIMEOUT}s  "
+          f"margin: {MC_POPUP_TIMEOUT - SWEEP_TIMEOUT:.1f}s")
+    print(f"[ AFK solver ] ban guard: warn@{BAN_WARN_AT}  stop@{BAN_STOP_AT}  "
+          f"| unattended: {'ON (feedback skipped)' if MC_UNATTENDED else 'OFF (20s feedback prompt)'}"
+          f"  | chat-warn: every {CHAT_DETECT_EVERY} polls")
     print( "[ AFK solver ] watching for Afk Grinding popup...\n")
+
+    # Focus MC window now so the OS has raised it before the first popup.
+    # This also gives the user an early warning if Minecraft is not running.
+    focus_mc_window()
 
     _ensure_assets()
     _load_weights()
@@ -1625,14 +1920,54 @@ def main():
     # online learning accumulated during previous sessions.
     if _slot_templates.get('confirm') is None and _slot_templates.get('deny') is None:
         _bootstrap_templates_from_assets()
-    idle=0
+    idle           = 0
+    _chat_ctr      = 0   # counts up; chat scan fires when it reaches CHAT_DETECT_EVERY
+    _consec_fails  = 0   # consecutive non-solved popups (ban guard)
+    _history       = []  # last 10 outcomes: True=solved, False=missed (streak display)
+
     while os.path.exists(FLAG):
         try:
-            if not popup_open():
-                idle+=1
-                if idle%40==0: print("[ AFK solver ] still watching...")
-                time.sleep(POLL)
-                continue
+            _popup_now = popup_open()
+
+            if not _popup_now:
+                idle += 1
+                if idle % 40 == 0:
+                    # Show running solve streak so user can see accuracy at a glance
+                    if _history:
+                        _streak = ''.join('✓' if x else '✗' for x in _history[-10:])
+                        _rate   = sum(_history) / len(_history)
+                        print(f"[ AFK solver ] still watching...  "
+                              f"streak: {_streak}  ({_rate:.0%})")
+                    else:
+                        print("[ AFK solver ] still watching...")
+
+                # ── Chat early-warning (every CHAT_DETECT_EVERY polls) ────
+                # Checks for "Console teleported you to spawn." in the chat
+                # area.  When found we pre-focus MC and poll aggressively
+                # (80ms intervals) for up to 3s to catch the popup the
+                # moment it appears — giving us back 1-2s of solve budget.
+                _chat_ctr += 1
+                if _chat_ctr >= CHAT_DETECT_EVERY:
+                    _chat_ctr = 0
+                    if chat_says_teleported():
+                        print("[ AFK solver ] ⚡ teleport detected in chat — "
+                              "pre-focusing MC and waiting for popup...")
+                        focus_mc_window()
+                        # Move cursor to screen centre so it lands inside the
+                        # popup area when the GUI opens (avoids wasted first hover).
+                        _psw, _psh = screen_wh()
+                        if _psw and _psh:
+                            xdo('mousemove', str(_psw // 2), str(_psh // 2))
+                        # Tight poll: 80ms × 37 iterations = up to 3s wait
+                        for _ in range(37):
+                            time.sleep(0.08)
+                            if popup_open():
+                                _popup_now = True
+                                break
+
+                if not _popup_now:
+                    time.sleep(POLL)
+                    continue
 
             # ── Popup detected ────────────────────────────────────────────
             idle = 0
@@ -1655,6 +1990,11 @@ def main():
                     time.sleep(0.5)
                 try: os.remove(LOCK)
                 except: pass
+                # Strip-parse failure = server sees timeout = counts as a miss
+                _consec_fails += 1
+                _history.append(False)
+                if len(_history) > 50: _history.pop(0)
+                _ban_check(_consec_fails)
                 continue
 
             sl,st,sr,sb,slot_w,slot_h=strip
@@ -1667,10 +2007,20 @@ def main():
             try: os.remove(LOCK)
             except: pass
 
+            # ── Ban guard: track consecutive misses ───────────────────────
+            # "Solved" only counts when the popup actually closed after the
+            # click — a click that left the popup open is still a miss from
+            # the server's perspective (it will kick us after the timer).
             if solved:
+                _consec_fails = 0
+                _history.append(True)
                 print("[ AFK solver ] ✓ solved! Back to watching...\n")
             else:
+                _consec_fails += 1
+                _history.append(False)
+                _ban_check(_consec_fails)
                 time.sleep(POLL)
+            if len(_history) > 50: _history.pop(0)
 
         except KeyboardInterrupt:
             break
@@ -2225,14 +2575,14 @@ echo "[ MC Farm ] research techniques loaded (Bézier/lognormal/polar/ImgMag/ove
 #  Color constants match Python src:
 #    C_GRAY:        rgb(100-230, 100-230, 100-230)  inventory background
 #    C_GREEN:       rgb(48-135, 195-255, 48-135)    §a "Click to Confirm"
-#    C_RED:         rgb(188-255, 38-118, 38-118)    §c "Do not click"
-#    C_TOOLTIP_BG:  rgb(0-42, 0-10, 0-42)           tooltip dark-purple bg
-#                   (Python line: C_TOOLTIP_BG = ((0,0,0),(42,10,42)))
+#    C_RED:         rgb(120-255, 20-120, 20-120)    §c "Do not click" (widened)
+#    C_TOOLTIP_BG:  rgb(0-50, 0-18, 0-50)           tooltip dark-purple bg
+#                   (Python line: C_TOOLTIP_BG = ((0,0,0),(50,18,50)))
 #
 #  Hover timing matches Python:
 #    60ms initial (MC renders tooltip in 1 tick = 50ms)
 #    then 65ms polls  (identical to Python _wait_for_tooltip)
-#    HOVER_WAIT  =  220ms total (Python HOVER_WAIT = 0.22)
+#    HOVER_WAIT  =  300ms total (Python HOVER_WAIT = 0.30)
 #
 #  Sources for every technique used here are in the function comments above.
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2240,7 +2590,7 @@ echo "[ MC Farm ] research techniques loaded (Bézier/lognormal/polar/ImgMag/ove
 SH_SNAP="/tmp/_mc_sh_afk.png"        # backup solver screenshot path
 SH_LOG="/tmp/mc_sh_afk_log.txt"      # backup solver diagnostic log
 SH_POLL_S="0.40"                     # seconds between popup polls
-SH_HOVER_MS=220                      # ms total to wait for tooltip
+SH_HOVER_MS=300                      # ms total to wait for tooltip (increased from 220 for 14-FPS servers)
 SH_SWEEP_TIMEOUT=5                   # seconds before aborting a sweep
 #
 # ── Calibrated from attached_assets/ screenshots (1366×694, JartexNetwork) ──
@@ -2459,13 +2809,21 @@ sh_prescan() {
 }
 
 # ── sh_has_tooltip ────────────────────────────────────────────────────────────
-# Returns 0 if SH_SNAP contains ≥SH_TIP_THRESH dark-purple tooltip background
-# pixels.  Dark-purple range = Python C_TOOLTIP_BG = ((0,0,0),(42,10,42)).
+# Returns 0 if SH_SNAP contains tooltip evidence:
+#   Primary  : ≥SH_TIP_THRESH dark-purple bg pixels (C_TOOLTIP_BG 0-50, 0-18, 0-50)
+#   Fallback : ≥8 green title pixels (§a "Click to Confirm") OR red title pixels
+# Widened from (0-42,0-10,0-42) to (0-50,0-18,0-50) based on measured bg colors.
 sh_has_tooltip() {
     [ "$HAS_IMGMAG" -eq 0 ] && return 1
     local snap="${1:-$SH_SNAP}"
-    local n; n=$(imgmag_count_range "$snap" 0 0 99999 99999 0 0 0 42 10 42)
-    [ "${n:-0}" -ge "$SH_TIP_THRESH" ]
+    local n; n=$(imgmag_count_range "$snap" 0 0 99999 99999 0 0 0 50 18 50)
+    [ "${n:-0}" -ge "$SH_TIP_THRESH" ] && return 0
+    # Fallback: detect by colored title text (green §a or red §c)
+    local ng; ng=$(imgmag_count_range "$snap" 0 0 99999 99999 48 195 48 135 255 135)
+    [ "${ng:-0}" -ge 8 ] && return 0
+    local nr; nr=$(imgmag_count_range "$snap" 0 0 99999 99999 120 20 20 255 120 120)
+    [ "${nr:-0}" -ge 8 ] && return 0
+    return 1
 }
 
 # ── sh_wait_tooltip ────────────────────────────────────────────────────────────
@@ -2517,7 +2875,7 @@ sh_read_tooltip() {
     local snap="${1:-$SH_SNAP}"
     local hover_x="${2:-}" hover_y="${3:-}"
 
-    # Locate tooltip box (dark-purple bg; Python C_TOOLTIP_BG = (0-42,0-10,0-42))
+    # Locate tooltip box (dark-purple bg; Python C_TOOLTIP_BG = (0-50,0-18,0-50))
     local tip_bbox
     tip_bbox=$(convert "$snap" \
         -fuzz 8% -fill white -opaque "rgb(21,5,21)" \
@@ -2548,10 +2906,12 @@ sh_read_tooltip() {
     #   game world below/around the popup.
     #
     if [ -n "$hover_x" ] && [ -n "$hover_y" ]; then
-        # Primary: hover-relative zone above the cursor (where Minecraft renders tooltip)
-        zone_x=$(( hover_x - 130 )); [ "$zone_x" -lt 0 ] && zone_x=0
-        zone_y=$(( hover_y - 210 )); [ "$zone_y" -lt 0 ] && zone_y=0
-        zone_w=260; zone_h=130
+        # Primary: wide zone around the cursor — tooltip can render above, below, or
+        # to either side depending on screen position.  260×130 above-only missed
+        # tooltips on top-row slots where MC renders them BELOW/RIGHT the cursor.
+        zone_x=$(( hover_x - 280 )); [ "$zone_x" -lt 0 ] && zone_x=0
+        zone_y=$(( hover_y - 280 )); [ "$zone_y" -lt 0 ] && zone_y=0
+        zone_w=620; zone_h=520
     elif [ -n "$TW" ] && { [ "$TW" -ge 20 ] && [ "$TW" -lt 1200 ] 2>/dev/null; }; then
         # Secondary: bbox result is plausible (not full-screen), use top 25%
         local title_h=$(( TH / 4 ))
@@ -2575,7 +2935,7 @@ sh_read_tooltip() {
 
             # ── Backend 1: RGB absolute range (Python ask_color) ────────────
             if (r>=48  && r<=135 && g>=195 && g<=255 && b>=48  && b<=135) b1g++
-            if (r>=188 && r<=255 && g>=38  && g<=118 && b>=38  && b<=118) b1r++
+            if (r>=120 && r<=255 && g>=20  && g<=120 && b>=20  && b<=120) b1r++
 
             # ── Backend 2: Channel dominance ratio (Python ask_ratio) ───────
             tot=r+g+b
@@ -2620,13 +2980,13 @@ sh_read_tooltip() {
 sh_hover_spiral() {
     local sx=$1 sy=$2
 
-    # (dx dy timeout_ms) — identical positions to Python HOVER_SPIRAL
+    # (dx dy timeout_ms) — matches Python HOVER_SPIRAL with updated HOVER_WAIT=300ms
     local -a spiral=(
-        "0 0 220"
-        "0 -4 110" "4 0 110" "0 4 110" "-4 0 110"
-        "-3 -3 110" "3 -3 110" "3 3 110" "-3 3 110"
-        "0 -8 88" "8 0 88" "0 8 88" "-8 0 88"
-        "-6 -6 88" "6 -6 88" "6 6 88" "-6 6 88"
+        "0 0 300"
+        "0 -4 150" "4 0 150" "0 4 150" "-4 0 150"
+        "-3 -3 150" "3 -3 150" "3 3 150" "-3 3 150"
+        "0 -8 120" "8 0 120" "0 8 120" "-8 0 120"
+        "-6 -6 120" "6 -6 120" "6 6 120" "-6 6 120"
     )
 
     local triplet dx dy ms nx ny
@@ -2691,12 +3051,86 @@ sh_click_verify() {
     return 1
 }
 
+# ── sh_chat_says_teleported ───────────────────────────────────────────────────
+# Bash mirror of Python chat_says_teleported().
+#
+# Detects "Console teleported you to spawn." in the chat area of the screen
+# using the same two-backend approach:
+#   1. Tesseract OCR on the chat crop — most accurate (optional dep).
+#   2. §6 Gold pixel count via ImageMagick — "Console" prefix color #FFAA00.
+#
+# Returns 0 (true) if the teleport message is likely present, 1 (false) otherwise.
+#
+# WHY: JartexNetwork always teleports the player to Spawn ~1-2s before the
+# Afk Grinding popup opens.  Detecting this lets the backup solver pre-focus
+# the MC window and use tight 80ms polling instead of waiting SH_POLL_S=0.5s.
+#
+sh_chat_says_teleported() {
+    # ── Screen dimensions ─────────────────────────────────────────────────
+    local sw sh dims
+    dims=$(xdotool getdisplaygeometry 2>/dev/null)
+    [ -z "$dims" ] && return 1
+    sw=$(echo "$dims" | cut -d' ' -f1)
+    sh=$(echo "$dims" | cut -d' ' -f2)
+
+    # ── Chat crop: left 45% × bottom 20% of screen ───────────────────────
+    local cx cy cw ch
+    cx=0
+    cy=$(( sh * 80 / 100 ))
+    cw=$(( sw * 45 / 100 ))
+    ch=$(( sh - cy ))
+    [ "$cw" -lt 50 ] || [ "$ch" -lt 10 ] && return 1
+
+    local chat_snap="/tmp/_mc_chat_sh.png"
+    scrot -z -a "${cx},${cy},${cw},${ch}" "$chat_snap" 2>/dev/null
+    [ -f "$chat_snap" ] || return 1
+
+    # ── Backend 1: Tesseract OCR ──────────────────────────────────────────
+    if command -v tesseract >/dev/null 2>&1; then
+        local ocr_text
+        ocr_text=$(tesseract "$chat_snap" stdout --psm 6 2>/dev/null \
+                   | tr '[:upper:]' '[:lower:]')
+        # Require "teleport" (or "teleported") AND "spawn" — same logic as Python
+        if echo "$ocr_text" | grep -qE 'teleport' && \
+           echo "$ocr_text" | grep -q 'spawn'; then
+            _sh_log "  [chat-warn] 'teleport…spawn' via OCR ✓"
+            rm -f "$chat_snap"
+            return 0
+        fi
+    fi
+
+    # ── Backend 2: §6 Gold pixel count ───────────────────────────────────
+    # Count pixels near #FFAA00 (rgb 255,170,0) — "Console" prefix colour.
+    # If ImageMagick is absent, the Bash backup solver has no chat detection
+    # (it falls back to normal popup polling — no regression).
+    if [ "$HAS_IMGMAG" -eq 1 ]; then
+        local n_gold
+        n_gold=$(convert "$chat_snap" \
+            -define png:compression-level=0 \
+            -fill white -fuzz 20% -opaque "rgb(255,170,0)" \
+            -fill black +opaque white \
+            -format "%[fx:round(w*h*mean)]" info: 2>/dev/null)
+        rm -f "$chat_snap"
+        n_gold="${n_gold:-0}"
+        if [ "$n_gold" -ge 12 ]; then
+            _sh_log "  [chat-warn] gold_px=${n_gold} → likely Console message"
+            return 0
+        fi
+        return 1
+    fi
+
+    rm -f "$chat_snap"
+    return 1
+}
+
 # ── shell_afk_solver ──────────────────────────────────────────────────────────
 # Main backup solver loop.  Called in background when Python solver dies.
 # Runs until FLAG_FILE is removed (same as Python main loop condition).
 shell_afk_solver() {
     _sh_log "[ Shell Backup Solver ] started  HAS_IMGMAG=$HAS_IMGMAG  HAS_XINPUT=$HAS_XINPUT"
     local idle=0
+    local sh_chat_ctr=0   # chat scan fires every SH_CHAT_EVERY polls
+    local SH_CHAT_EVERY=2 # mirror of Python CHAT_DETECT_EVERY
 
     while [ -f "$FLAG_FILE" ]; do
         sleep "$SH_POLL_S"
@@ -2706,7 +3140,46 @@ shell_afk_solver() {
         if ! sh_popup_open; then
             idle=$(( idle + 1 ))
             [ $(( idle % 50 )) -eq 0 ] && _sh_log "  still watching... (idle=${idle})"
-            continue
+
+            # ── Chat early-warning (every SH_CHAT_EVERY polls) ───────────
+            sh_chat_ctr=$(( sh_chat_ctr + 1 ))
+            if [ "$sh_chat_ctr" -ge "$SH_CHAT_EVERY" ]; then
+                sh_chat_ctr=0
+                if sh_chat_says_teleported; then
+                    _sh_log "  ⚡ teleport in chat — pre-focusing MC, tight poll for popup..."
+                    # Focus the window now — 1-2s before the popup appears
+                    local _pre_wid
+                    _pre_wid=$(xdotool search --name "Minecraft" 2>/dev/null | tail -1)
+                    if [ -n "$_pre_wid" ]; then
+                        xdotool windowfocus    --sync "$_pre_wid" 2>/dev/null
+                        xdotool windowactivate --sync "$_pre_wid" 2>/dev/null
+                        sleep 0.20
+                    fi
+                    # Move cursor to screen centre so it lands inside the popup
+                    local _psw _psh _pdims
+                    _pdims=$(xdotool getdisplaygeometry 2>/dev/null)
+                    if [ -n "$_pdims" ]; then
+                        _psw=$(echo "$_pdims" | cut -d' ' -f1)
+                        _psh=$(echo "$_pdims" | cut -d' ' -f2)
+                        xdotool mousemove $(( _psw / 2 )) $(( _psh / 2 )) 2>/dev/null
+                    fi
+                    # Tight poll: up to 3s at 80ms intervals
+                    local _pt _pe _found_popup=0
+                    _pt=$SECONDS
+                    while [ $(( SECONDS - _pt )) -lt 3 ]; do
+                        sleep 0.08
+                        if sh_popup_open; then
+                            _found_popup=1; break
+                        fi
+                    done
+                    [ "$_found_popup" -eq 0 ] && continue  # false positive — resume
+                    # Fall through to popup handling below
+                else
+                    continue
+                fi
+            else
+                continue
+            fi
         fi
         idle=0
         _sh_log "Popup detected!"
@@ -2728,6 +3201,22 @@ shell_afk_solver() {
         local sl st sr sb slot_w slot_h
         read -r sl st sr sb slot_w slot_h <<< "$strip"
         _sh_log "  Strip: L=$sl T=$st R=$sr B=$sb  slot=${slot_w}×${slot_h}px"
+
+        # ── Focus Minecraft window (CRITICAL — see Python focus_mc_window()) ─
+        # Without focus, xdotool clicks land at the right pixel but Java's
+        # AWT event queue discards them → popup never closes → server kick.
+        local _mc_wid
+        _mc_wid=$(xdotool search --name "Minecraft" 2>/dev/null | tail -1)
+        if [ -n "$_mc_wid" ]; then
+            xdotool windowfocus   --sync "$_mc_wid" 2>/dev/null
+            xdotool windowactivate --sync "$_mc_wid" 2>/dev/null
+            # Research-confirmed: LWJGL needs 200ms to process focus before
+            # XTEST clicks are accepted. 100ms was marginal.
+            sleep 0.20
+            _sh_log "  MC window (id=$_mc_wid) focused ✓"
+        else
+            _sh_log "  WARNING: no Minecraft window found — clicks may not register"
+        fi
 
         # Human-like reaction delay: 200-650ms (Python REACT_MIN/REACT_MAX)
         sleep "$(awk -v s="$RANDOM" 'BEGIN{srand(s);printf"%.3f",0.2+rand()*0.45}')"
@@ -2824,11 +3313,32 @@ LAST_ROTATE=$SECONDS
 LAST_VIBRATE=$SECONDS
 NEXT_ROTATE_INTERVAL=$((30 + RANDOM % 45))
 NEXT_VIBRATE_INTERVAL=$((15 + RANDOM % 25))
+_LOCK_FIRST_SEEN=0      # epoch-$SECONDS when we first saw AFK_LOCK (stale-lock guard)
+# Stale-lock threshold: max legitimate LOCK hold time is
+#   sweep (~5.5s) + not-found watch loop (30s) = ~35.5s.
+# We allow 40s before declaring the solver crashed and forcibly releasing.
+_LOCK_STALE_S=40
 
 while [ -f "$FLAG_FILE" ]; do
 
-    # Pause while AFK solver is in the middle of clicking (or watching for user)
-    if [ -f "$AFK_LOCK" ]; then sleep 0.2; continue; fi
+    # ── Pause while AFK solver is holding the lock ───────────────────────────
+    # Stale-lock guard: if the solver crashes while holding AFK_LOCK the spam
+    # loop would freeze indefinitely.  We track how long the lock has been held
+    # and forcibly remove it after _LOCK_STALE_S seconds so farming resumes.
+    if [ -f "$AFK_LOCK" ]; then
+        if [ "$_LOCK_FIRST_SEEN" -eq 0 ]; then
+            _LOCK_FIRST_SEEN=$SECONDS
+        elif [ $(( SECONDS - _LOCK_FIRST_SEEN )) -gt $_LOCK_STALE_S ]; then
+            echo "[ MC Farm ] ⚠ AFK_LOCK held >$_LOCK_STALE_S s — solver may have crashed; releasing lock"
+            rm -f "$AFK_LOCK"
+            _LOCK_FIRST_SEEN=0
+            # Fall through — do NOT continue; resume spam clicks immediately
+        else
+            sleep 0.2; continue
+        fi
+    else
+        _LOCK_FIRST_SEEN=0   # reset whenever lock is absent
+    fi
 
     # ── Python solver liveness check (fixes Bug #3 from initial code review) ──
     # If the Python solver process has exited for any reason, launch the shell
