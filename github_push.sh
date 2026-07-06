@@ -76,6 +76,9 @@ push_file() {
 # Format: "local_path" "remote_path_in_repo"
 declare -a SYNC_FILES=(
   "mc_farm.sh"                                                                        "mc_farm.sh"
+  "mc_spam_2.sh"                                                                      "mc_spam_2.sh"
+  "mc_afk_solver.py"                                                                  "mc_afk_solver.py"
+  "requirements_afk_solver.txt"                                                       "requirements_afk_solver.txt"
   "github_push.sh"                                                                    "github_push.sh"
   "join_training_data.py"                                                             "join_training_data.py"
   "README.md"                                                                         "README.md"
