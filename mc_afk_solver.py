@@ -688,7 +688,7 @@ class GridNavigator:
         self.analyzer = analyzer
         self.finder   = finder
 
-    def find_and_click_target(self) -> bool:
+    def find_and_click_target(self, dry_run: bool = False) -> bool:
         """
         Sweep all 27 slots.  For each slot:
           • Glide the cursor smoothly (multi-step) to avoid instant-jump detection.
@@ -699,13 +699,18 @@ class GridNavigator:
             green-to-red confidence ratio check.
           • Abort the entire sweep if SWEEP_TIMEOUT_SECONDS elapses — protects
             against server lag spikes that leave the menu in a broken state.
-        Returns True on a confirmed click, False on timeout or no valid slot.
+
+        dry_run=True: sweeps and classifies every slot but never sends a click.
+          All 27 results are logged at INFO level and a scan report is printed.
+
+        Returns True on a confirmed click (or dry-run confirm hit), False otherwise.
         """
         if not self.finder.focus():
             log.warning("Could not focus target window — proceeding anyway")
 
         deadline = time.monotonic() + SWEEP_TIMEOUT_SECONDS
         best: Optional[TooltipClassification] = None
+        all_results: List[TooltipClassification] = []
 
         for idx, (cx, cy) in enumerate(self.calib.slot_centers):
 
@@ -717,7 +722,9 @@ class GridNavigator:
                     "Aborting to prevent stuck input state.",
                     SWEEP_TIMEOUT_SECONDS, idx,
                 )
-                _move_to(10, 10)   # park cursor at safe boundary
+                _move_to(10, 10)
+                if dry_run:
+                    self._print_scan_report(all_results, timed_out=True)
                 return False
 
             log.debug(
@@ -732,7 +739,16 @@ class GridNavigator:
             time.sleep(HOVER_SETTLE_MS / 1000.0)
 
             result = self.analyzer.classify(cx, cy, idx)
+            all_results.append(result)
 
+            if dry_run:
+                log.info("[DRY-RUN]  %s", result)
+                # In dry-run mode keep scanning even after a confirm hit
+                if best is None or result.confidence > best.confidence:
+                    best = result
+                continue
+
+            # --- Live mode decision ---
             if result.is_decoy and not result.is_confirm:
                 log.info("Slot %02d — DECOY (red=%d, green=%d) — skipping",
                          idx, result.red_pixels, result.green_pixels)
@@ -746,11 +762,15 @@ class GridNavigator:
                 _left_click(cx, cy)
                 return True
 
-            # Track highest-confidence partial hit for end-of-sweep diagnostics
             if best is None or result.confidence > best.confidence:
                 best = result
 
-        # No clean confirm found — log best candidate for post-mortem analysis
+        if dry_run:
+            self._print_scan_report(all_results, timed_out=False)
+            # Return True if at least one confirm-quality slot was found
+            return any(r.is_confirm for r in all_results)
+
+        # Live mode: no clean confirm found
         if best is not None:
             log.warning(
                 "Sweep complete — no CONFIRM found.  "
@@ -758,6 +778,42 @@ class GridNavigator:
                 best.slot_idx, best.green_pixels, best.red_pixels, best.confidence,
             )
         return False
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _print_scan_report(
+        results: List[TooltipClassification],
+        timed_out: bool,
+    ) -> None:
+        """Print a formatted scan report table to stdout."""
+        divider = "─" * 58
+        print(f"\n{'─'*20}  DRY-RUN SCAN REPORT  {'─'*16}")
+        print(f"  {'Slot':>4}  {'Green':>6}  {'Red':>6}  {'Conf':>5}  Verdict")
+        print(divider)
+        for r in results:
+            verdict = (
+                "✓ CONFIRM" if r.is_confirm
+                else ("✗ DECOY  " if r.is_decoy
+                else "  empty  ")
+            )
+            print(
+                f"  [{r.slot_idx:>2}]  {r.green_pixels:>6}  "
+                f"{r.red_pixels:>6}  {r.confidence:>5.2f}  {verdict}"
+            )
+        if timed_out:
+            print(f"  *** TIMED OUT after {SWEEP_TIMEOUT_SECONDS}s ***")
+        confirms = [r for r in results if r.is_confirm]
+        decoys   = [r for r in results if r.is_decoy and not r.is_confirm]
+        print(divider)
+        print(
+            f"  Scanned {len(results)}/27 slots — "
+            f"{len(confirms)} confirm, {len(decoys)} decoy, "
+            f"{len(results) - len(confirms) - len(decoys)} empty"
+        )
+        if confirms:
+            best = max(confirms, key=lambda r: r.confidence)
+            print(f"  Best confirm → slot [{best.slot_idx:>2}]  conf={best.confidence:.2f}")
+        print()
 
 
 # ---------------------------------------------------------------------------
@@ -916,6 +972,45 @@ class AfkSolver:
 
         return success
 
+    # ------------------------------------------------------------------
+    def run_dry(self, timeout: float = 30.0) -> bool:
+        """
+        Dry-run mode: wait for the popup, halt the grinder, glide through
+        all 27 slots, classify every tooltip, then print a full scan report
+        — WITHOUT sending a single click.
+
+        Use this on your desktop to verify calibration accuracy before going
+        live.  The grinder is resumed normally at the end so the session
+        continues uninterrupted.
+
+        Returns True if at least one confirm-quality slot was detected.
+        """
+        self.setup()
+        log.info("DRY-RUN mode — no clicks will be sent (timeout=%.1fs)", timeout)
+
+        detected = self.monitor.wait_for_gui(timeout=timeout)
+        if not detected:
+            log.warning("No GUI popup appeared within %.1fs — nothing to scan", timeout)
+            return False
+
+        self.proc.halt_farm()
+        time.sleep(0.05)
+
+        found = self.navigator.find_and_click_target(dry_run=True)
+
+        # Archive crops regardless of outcome — useful for visual inspection
+        self.sanitiser.archive_and_clear()
+
+        # Always resume the grinder so the session is not left halted
+        self.proc.resume_farm()
+
+        if found:
+            log.info("DRY-RUN complete — confirm slot(s) detected (would have clicked)")
+        else:
+            log.warning("DRY-RUN complete — no confirm slot found (check calibration)")
+
+        return found
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -951,7 +1046,16 @@ def main() -> None:
         metavar="PATH",
         help=(
             "Path to the grinding bash script to halt/resume "
-            f"(default: mc_spam_2.sh next to this file)"
+            "(default: mc_spam_2.sh next to this file)"
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Wait for the popup, sweep all 27 slots and classify each tooltip, "
+            "then print a full scan report — without sending any click. "
+            "Use this to verify calibration accuracy before going live."
         ),
     )
     args = parser.parse_args()
@@ -970,6 +1074,10 @@ def main() -> None:
         for i, (x, y) in enumerate(solver.calib.slot_centers):
             print(f"    [{i:2d}]  ({x}, {y})")
         return
+
+    if args.dry_run:
+        ok = solver.run_dry(timeout=args.timeout)
+        sys.exit(0 if ok else 1)
 
     if args.once:
         ok = solver.run_once(timeout=args.timeout)
