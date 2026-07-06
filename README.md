@@ -1,112 +1,225 @@
 # afkfarmer
 
-Minecraft AFK farm script for **JartexNetwork OneBlock** server.
+Minecraft AFK farm automation suite for **JartexNetwork OneBlock** server.
 
-Automatically detects the periodic *"Afk Grinding"* popup, scans which slots contain items, hovers each item to read its tooltip, and left-clicks the one that says **"Click to Confirm"** — all while keeping the mouse moving to prevent the server's anti-AFK kick.
+Automatically detects the periodic *"Afk Grinding"* verification popup, sweeps
+the 27-slot inventory grid, identifies the **"Click to Confirm"** item by color,
+and clicks it — all while keeping the mouse moving to satisfy the server's
+anti-AFK system.
 
-## Features
+---
 
-- **Prescan** — one screenshot of the full strip identifies item slots without hovering, skipping ~20 empty slots instantly
-- **Three detection backends** (tried in order):
-  1. **AI (Anthropic Claude)** — most accurate, ~24 MB RAM (model runs remotely). Set `ANTHROPIC_API_KEY`.
-  2. **Tesseract OCR** — local fallback if tesseract is installed.
-  3. **Color pixel scan** — pure stdlib fallback, no deps.
-- **Tooltip pre-check** — dark-purple tooltip background detected before any AI/OCR call; empty slots short-circuit in < 5 ms.
-- **RAM** — stays well under 50 MB (no PIL, no numpy, only stdlib + scrot + xdotool).
-- **Spam/anti-AFK loop** — random mouse wiggles and clicks while mining.
+## Repository layout
 
-## Linux Mint Setup (run once before first use)
+| File | Purpose |
+|---|---|
+| `mc_spam_2.sh` | Primary grinding loop (attacks, camera drift, jumps) |
+| `mc_afk_solver.py` | Python AFK-popup solver (monitor → sweep → click) |
+| `mc_farm.sh` | Legacy grinding script (still functional) |
+| `requirements_afk_solver.txt` | Python deps for the solver |
+| `join_training_data.py` | Correlates script logs with server ground-truth |
+| `github_push.sh` | Push changes to GitHub via Contents API (no git binary) |
+| `attached_assets/` | Reference screenshots used for auto-calibration |
+| `afk-fabric/` | Fabric mod replicating the verification GUI server-side |
+| `afk-forge/` | Forge mod — same purpose |
+| `afk-plugin/` | Spigot/Paper plugin |
+
+---
+
+## Linux Mint — one-time setup
 
 ```bash
-# 1. Update package list
+# System tools (mouse/keyboard automation + screenshot)
 sudo apt update
+sudo apt install -y xdotool scrot
 
-# 2. Required — mouse/keyboard automation
-sudo apt install -y xdotool
-
-# 3. Required — screenshot tool
-sudo apt install -y scrot
-
-# 4. Optional but recommended — OCR fallback (faster than AI for offline use)
+# Optional: OCR fallback (faster than AI when offline)
 sudo apt install -y tesseract-ocr
 
-# 5. Verify
-xdotool --version && scrot --version && echo "Ready!"
+# Python deps for mc_afk_solver.py
+pip install mss opencv-python numpy pyautogui
+# or: pip install -r requirements_afk_solver.txt
 ```
 
-## Usage
+---
+
+## Quick start
 
 ```bash
-# Make executable (first time only)
-chmod +x mc_farm.sh
+# Terminal 1 — start the grinder
+bash mc_spam_2.sh
 
-# Optional: set Anthropic key for AI tooltip reading (most accurate)
-export ANTHROPIC_API_KEY="sk-ant-..."
+# Terminal 2 — start the solver (watches for the popup and handles it)
+python3 mc_afk_solver.py
 
-# Start farming (spam loop + AFK solver both run in background)
-bash mc_farm.sh
-
-# Stop everything (run again while active)
-bash mc_farm.sh
+# Stop the grinder (run again while active)
+bash mc_spam_2.sh
 ```
 
-Running the script a **second time** while it is active stops all background processes.
+The grinder and solver are fully independent processes that communicate through
+a single flag file (`/tmp/mc_spamming`).  The solver deletes the flag the
+instant the popup appears (halting the grinder), then recreates it and
+relaunches `mc_spam_2.sh` after clicking.
 
-## How it works
+---
 
-1. Background spam loop wiggles mouse & occasionally left-clicks to look busy.
-2. AFK solver polls the screen every ~0.35 s for the gray MC GUI popup.
-3. When the popup appears, it waits a short human-like delay (0.28–0.95 s).
-4. **Prescan**: screenshots the AFK strip once, counts colorful vs gray pixels per slot → builds list of only the slots that have items.
-5. Moves mouse to each item slot, waits 140 ms for tooltip to render.
-6. Reads tooltip (AI → OCR → color), clicks on "Click to Confirm".
+## mc_afk_solver.py — full reference
 
-## Sync script
+### How it works
 
-`github_push.sh` — push local changes back to this repo via the GitHub Contents API (no git binary required).
+```
+[ Idle ]
+   │  mss polls title strip every 250 ms
+   ▼
+[ Popup detected ]  →  delete /tmp/mc_spamming  (grinder halts)
+   │
+   ▼
+[ Grid sweep ]  →  glide cursor to slots 0–26
+   │                 120 ms settle → grab 150×100 tooltip crop
+   │                 HSV mask for green (#55FF55) and red (#FF5555)
+   │                 confidence = green / (green + red + 1)
+   │
+   ├─ DECOY slot (red dominant) → skip
+   ├─ CONFIRM slot (green ≥ 30 px, ratio ≥ 2×) → left-click → break
+   └─ 15 s timeout → park cursor at (10,10) → abort
+   │
+   ▼
+[ Recovery ]  →  wait 800 ms  →  touch /tmp/mc_spamming  →  relaunch mc_spam_2.sh
+   │
+   ▼
+[ Archive ]  →  move slot_*.png crops to /tmp/mc_afk_captures/run_<timestamp>/
+```
+
+### Detection logic
+
+- **Green channel** (`#55FF55` → HSV `[35,100,100]–[85,255,255]`): "Click to Confirm" title
+- **Red channel** (`#FF5555` → HSV `[0,140,140]–[10,255,255]` + `[170,140,140]–[180,255,255]`): "Do not click" title
+- A slot is confirmed only when `green_px ≥ 30` **and** `green/red ≥ 2.0`
+- Smooth 8-step cursor glide (80 ms) between slots — no instant teleports
+
+### CLI flags
+
+| Flag | Description |
+|---|---|
+| *(no flags)* | Continuous mode — runs forever, handles every popup |
+| `--once` | Single-shot: wait for one popup, solve it, exit |
+| `--dry-run` | Sweep all 27 slots and print a scan report — **no click sent** |
+| `--timeout SECONDS` | How long `--once` / `--dry-run` waits for the popup (default: 30 s) |
+| `--script PATH` | Override which bash script to halt/resume (default: `mc_spam_2.sh`) |
+| `--calibrate-only` | Print auto-derived grid geometry from `attached_assets/` and exit |
+
+### --dry-run explained
+
+`--dry-run` is the recommended first step when running the solver on a new
+machine or after a resolution change.  It waits for the popup to appear
+naturally, glides through every slot exactly as in live mode, captures and
+classifies each tooltip — but stops short of clicking anything.
+
+At the end it prints a table like this:
+
+```
+────────────────────  DRY-RUN SCAN REPORT  ────────────────────
+  Slot   Green     Red   Conf  Verdict
+──────────────────────────────────────────────────────────────
+  [ 0]       0       0   0.00    empty
+  [ 1]       2       0   0.67    empty
+  [ 4]     148       1   0.99  ✓ CONFIRM
+  [ 7]       1      72   0.01  ✗ DECOY
+  ...
+──────────────────────────────────────────────────────────────
+  Scanned 27/27 slots — 1 confirm, 3 decoy, 23 empty
+  Best confirm → slot [ 4]  conf=0.99
+```
+
+If the confirm slot shows low confidence or isn't detected at all, run
+`--calibrate-only` and compare the printed slot centres against what you see
+on screen.
+
+```bash
+# Recommended first-run sequence
+python3 mc_afk_solver.py --calibrate-only
+python3 mc_afk_solver.py --dry-run --timeout 60
+# happy with the report? go live:
+python3 mc_afk_solver.py
+```
+
+### Tunable constants
+
+All timing and threshold values are defined at the top of `mc_afk_solver.py`:
+
+| Constant | Default | Effect |
+|---|---|---|
+| `MONITOR_POLL_SECONDS` | 0.25 | Popup check interval |
+| `HOVER_SETTLE_MS` | 120 | Wait after cursor lands on slot |
+| `GLIDE_DURATION_MS` | 80 | Time to glide between slots |
+| `GLIDE_STEPS` | 8 | Sub-steps per glide (higher = smoother arc) |
+| `CLICK_RECOVERY_MS` | 800 | Wait after click for server packet to clear |
+| `SWEEP_TIMEOUT_SECONDS` | 15 | Abort whole sweep if exceeded |
+| `GREEN_PIXEL_THRESHOLD` | 30 | Min green pixels to confirm a slot |
+| `RED_PIXEL_THRESHOLD` | 20 | Min red pixels to flag a slot as decoy |
+| `GREEN_RED_RATIO_MIN` | 2.0 | Min green/red ratio to confirm |
+
+---
+
+## mc_spam_2.sh — grinder reference
+
+Runs a continuous attack loop that mimics human behaviour using three
+randomised actions:
+
+| Action | Probability | Notes |
+|---|---|---|
+| Standard left-click attack | ~90% | Hold 28–66 ms, swing cooldown 620–750 ms + fatigue |
+| Smooth camera drift | ~3% | 3–6 sub-steps over 90–220 ms |
+| Micro-vibration | ~5% | 2–4 shake cycles |
+| Jump (Space) | ~2% | Throttled to once every 45–105 s |
+
+Fatigue delay grows ~12 ms/min (capped at 75 ms) to simulate a tiring player.
+All actions check the flag file before each step — halts within one tick of the
+solver deleting `/tmp/mc_spamming`.
+
+```bash
+# Start
+bash mc_spam_2.sh
+
+# Stop (toggle — run again while active)
+bash mc_spam_2.sh
+
+# Watch the log
+tail -f /tmp/mc_spam_2.log
+```
+
+---
+
+## Sync to GitHub
 
 ```bash
 GITHUB_PERSONAL_ACCESS_TOKEN=ghp_... bash github_push.sh
 ```
 
-## Training data — joining the script's log with the mod's log
+Fetches the full remote tree in one API call, skips unchanged files (SHA
+comparison), and pushes only what changed.
 
-Two logs get written while farming, and neither one alone tells you whether
-the script is actually clicking the right slot:
+---
 
-- **`attached_assets/attempts.jsonl`** (written by `mc_farm.sh`) — what the
-  *script* saw: every slot it inspected, what each backend (color/AI/OCR)
-  voted, which slot it clicked. It never learns the real answer from the
-  server, only whether its click made the popup close.
-- **`afkverify_events.jsonl`** (written by the Fabric/Forge mod on the
-  server) — what the *server* saw: the real confirm slot (ground truth) and
-  whether the player's click passed, failed, or timed out.
+## Training data
 
-Each popup on the mod side carries a `popup_id` (a UUID assigned when the
-popup opens and echoed back on the outcome event), and both logs record
-`confirm_row`/`confirm_col`/`clicked_row`/`clicked_col` using the same
-row/col addressing the script uses internally, so the two logs can be joined
-precisely instead of only by "these happened around the same time."
+Two logs are written while farming:
 
-Optionally set `MC_PLAYER_NAME` before running `mc_farm.sh` so each
-`attempts.jsonl` record is tagged with the player's name — useful for
-telling attempts apart on a server where more than one person is farming:
+- **`attached_assets/attempts.jsonl`** — what the *script* saw: each slot
+  inspected, each backend's vote, which slot was clicked.
+- **`afkverify_events.jsonl`** — what the *server* saw: the real confirm slot
+  (ground truth) and whether the click passed or failed.
 
-```bash
-MC_PLAYER_NAME="YourIGN" bash mc_farm.sh
-```
-
-Run the join tool (needs `afkverify_events.jsonl` from the server's run
-directory, and `python3` which is not otherwise required by `mc_farm.sh`):
+Join them to measure detection accuracy:
 
 ```bash
 python3 join_training_data.py --events /path/to/server/afkverify_events.jsonl
 ```
 
-It writes `attached_assets/training_data.jsonl` (one labeled record per
-popup: what the script guessed + what was actually correct) and prints a
-per-backend accuracy report to stdout — use that to decide whether
-color/AI/OCR actually deserves the most trust and retune the backend order
-or weighting in `mc_farm.sh` accordingly. If a popup_id isn't available
-(older mod build), it automatically falls back to timestamp-proximity
-matching (±1s, configurable via `--tolerance`).
+Writes `attached_assets/training_data.jsonl` and prints a per-backend accuracy
+report.  Use that to retune thresholds or backend order in `mc_afk_solver.py`.
+
+```bash
+# Tag attempts with your IGN for multi-player sessions
+MC_PLAYER_NAME="YourIGN" bash mc_spam_2.sh
+```
