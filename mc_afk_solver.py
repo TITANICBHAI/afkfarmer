@@ -469,19 +469,25 @@ class ProcessController:
             log.debug("Flag file was already absent")
 
     def resume_farm(self) -> None:
-        """Re-create the flag file and re-launch mc_farm.sh in the background."""
+        """Re-create the flag file and re-launch the grinder in the background.
+
+        Passes MC_GRINDER_ONLY=1 so mc_spam_2.sh knows the solver is already
+        running and does not spawn a second instance of mc_afk_solver.py.
+        """
         Path(self.flag).touch()
         log.info("Flag file recreated")
         if os.path.isfile(self.script):
+            env = {**os.environ, "MC_GRINDER_ONLY": "1"}
             subprocess.Popen(
                 ["bash", self.script],
+                env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            log.info("mc_farm.sh relaunched")
+            log.info("Grinder relaunched via %s (MC_GRINDER_ONLY=1)", self.script)
         else:
-            log.warning("mc_farm.sh not found at %s — skipping relaunch", self.script)
+            log.warning("Grinder script not found at %s — skipping relaunch", self.script)
 
     def farm_is_running(self) -> bool:
         return os.path.exists(self.flag)
