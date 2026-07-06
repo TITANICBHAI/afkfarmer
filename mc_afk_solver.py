@@ -77,12 +77,45 @@ def _ensure_input() -> None:
 
 
 def _move_to(x: int, y: int) -> None:
+    """Instant warp — used internally and for the safe-exit cursor park."""
     _ensure_input()
     if _pyautogui_mod:
-        _pyautogui_mod.moveTo(x, y, duration=0.03)
+        _pyautogui_mod.moveTo(x, y, duration=0)
     else:
         _xlib_root.warp_pointer(x, y)
         _xlib_dpy.sync()
+
+
+def _glide_to(x: int, y: int) -> None:
+    """
+    Smooth multi-step cursor glide to (x, y).
+
+    Feeds GLIDE_STEPS small relative movements over GLIDE_DURATION_MS total,
+    mimicking a human hand drifting across the inventory grid.  This avoids
+    the instant-jump pattern that anti-cheat heuristics flag.
+    """
+    _ensure_input()
+    step_sleep = (GLIDE_DURATION_MS / 1000.0) / GLIDE_STEPS
+
+    if _pyautogui_mod:
+        # pyautogui's built-in duration handles interpolation natively
+        _pyautogui_mod.moveTo(x, y, duration=GLIDE_DURATION_MS / 1000.0)
+    else:
+        # Xlib: compute current position, then step toward target manually
+        try:
+            ptr = _xlib_root.query_pointer()
+            cx, cy = ptr.root_x, ptr.root_y
+        except Exception:
+            cx, cy = x, y  # fall back to instant warp if query fails
+
+        dx = x - cx
+        dy = y - cy
+        for step in range(1, GLIDE_STEPS + 1):
+            nx = cx + int(dx * step / GLIDE_STEPS)
+            ny = cy + int(dy * step / GLIDE_STEPS)
+            _xlib_root.warp_pointer(nx, ny)
+            _xlib_dpy.sync()
+            time.sleep(step_sleep)
 
 
 def _left_click(x: int, y: int) -> None:
@@ -117,6 +150,9 @@ TARGET_WINDOW_CLASS = "Minecraft"        # xdotool class substring to match
 MONITOR_POLL_SECONDS = 0.25             # how often to check for GUI popup
 HOVER_SETTLE_MS = 120                   # ms to wait after moving to each slot
 CLICK_RECOVERY_MS = 800                 # ms to wait after clicking
+GLIDE_DURATION_MS = 80                  # total ms to spend gliding between slots
+GLIDE_STEPS = 8                         # sub-steps per glide (higher = smoother)
+SWEEP_TIMEOUT_SECONDS = 15             # abort the full 27-slot sweep if exceeded
 
 CHEST_COLS = 9
 CHEST_ROWS = 3
@@ -655,20 +691,44 @@ class GridNavigator:
     def find_and_click_target(self) -> bool:
         """
         Sweep all 27 slots.  For each slot:
+          • Glide the cursor smoothly (multi-step) to avoid instant-jump detection.
+          • Enforce a 120 ms settle so the tooltip renders before capture.
           • Score green ("Click to Confirm") and red ("Do not click") channels.
-          • Skip slots whose tooltip is flagged as a decoy (red dominant).
+          • Skip slots flagged as decoys (red dominant).
           • Click the first slot that passes both the green threshold and the
             green-to-red confidence ratio check.
-        Returns True on a confirmed click, False if no valid slot was found.
+          • Abort the entire sweep if SWEEP_TIMEOUT_SECONDS elapses — protects
+            against server lag spikes that leave the menu in a broken state.
+        Returns True on a confirmed click, False on timeout or no valid slot.
         """
         if not self.finder.focus():
             log.warning("Could not focus target window — proceeding anyway")
 
+        deadline = time.monotonic() + SWEEP_TIMEOUT_SECONDS
         best: Optional[TooltipClassification] = None
 
         for idx, (cx, cy) in enumerate(self.calib.slot_centers):
-            log.debug("Moving to slot %02d  @ (%d, %d)", idx, cx, cy)
-            _move_to(cx, cy)
+
+            # --- Global timeout guard ---
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log.error(
+                    "SWEEP TIMEOUT — %ds elapsed before slot %02d was reached.  "
+                    "Aborting to prevent stuck input state.",
+                    SWEEP_TIMEOUT_SECONDS, idx,
+                )
+                _move_to(10, 10)   # park cursor at safe boundary
+                return False
+
+            log.debug(
+                "Gliding to slot %02d @ (%d, %d)  [%.1fs remaining]",
+                idx, cx, cy, remaining,
+            )
+
+            # --- Smooth glide, not an instant warp ---
+            _glide_to(cx, cy)
+
+            # --- Tooltip settle pause ---
             time.sleep(HOVER_SETTLE_MS / 1000.0)
 
             result = self.analyzer.classify(cx, cy, idx)
@@ -686,11 +746,11 @@ class GridNavigator:
                 _left_click(cx, cy)
                 return True
 
-            # Track the highest-confidence partial hit in case all slots fail
+            # Track highest-confidence partial hit for end-of-sweep diagnostics
             if best is None or result.confidence > best.confidence:
                 best = result
 
-        # No clean confirm found — log the best candidate for diagnostics
+        # No clean confirm found — log best candidate for post-mortem analysis
         if best is not None:
             log.warning(
                 "Sweep complete — no CONFIRM found.  "
