@@ -1,479 +1,488 @@
 #!/usr/bin/env python3
 """
-mc_afk_solver.py — Modular AFK-Grinding verification solver for JartexNetwork OneBlock.
+mc_afk_solver.py — Modular AFK-farm automation for JartexNetwork OneBlock.
 
 Workflow:
-  1. Monitor a title-bar strip for the "Afk Grinding" ChestGui popup.
-  2. Kill mc_farm.sh (via flag-file deletion) the instant it appears.
-  3. Sweep all 27 chest slots; capture a tooltip crop after each hover.
-  4. HSV-mask for bright-green (#55FF55) "Click to Confirm" text.
-  5. Left-click the matching slot, wait for packet clearance, then resume.
-  6. Log diagnostics; bail gracefully if no green slot is found.
+  1. Monitor title strip of the Minecraft window for the "Afk Grinding" popup.
+  2. On detection: delete /tmp/mc_spamming to halt mc_spam_2.sh immediately.
+  3. Sweep the 9×3 inventory grid (slots 0-26) with a 120 ms hover settle.
+  4. Capture a 150×100 px tooltip crop per slot; apply HSV mask for #55FF55.
+  5. First slot with green pixel density above threshold → left-click.
+  6. Wait 800 ms, recreate /tmp/mc_spamming, relaunch mc_spam_2.sh.
+  7. Archive slot crops; if no slot found after full sweep → failsafe abort.
+
+Usage:
+    python3 mc_afk_solver.py               # continuous (default)
+    python3 mc_afk_solver.py --once        # solve one popup, then exit
+    python3 mc_afk_solver.py --dry-run     # sweep + report, no click
+    python3 mc_afk_solver.py --calibrate-only  # print grid geometry and exit
+    python3 mc_afk_solver.py --timeout N   # popup wait timeout in seconds
+    python3 mc_afk_solver.py --script PATH # override grinder script path
 """
 
-import os
-import sys
+from __future__ import annotations
+
+import argparse
 import glob
-import time
-import shutil
 import logging
+import os
+import shutil
 import subprocess
-import tempfile
-import datetime
+import sys
+import time
 from pathlib import Path
 from typing import Optional, Tuple, List
 
-import numpy as np
 import cv2
-import mss
-import mss.tools
+import numpy as np
 
-# ---------------------------------------------------------------------------
-# X11 input backend — loaded lazily on first use so that --calibrate-only
-# and import-time syntax checks work in headless (no-display) environments.
-# ---------------------------------------------------------------------------
+# ── Logging ───────────────────────────────────────────────────────────────────
 
-_input_ready = False
-_pyautogui_mod = None
-_xlib_dpy = None
-_xlib_root = None
-_xlib_X = None
-_xlib_xtest = None
-
-
-def _ensure_input() -> None:
-    """Initialise whichever input backend is available (called before any move/click)."""
-    global _input_ready, _pyautogui_mod, _xlib_dpy, _xlib_root, _xlib_X, _xlib_xtest
-    if _input_ready:
-        return
-
-    try:
-        import pyautogui as _pg
-        _pg.FAILSAFE = False
-        _pyautogui_mod = _pg
-        _input_ready = True
-        log.debug("Input backend: pyautogui")
-        return
-    except Exception:
-        pass
-
-    try:
-        from Xlib import display as _xd, X as _xX
-        from Xlib.ext import xtest as _xt
-        _xlib_dpy  = _xd.Display()
-        _xlib_root = _xlib_dpy.screen().root
-        _xlib_X    = _xX
-        _xlib_xtest = _xt
-        _input_ready = True
-        log.debug("Input backend: python-xlib")
-        return
-    except Exception:
-        pass
-
-    raise RuntimeError(
-        "No X11 input backend available.  "
-        "Install pyautogui or python-xlib and ensure DISPLAY is set."
-    )
-
-
-def _move_to(x: int, y: int) -> None:
-    """Instant warp — used internally and for the safe-exit cursor park."""
-    _ensure_input()
-    if _pyautogui_mod:
-        _pyautogui_mod.moveTo(x, y, duration=0)
-    else:
-        _xlib_root.warp_pointer(x, y)
-        _xlib_dpy.sync()
-
-
-def _glide_to(x: int, y: int) -> None:
-    """
-    Smooth multi-step cursor glide to (x, y).
-
-    Feeds GLIDE_STEPS small relative movements over GLIDE_DURATION_MS total,
-    mimicking a human hand drifting across the inventory grid.  This avoids
-    the instant-jump pattern that anti-cheat heuristics flag.
-    """
-    _ensure_input()
-    step_sleep = (GLIDE_DURATION_MS / 1000.0) / GLIDE_STEPS
-
-    if _pyautogui_mod:
-        # pyautogui's built-in duration handles interpolation natively
-        _pyautogui_mod.moveTo(x, y, duration=GLIDE_DURATION_MS / 1000.0)
-    else:
-        # Xlib: compute current position, then step toward target manually
-        try:
-            ptr = _xlib_root.query_pointer()
-            cx, cy = ptr.root_x, ptr.root_y
-        except Exception:
-            cx, cy = x, y  # fall back to instant warp if query fails
-
-        dx = x - cx
-        dy = y - cy
-        for step in range(1, GLIDE_STEPS + 1):
-            nx = cx + int(dx * step / GLIDE_STEPS)
-            ny = cy + int(dy * step / GLIDE_STEPS)
-            _xlib_root.warp_pointer(nx, ny)
-            _xlib_dpy.sync()
-            time.sleep(step_sleep)
-
-
-def _left_click(x: int, y: int) -> None:
-    _ensure_input()
-    if _pyautogui_mod:
-        _pyautogui_mod.click(x, y, button="left")
-    else:
-        _move_to(x, y)
-        _xlib_xtest.fake_input(_xlib_dpy, _xlib_X.ButtonPress, 1)
-        _xlib_dpy.sync()
-        time.sleep(0.05)
-        _xlib_xtest.fake_input(_xlib_dpy, _xlib_X.ButtonRelease, 1)
-        _xlib_dpy.sync()
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    format="%(asctime)s  %(levelname)-7s  %(message)s",
     datefmt="%H:%M:%S",
+    level=logging.INFO,
+    stream=sys.stdout,
 )
-log = logging.getLogger("mc_afk_solver")
+log = logging.getLogger("afk_solver")
 
-# ---------------------------------------------------------------------------
-# Constants & tunables
-# ---------------------------------------------------------------------------
-FLAG_FILE = "/tmp/mc_spamming"
-FARM_SCRIPT = str(Path(__file__).parent / "mc_spam_2.sh")
+# ── Tunables ──────────────────────────────────────────────────────────────────
 
-TARGET_WINDOW_CLASS = "Minecraft"        # xdotool class substring to match
-MONITOR_POLL_SECONDS = 0.25             # how often to check for GUI popup
-HOVER_SETTLE_MS = 120                   # ms to wait after moving to each slot
-CLICK_RECOVERY_MS = 800                 # ms to wait after clicking
-GLIDE_DURATION_MS = 80                  # total ms to spend gliding between slots
-GLIDE_STEPS = 8                         # sub-steps per glide (higher = smoother)
-SWEEP_TIMEOUT_SECONDS = 15             # abort the full 27-slot sweep if exceeded
+MONITOR_POLL_SECONDS   = 0.25   # popup check interval
+HOVER_SETTLE_MS        = 120    # ms to wait after cursor lands on a slot
+GLIDE_DURATION_MS      = 80     # ms to spend gliding between slots
+GLIDE_STEPS            = 8      # sub-steps per cursor glide
+CLICK_RECOVERY_MS      = 800    # ms after click for server UI to clear
+SWEEP_TIMEOUT_SECONDS  = 15     # abort sweep if this many seconds pass
+GREEN_PIXEL_THRESHOLD  = 30     # min #55FF55 pixels to confirm a slot
 
-CHEST_COLS = 9
-CHEST_ROWS = 3
-CHEST_SLOTS = CHEST_COLS * CHEST_ROWS   # 27
+# ── Dell Inspiron 3521 / Minecraft GUI scale 2 hardcoded profile ──────────────
+# Measured precisely from 68 reference screenshots (1366×694 windowed Minecraft).
+# Used as the primary fallback when dynamic calibration cannot parse assets.
+#
+# GUI panel:  cols 510–853, rows 182–507
+# Slot size:  36 px (32 px inner + 2 px dark border each side)
+# Slot margin from panel edge: X=10 px, Y=30 px (to outer border of slot 0)
+# Slot col centres: gui_left + 28 + col*36   (for col 0–8)
+# Slot row centres: gui_top  + 48 + row*36   (for row 0–2)
+DELL_GUI_LEFT   = 510
+DELL_GUI_TOP    = 182
+DELL_SLOT_SIZE  = 36
+DELL_SLOT_X_OFF = 28   # gui_left  → first slot centre X
+DELL_SLOT_Y_OFF = 48   # gui_top   → first slot centre Y
+# Panel detection pixels: these coords land in the grey header strip and
+# should be BGR ≈ (198,198,198) when the Afk Grinding chest is open.
+POPUP_PROBE_PTS = [
+    (680, 193),
+    (600, 193),
+    (750, 193),
+    (680, 205),
+]
+POPUP_GREY_MIN = 160   # each channel must be above this when GUI open
+POPUP_GREY_MAX = 220   # and below this
 
-TOOLTIP_W = 150                         # width of tooltip crop
-TOOLTIP_H = 100                         # height of tooltip crop
+# HSV range for #55FF55 (Minecraft "Click to Confirm" bright green text)
+HSV_GREEN_LOWER = np.array([35, 100, 100], dtype=np.uint8)
+HSV_GREEN_UPPER = np.array([85, 255, 255], dtype=np.uint8)
 
-# HSV bounds for bright-green Minecraft formatting colour #55FF55
-GREEN_HSV_LO = np.array([35, 100, 100], dtype=np.uint8)
-GREEN_HSV_HI = np.array([85, 255, 255], dtype=np.uint8)
-GREEN_PIXEL_THRESHOLD = 30              # minimum green pixels to confirm match
+# Flag-file paths
+FLAG_FILE      = "/tmp/mc_spamming"
+SOLVER_PID_FILE = "/tmp/mc_solver.pid"
 
-# HSV bounds for bright-red Minecraft formatting colour #FF5555 ("Do not click").
-# Red wraps around hue=0 in OpenCV so two ranges are needed.
-RED_HSV_LO_A = np.array([0,   140, 140], dtype=np.uint8)
-RED_HSV_HI_A = np.array([10,  255, 255], dtype=np.uint8)
-RED_HSV_LO_B = np.array([170, 140, 140], dtype=np.uint8)
-RED_HSV_HI_B = np.array([180, 255, 255], dtype=np.uint8)
-RED_PIXEL_THRESHOLD  = 20               # minimum red pixels to flag as decoy
+# Runtime capture dir
+CAPTURE_DIR = Path("/tmp/mc_afk_captures")
+CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Confidence scoring: a slot is only clicked when the green score is at least
-# this many times larger than the red score, preventing ambiguous matches.
-GREEN_RED_RATIO_MIN  = 2.0
+# Asset directory (reference screenshots for calibration)
+ASSET_DIR = Path(__file__).parent / "attached_assets"
 
-ASSETS_DIR = Path(__file__).parent / "attached_assets"
-CAPTURE_DIR = Path(tempfile.gettempdir()) / "mc_afk_captures"
 
-# ---------------------------------------------------------------------------
-# 1. Calibration Engine
-#    Loads reference screenshots from attached_assets/ and calculates the
-#    exact chest-GUI geometry so nothing is hard-coded.
-# ---------------------------------------------------------------------------
+# ── CalibrationEngine ─────────────────────────────────────────────────────────
 
 class CalibrationEngine:
-    """
-    Dynamically derives the 9×3 inventory slot grid from reference screenshots.
+    """Derives the 9×3 inventory grid geometry by scanning attached_assets/."""
 
-    Strategy
-    --------
-    * Scan every PNG in attached_assets/ for the characteristic Minecraft
-      inventory GUI border colour (near #8b8b8b, the standard stone-grey).
-    * Find the leftmost / topmost / rightmost / bottommost contiguous rectangle
-      that contains a horizontal run of ~9 evenly-spaced cells in the upper
-      third.
-    * Derive slot-centre coordinates from the border geometry.
-    """
+    GRID_COLS = 9
+    GRID_ROWS = 3
+    SLOT_COUNT = GRID_COLS * GRID_ROWS  # 27
 
-    # Minecraft GUI border colour range in BGR
-    GUI_BORDER_BGR_LO = np.array([120, 120, 120], dtype=np.uint8)
-    GUI_BORDER_BGR_HI = np.array([200, 200, 200], dtype=np.uint8)
+    # Minecraft inventory GUI colours (BGR) used to locate the chest panel
+    _INVENTORY_BG_BGR = (198, 198, 198)   # light grey panel background
+    _BORDER_DARK_BGR  = (85,  85,  85)    # dark border pixel
 
-    # Title bar background is very dark: approximately #3c3c3c
-    TITLE_BG_BGR_LO = np.array([40, 40, 40], dtype=np.uint8)
-    TITLE_BG_BGR_HI = np.array([80, 80, 80], dtype=np.uint8)
+    def __init__(self, asset_dir: Path = ASSET_DIR) -> None:
+        self.asset_dir = asset_dir
+        self._slot_centres: Optional[List[Tuple[int, int]]] = None
+        self._screen_w: int = 1366
+        self._screen_h: int = 768
+        self._gui_left: int = 0
+        self._gui_top:  int = 0
+        self._slot_size: int = 36
+        self._title_box: Optional[Tuple[int, int, int, int]] = None  # x,y,w,h
 
-    def __init__(self) -> None:
-        self.screen_w: int = 0
-        self.screen_h: int = 0
-        self.gui_left: int = 0
-        self.gui_top: int = 0
-        self.gui_right: int = 0
-        self.gui_bottom: int = 0
-        self.slot_size: int = 18          # fall-back; overwritten after calibration
-        self.slot_centers: List[Tuple[int, int]] = []
-        self.title_strip: Tuple[int, int, int, int] = (0, 0, 0, 0)  # x,y,w,h
+    # ── Public ─────────────────────────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    def calibrate(self) -> bool:
-        """Return True if calibration succeeded from at least one asset."""
-        pngs = sorted(glob.glob(str(ASSETS_DIR / "*.png")))
+    def calibrate(self) -> None:
+        """Scan every PNG in asset_dir to derive grid layout."""
+        pngs = sorted(self.asset_dir.glob("*.png"))
         if not pngs:
-            log.warning("No reference assets found in %s", ASSETS_DIR)
-            return self._apply_fallback()
+            log.warning("No PNGs in %s — using fallback geometry", self.asset_dir)
+            self._build_fallback()
+            return
 
-        results: List[dict] = []
+        results = []
         for path in pngs:
-            r = self._analyse_image(path)
+            img = cv2.imread(str(path))
+            if img is None:
+                continue
+            r = self._analyse_frame(img)
             if r:
                 results.append(r)
 
         if not results:
-            log.warning("Could not derive geometry from any asset — using fallback")
-            return self._apply_fallback()
+            log.warning("Could not detect GUI in any asset — using fallback")
+            self._build_fallback()
+            return
 
-        # Average the measured geometry across all valid reference frames
-        avg = lambda key: int(round(sum(r[key] for r in results) / len(results)))
+        # Median across all frames for robustness
+        h, w = cv2.imread(str(pngs[0])).shape[:2]
+        self._screen_w = w
+        self._screen_h = h
+        self._gui_left  = int(np.median([r[0] for r in results]))
+        self._gui_top   = int(np.median([r[1] for r in results]))
+        self._slot_size = int(np.median([r[2] for r in results]))
 
-        self.screen_w  = avg("screen_w")
-        self.screen_h  = avg("screen_h")
-        self.gui_left  = avg("gui_left")
-        self.gui_top   = avg("gui_top")
-        self.gui_right = avg("gui_right")
-        self.slot_size = avg("slot_size")
-
-        self._build_slot_centers()
+        self._build_grid()
         log.info(
-            "Calibration: screen=%dx%d  gui_left=%d  gui_top=%d  "
-            "gui_right=%d  slot_size=%d  (%d reference frames used)",
-            self.screen_w, self.screen_h,
-            self.gui_left, self.gui_top, self.gui_right,
-            self.slot_size, len(results),
+            "Calibrated from %d frames: screen %dx%d | gui_left=%d gui_top=%d "
+            "slot_size=%dpx | %d slot centres",
+            len(results), w, h,
+            self._gui_left, self._gui_top, self._slot_size,
+            len(self._slot_centres),
         )
-        return True
 
-    # ------------------------------------------------------------------
-    def _analyse_image(self, path: str) -> Optional[dict]:
-        """Extract GUI geometry from a single reference PNG."""
-        img = cv2.imread(path)
-        if img is None:
-            return None
+    @property
+    def slot_centres(self) -> List[Tuple[int, int]]:
+        if self._slot_centres is None:
+            self.calibrate()
+        return self._slot_centres
 
-        h, w = img.shape[:2]
+    @property
+    def title_box(self) -> Tuple[int, int, int, int]:
+        """Bounding box (x, y, w, h) to poll for the popup title."""
+        if self._title_box is None:
+            self.calibrate()
+        return self._title_box
 
-        # --- Locate the GUI title bar (dark rectangle, upper-centre region) ---
-        # Look in the middle 60% of width and top 70% of height only
-        x0 = int(w * 0.20)
-        x1 = int(w * 0.80)
-        y0 = int(h * 0.10)
-        y1 = int(h * 0.70)
-        roi = img[y0:y1, x0:x1]
+    def print_geometry(self) -> None:
+        """Print derived grid geometry to stdout (--calibrate-only)."""
+        self.calibrate()
+        print(f"\n{'─'*56}")
+        print(f"  Screen   : {self._screen_w} × {self._screen_h}")
+        print(f"  GUI left : {self._gui_left}   GUI top : {self._gui_top}")
+        print(f"  Slot size: {self._slot_size} px")
+        print(f"  Title box: {self.title_box}")
+        print(f"{'─'*56}")
+        for i, (cx, cy) in enumerate(self.slot_centres):
+            col = i % self.GRID_COLS
+            row = i // self.GRID_COLS
+            print(f"  slot [{i:2d}]  row={row} col={col}  centre=({cx:4d}, {cy:4d})")
+        print(f"{'─'*56}\n")
 
-        mask_dark = cv2.inRange(roi, self.TITLE_BG_BGR_LO, self.TITLE_BG_BGR_HI)
-        # Dilate to bridge small gaps
-        kernel = np.ones((3, 3), np.uint8)
-        mask_dark = cv2.dilate(mask_dark, kernel, iterations=2)
+    # ── Private ────────────────────────────────────────────────────────────
 
-        contours, _ = cv2.findContours(mask_dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None
+    def _analyse_frame(self, img: np.ndarray) -> Optional[Tuple[int, int, int]]:
+        """Return (gui_left, gui_top, slot_size) or None.
 
-        # Keep only wide, shallow rectangles (title bar shape)
-        title_rects = []
-        for c in contours:
-            rx, ry, rw, rh = cv2.boundingRect(c)
-            aspect = rw / max(rh, 1)
-            if aspect > 3 and rw > w * 0.10:
-                title_rects.append((rx + x0, ry + y0, rw, rh))
-
-        if not title_rects:
-            return None
-
-        # Pick widest
-        title_rects.sort(key=lambda r: r[2], reverse=True)
-        tx, ty, tw, _ = title_rects[0]
-
-        # GUI left edge ≈ title bar left; GUI right ≈ title bar right
-        gui_left  = tx
-        gui_right = tx + tw
-
-        # --- Locate the chest-slot row immediately below the title bar ---
-        # The slot row is light-grey (#8b8b8b).  Scan downward from ty+20
-        gui_width = gui_right - gui_left
-        if gui_width < 40:
-            return None
-
-        slot_size = self._estimate_slot_size(img, gui_left, gui_right, ty)
-        if slot_size < 10:
-            return None
-
-        # GUI top ≈ ty - 5 (a few pixels of padding above title)
-        gui_top = max(0, ty - 8)
-
-        return {
-            "screen_w": w,
-            "screen_h": h,
-            "gui_left": gui_left,
-            "gui_top": gui_top,
-            "gui_right": gui_right,
-            "slot_size": slot_size,
-        }
-
-    # ------------------------------------------------------------------
-    def _estimate_slot_size(self, img: np.ndarray, gl: int, gr: int, title_y: int) -> int:
-        """
-        Estimate individual slot pixel size.
-
-        Scans horizontal luminance variance below the title bar to find the
-        repeating cell boundaries.  Falls back to (grid_width / 9).
+        Uses the Minecraft inventory panel colour (#C6C6C6 = BGR 198,198,198)
+        to locate the grey panel, then finds slot borders via the dark inner
+        background (#8B8B8B = BGR 139,139,139) column runs.
         """
         h, w = img.shape[:2]
-        grid_w = gr - gl
 
-        # Fallback: divide available width by 9 columns
-        naive = int(round(grid_w / CHEST_COLS))
+        # ── Find rows that are dominated by panel grey (#C6C6C6) ──────────
+        grey_mask_2d = (
+            (np.abs(img[:, :, 0].astype(np.int16) - 198) < 14) &
+            (np.abs(img[:, :, 1].astype(np.int16) - 198) < 14) &
+            (np.abs(img[:, :, 2].astype(np.int16) - 198) < 14)
+        )
+        grey_rows = np.where(grey_mask_2d.any(axis=1))[0]
+        grey_cols = np.where(grey_mask_2d.any(axis=0))[0]
+        if len(grey_rows) < 20 or len(grey_cols) < 50:
+            return None
 
-        # Scan a horizontal strip starting ~20px below title
-        y_scan = min(title_y + 25, h - 5)
-        row = img[y_scan, gl:gr, :]        # shape: (grid_w, 3)
-        gray_row = row.mean(axis=1)        # luminance per pixel
+        gui_top  = int(grey_rows[0])
+        gui_left = int(grey_cols[0])
 
-        # Find local minima (slot dividers are slightly darker)
-        dividers = []
-        for i in range(2, len(gray_row) - 2):
-            if gray_row[i] < gray_row[i-2] - 5 and gray_row[i] < gray_row[i+2] - 5:
-                dividers.append(i)
+        # ── Locate slot pitch via dark border columns (#373737 ≈ BGR 55,55,55)
+        # Sample a row 38 px below gui_top (inside first slot row)
+        sample_y = gui_top + 38
+        if sample_y >= h:
+            return None
+        line = img[sample_y, gui_left:gui_left + 400]
+        dark = np.where(line.mean(axis=1) < 90)[0]
+        if len(dark) < 2:
+            return None
+        gaps = np.diff(dark)
+        large = gaps[gaps > 20]
+        slot_size = int(np.median(large)) if len(large) >= 2 else 36
+        slot_size = max(28, min(48, slot_size))
 
-        if len(dividers) >= 8:
-            gaps = [dividers[i+1] - dividers[i] for i in range(min(8, len(dividers)-1))]
-            estimated = int(round(sum(gaps) / len(gaps)))
-            if 12 <= estimated <= 40:
-                return estimated
+        return gui_left, gui_top, slot_size
 
-        return naive
+    def _build_grid(self) -> None:
+        """Build 27 slot centres using the precise measured offsets.
 
-    # ------------------------------------------------------------------
-    def _build_slot_centers(self) -> None:
-        """Populate self.slot_centers[0..26] in left-to-right, top-to-bottom order."""
-        # The chest grid starts ~18px below the title bar top
-        chest_top = self.gui_top + 20
-
-        # First slot x-centre is gui_left + (slot_size / 2) + 1px border
-        first_x = self.gui_left + self.slot_size // 2 + 1
-
-        centers = []
-        for row in range(CHEST_ROWS):
-            for col in range(CHEST_COLS):
-                cx = first_x + col * self.slot_size
-                cy = chest_top + row * self.slot_size + self.slot_size // 2
-                centers.append((cx, cy))
-
-        self.slot_centers = centers
-
-        # Title-detection strip: thin horizontal band across GUI title area
-        tw = self.gui_right - self.gui_left
-        self.title_strip = (self.gui_left, self.gui_top, tw, 20)
-
-    # ------------------------------------------------------------------
-    def _apply_fallback(self) -> bool:
+        At GUI scale 2 (verified on 68 reference frames):
+          - 2 px dark border + 32 px inner = 36 px per slot
+          - X margin from gui_left to first slot outer border = 10 px
+          - Y offset from gui_top  to first slot outer border = 30 px
+          - Slot centre X = gui_left + 28 + col * slot_size   (10+18=28)
+          - Slot centre Y = gui_top  + 48 + row * slot_size   (30+18=48)
         """
-        Hard-coded fallback geometry derived from the reference screenshots
-        (1024×576, GUI centred ~x=383..632).
-        """
-        log.info("Applying hard-coded fallback geometry (1024×576 reference)")
-        self.screen_w  = 1024
-        self.screen_h  = 576
-        self.gui_left  = 383
-        self.gui_top   = 131
-        self.gui_right = 633
-        self.slot_size = 18
-        self._build_slot_centers()
-        return True
+        centres = []
+        for row in range(self.GRID_ROWS):
+            for col in range(self.GRID_COLS):
+                cx = self._gui_left + DELL_SLOT_X_OFF + col * self._slot_size
+                cy = self._gui_top  + DELL_SLOT_Y_OFF + row * self._slot_size
+                centres.append((cx, cy))
+        self._slot_centres = centres
+
+        # Title / header strip: the grey panel area above the first slot row
+        # (rows gui_top .. gui_top+29, full panel width = 9 slots × slot_size)
+        panel_w = self.GRID_COLS * self._slot_size          # 324 px
+        self._title_box = (
+            self._gui_left + 10,   # skip panel left border
+            self._gui_top  + 4,    # skip panel top border
+            panel_w,
+            26,                    # header height before first slot
+        )
+
+    def _build_fallback(self) -> None:
+        """Hardcoded profile for Dell Inspiron 3521, Minecraft GUI scale 2,
+        windowed at 1366×694. Pixel-measured from 68 reference screenshots."""
+        self._screen_w  = 1366
+        self._screen_h  = 694
+        self._gui_left  = DELL_GUI_LEFT
+        self._gui_top   = DELL_GUI_TOP
+        self._slot_size = DELL_SLOT_SIZE
+        self._build_grid()
+        log.info(
+            "Using hardcoded Dell Inspiron 3521 / GUI scale 2 profile "
+            "(gui_left=%d, gui_top=%d, slot_size=%d)",
+            self._gui_left, self._gui_top, self._slot_size,
+        )
 
 
-# ---------------------------------------------------------------------------
-# 2. Window Finder
-#    Confirms the target application window is active before sending input.
-# ---------------------------------------------------------------------------
+# ── WindowFinder ──────────────────────────────────────────────────────────────
 
 class WindowFinder:
-    def __init__(self, window_class: str = TARGET_WINDOW_CLASS) -> None:
-        self.window_class = window_class.lower()
+    """Locates the Minecraft window and verifies X11 focus before input."""
+
+    TARGET_CLASSES = ("Minecraft", "net-minecraft-client-main-GameWindow",
+                      "com-mojang", "minecraft")
 
     def get_window_id(self) -> Optional[str]:
-        """Return the X11 window ID of the first matching window, or None."""
-        try:
-            out = subprocess.check_output(
-                ["xdotool", "search", "--class", self.window_class],
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-            ids = out.strip().splitlines()
-            return ids[0] if ids else None
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            return None
+        for cls in self.TARGET_CLASSES:
+            try:
+                result = subprocess.run(
+                    ["xdotool", "search", "--class", cls],
+                    capture_output=True, text=True, timeout=3,
+                )
+                ids = result.stdout.strip().split()
+                if ids:
+                    return ids[-1]
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+        return None
 
     def is_focused(self) -> bool:
-        """Return True if the target window currently has keyboard focus."""
+        """Return True if the Minecraft window currently has X11 focus."""
         wid = self.get_window_id()
         if not wid:
             return False
         try:
-            active = subprocess.check_output(
+            result = subprocess.run(
                 ["xdotool", "getactivewindow"],
-                stderr=subprocess.DEVNULL,
-                text=True,
-            ).strip()
-            return active == wid
-        except (subprocess.CalledProcessError, FileNotFoundError):
+                capture_output=True, text=True, timeout=2,
+            )
+            return result.stdout.strip() == wid
+        except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
     def focus(self) -> bool:
-        """Bring the target window to focus. Return True on success."""
+        """Bring the Minecraft window to front. Return True on success."""
         wid = self.get_window_id()
         if not wid:
-            log.error("Target window '%s' not found", self.window_class)
+            log.warning("Cannot find Minecraft window")
             return False
         try:
             subprocess.run(
                 ["xdotool", "windowactivate", "--sync", wid],
-                check=True, stderr=subprocess.DEVNULL,
+                timeout=3, check=True,
             )
             return True
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (FileNotFoundError, subprocess.TimeoutExpired,
+                subprocess.CalledProcessError):
             return False
 
 
-# ---------------------------------------------------------------------------
-# 3. Process Controller
-#    Manages /tmp/mc_spamming and the mc_farm.sh background process.
-# ---------------------------------------------------------------------------
+# ── ScreenCapture ─────────────────────────────────────────────────────────────
+
+class ScreenCapture:
+    """Thin wrapper around mss for low-overhead screen grabs.
+
+    mss.mss() is constructed lazily so that --calibrate-only works without
+    an X11 display.
+    """
+
+    def __init__(self) -> None:
+        self._sct = None
+
+    def _sct_(self):
+        if self._sct is None:
+            import mss
+            self._sct = mss.mss()
+        return self._sct
+
+    def grab_region(self, x: int, y: int, w: int, h: int) -> np.ndarray:
+        """Return a BGR numpy array for the given screen region."""
+        mon = {"left": x, "top": y, "width": w, "height": h}
+        raw = self._sct_().grab(mon)
+        frame = np.frombuffer(raw.raw, dtype=np.uint8).reshape(raw.height, raw.width, 4)
+        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+
+# ── GuiMonitor ────────────────────────────────────────────────────────────────
+
+class GuiMonitor:
+    """Polls the Minecraft window for the Afk Grinding chest GUI.
+
+    Detection method: sample POPUP_PROBE_PTS pixel coordinates that land
+    inside the grey panel header (#C6C6C6 = BGR 198,198,198).  When the
+    chest GUI is open, ≥3 of those pixels must be in the grey range
+    [POPUP_GREY_MIN, POPUP_GREY_MAX] on all three channels.  When the
+    game scene is visible instead, those same pixels are arbitrary colours
+    from the world and will not match.
+
+    Probe points and thresholds are defined as module-level constants and
+    are pixel-measured from the Dell Inspiron 3521 / GUI scale 2 setup.
+    """
+
+    NEEDED_MATCHES = 3   # out of 4 probe points must pass
+
+    def __init__(self, capture: ScreenCapture,
+                 title_box: Tuple[int, int, int, int]) -> None:
+        self.capture   = capture
+        self.title_box = title_box   # kept for --calibrate-only display
+
+    def popup_visible(self) -> bool:
+        """Return True when the Afk Grinding panel grey pixels are detected."""
+        # Grab a 1-pixel-tall strip at each probe row in one mss call per row
+        # (mss overhead is low, this is fast enough at 0.25 s poll rate).
+        matches = 0
+        for (px, py) in POPUP_PROBE_PTS:
+            frame = self.capture.grab_region(px, py, 1, 1)   # 1×1 BGR pixel
+            b, g, r = int(frame[0, 0, 0]), int(frame[0, 0, 1]), int(frame[0, 0, 2])
+            if (POPUP_GREY_MIN <= b <= POPUP_GREY_MAX and
+                    POPUP_GREY_MIN <= g <= POPUP_GREY_MAX and
+                    POPUP_GREY_MIN <= r <= POPUP_GREY_MAX):
+                matches += 1
+        return matches >= self.NEEDED_MATCHES
+
+
+# ── TooltipAnalyzer ───────────────────────────────────────────────────────────
+
+class TooltipAnalyzer:
+    """Captures a 150×100 tooltip crop and applies the green HSV mask."""
+
+    CROP_W = 150
+    CROP_H = 100
+
+    def __init__(self, capture: ScreenCapture) -> None:
+        self.capture = capture
+
+    def green_pixel_count(
+        self,
+        slot_cx: int,
+        slot_cy: int,
+        save_path: Optional[Path] = None,
+    ) -> int:
+        """Return number of #55FF55 pixels in the tooltip zone near this slot."""
+        # Tooltip renders to the right of the cursor; fall back left if near edge
+        x = slot_cx + 12
+        y = slot_cy - 10
+        # Clamp to plausible screen region
+        x = max(0, x)
+        y = max(0, y)
+
+        crop_bgr = self.capture.grab_region(x, y, self.CROP_W, self.CROP_H)
+
+        if save_path:
+            cv2.imwrite(str(save_path), crop_bgr)
+
+        hsv  = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, HSV_GREEN_LOWER, HSV_GREEN_UPPER)
+        return int(np.sum(mask > 0))
+
+
+# ── GridNavigator ─────────────────────────────────────────────────────────────
+
+class GridNavigator:
+    """Moves the cursor smoothly through the 9×3 slot grid."""
+
+    def __init__(self) -> None:
+        self._mouse = None
+
+    def _mouse_(self):
+        if self._mouse is None:
+            import pyautogui
+            pyautogui.FAILSAFE = False
+            self._mouse = pyautogui
+        return self._mouse
+
+    def move_to(self, x: int, y: int) -> None:
+        """Glide cursor to (x, y) over GLIDE_DURATION_MS ms."""
+        try:
+            import pyautogui
+            cur_x, cur_y = pyautogui.position()
+        except Exception:
+            cur_x, cur_y = x, y
+
+        step_s = (GLIDE_DURATION_MS / 1000.0) / max(GLIDE_STEPS, 1)
+        for step in range(1, GLIDE_STEPS + 1):
+            t = step / GLIDE_STEPS
+            nx = int(cur_x + (x - cur_x) * t)
+            ny = int(cur_y + (y - cur_y) * t)
+            self._mouse_().moveTo(nx, ny, duration=0)
+            time.sleep(step_s)
+
+    def click(self, x: int, y: int) -> None:
+        self._mouse_().click(x, y, button="left")
+
+    def park(self) -> None:
+        """Move cursor to safe neutral corner."""
+        self._mouse_().moveTo(10, 10, duration=0)
+
+
+# ── ProcessController ─────────────────────────────────────────────────────────
 
 class ProcessController:
-    def __init__(self, flag: str = FLAG_FILE, script: str = FARM_SCRIPT) -> None:
+    """Manages the flag file IPC and grinder script lifecycle."""
+
+    def __init__(self, flag: str = FLAG_FILE, script: str = "") -> None:
         self.flag   = flag
-        self.script = script
+        self.script = script or str(Path(__file__).parent / "mc_spam_2.sh")
 
     def halt_farm(self) -> None:
-        """Delete the flag file — mc_farm.sh loop exits on its next iteration."""
-        if os.path.exists(self.flag):
+        try:
             os.remove(self.flag)
-            log.info("Flag file deleted — mc_farm.sh halted")
-        else:
-            log.debug("Flag file was already absent")
+            log.info("Flag file deleted — grinder halted")
+        except FileNotFoundError:
+            log.debug("Flag file already absent")
 
     def resume_farm(self) -> None:
-        """Re-create the flag file and re-launch the grinder in the background.
-
-        Passes MC_GRINDER_ONLY=1 so mc_spam_2.sh knows the solver is already
-        running and does not spawn a second instance of mc_afk_solver.py.
-        """
+        """Recreate flag file and relaunch the grinder (grinder-only mode)."""
         Path(self.flag).touch()
         log.info("Flag file recreated")
         if os.path.isfile(self.script):
@@ -485,611 +494,313 @@ class ProcessController:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            log.info("Grinder relaunched via %s (MC_GRINDER_ONLY=1)", self.script)
+            log.info("Grinder relaunched: %s", self.script)
         else:
-            log.warning("Grinder script not found at %s — skipping relaunch", self.script)
+            log.warning("Grinder script not found at %s", self.script)
 
     def farm_is_running(self) -> bool:
         return os.path.exists(self.flag)
 
 
-# ---------------------------------------------------------------------------
-# 4. Capture Helper
-#    Thin wrapper around mss for region screenshots.
-#    The mss context is opened lazily on the first grab call so that
-#    --calibrate-only works in headless environments with no X11 display.
-# ---------------------------------------------------------------------------
-
-class ScreenCapture:
-    def __init__(self) -> None:
-        self._sct: Optional[mss.base.MSSBase] = None
-
-    def _get_sct(self) -> "mss.base.MSSBase":
-        if self._sct is None:
-            self._sct = mss.MSS()
-        return self._sct
-
-    def grab_region(self, x: int, y: int, w: int, h: int) -> np.ndarray:
-        """Return a BGR numpy array for the given screen region."""
-        mon = {"left": x, "top": y, "width": w, "height": h}
-        raw = self._get_sct().grab(mon)
-        arr = np.array(raw, dtype=np.uint8)[:, :, :3]
-        return arr
-
-    def grab_full(self) -> np.ndarray:
-        sct = self._get_sct()
-        mon = sct.monitors[1]  # primary monitor
-        raw = sct.grab(mon)
-        return np.array(raw, dtype=np.uint8)[:, :, :3]
-
-    def save(self, arr: np.ndarray, path: str) -> None:
-        cv2.imwrite(path, arr)
-
-
-# ---------------------------------------------------------------------------
-# 5. GUI Monitor
-#    Background loop; calls back when "Afk Grinding" popup is detected.
-# ---------------------------------------------------------------------------
-
-class GuiMonitor:
-    """
-    Watches a thin horizontal strip at the top of the GUI region.
-
-    Detection strategy: look for a sudden appearance of the dark Minecraft
-    title-bar background colour (#3c3c3c) in a region that is normally game
-    world pixels (colourful / varying).  Uses a pixel-density threshold so
-    a single speckle does not trigger falsely.
-    """
-
-    TITLE_BG_LO = np.array([35, 35, 35], dtype=np.uint8)
-    TITLE_BG_HI = np.array([85, 85, 85], dtype=np.uint8)
-    DARK_PIXEL_THRESHOLD = 0.35   # fraction of strip pixels that must be dark
-
-    def __init__(self, calib: CalibrationEngine, capture: ScreenCapture) -> None:
-        self.calib   = calib
-        self.capture = capture
-        self._running = False
-
-    def wait_for_gui(self, timeout: Optional[float] = None) -> bool:
-        """
-        Block until the "Afk Grinding" GUI is detected (or timeout expires).
-        Returns True if detected, False if timed out.
-        """
-        tx, ty, tw, th = self.calib.title_strip
-        deadline = (time.monotonic() + timeout) if timeout else None
-        log.info("Monitoring title strip %s for Afk Grinding popup…", self.calib.title_strip)
-
-        while True:
-            if deadline and time.monotonic() > deadline:
-                return False
-
-            strip = self.capture.grab_region(tx, ty, tw, max(th, 15))
-            if self._is_title_visible(strip):
-                log.info("Afk Grinding GUI detected!")
-                return True
-
-            time.sleep(MONITOR_POLL_SECONDS)
-
-    def _is_title_visible(self, strip: np.ndarray) -> bool:
-        mask = cv2.inRange(strip, self.TITLE_BG_LO, self.TITLE_BG_HI)
-        density = np.sum(mask > 0) / max(mask.size, 1)
-        return density >= self.DARK_PIXEL_THRESHOLD
-
-
-# ---------------------------------------------------------------------------
-# 6. Tooltip Analyzer
-#    HSV-masks a tooltip crop for both the bright-green "Click to Confirm"
-#    and the bright-red "Do not click" Minecraft formatting colours.
-#    A slot is only confirmed when green pixels exceed the threshold AND the
-#    green-to-red confidence ratio clears GREEN_RED_RATIO_MIN, preventing
-#    false-positive clicks on decoy items.
-# ---------------------------------------------------------------------------
-
-from typing import NamedTuple
-
-
-class TooltipClassification(NamedTuple):
-    """Result of a single tooltip scan."""
-    slot_idx:     int
-    green_pixels: int
-    red_pixels:   int
-    is_confirm:   bool   # green threshold met AND ratio clears minimum
-    is_decoy:     bool   # red threshold met (regardless of green)
-    confidence:   float  # green / (green + red + 1); 1.0 = pure green, 0.0 = no signal
-
-    def __str__(self) -> str:
-        verdict = "CONFIRM" if self.is_confirm else ("DECOY" if self.is_decoy else "empty")
-        return (
-            f"slot {self.slot_idx:02d}  "
-            f"green={self.green_pixels:4d}  red={self.red_pixels:4d}  "
-            f"conf={self.confidence:.2f}  → {verdict}"
-        )
-
-
-class TooltipAnalyzer:
-    def __init__(self, capture: ScreenCapture) -> None:
-        self.capture = capture
-        CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
-
-    # ------------------------------------------------------------------
-    def classify(
-        self,
-        slot_x: int,
-        slot_y: int,
-        slot_idx: int,
-        save_crop: bool = True,
-    ) -> TooltipClassification:
-        """
-        Capture a TOOLTIP_W × TOOLTIP_H crop to the right of the cursor,
-        convert to HSV, and score both the green ("Click to Confirm") and
-        red ("Do not click") channels.
-
-        Returns a TooltipClassification with all scores and the final verdict.
-        """
-        crop_x = slot_x + 5
-        crop_y = slot_y - TOOLTIP_H // 2
-
-        crop_bgr = self.capture.grab_region(crop_x, crop_y, TOOLTIP_W, TOOLTIP_H)
-
-        if save_crop:
-            fname = str(CAPTURE_DIR / f"slot_{slot_idx:02d}.png")
-            self.capture.save(crop_bgr, fname)
-
-        crop_hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
-
-        # --- Green channel ---
-        green_mask  = cv2.inRange(crop_hsv, GREEN_HSV_LO, GREEN_HSV_HI)
-        green_count = int(np.sum(green_mask > 0))
-
-        # --- Red channel (two HSV ranges because red wraps at hue=0) ---
-        red_mask_a  = cv2.inRange(crop_hsv, RED_HSV_LO_A, RED_HSV_HI_A)
-        red_mask_b  = cv2.inRange(crop_hsv, RED_HSV_LO_B, RED_HSV_HI_B)
-        red_count   = int(np.sum((red_mask_a | red_mask_b) > 0))
-
-        # --- Confidence ratio ---
-        confidence  = green_count / (green_count + red_count + 1)
-
-        # --- Verdict ---
-        green_ok   = green_count >= GREEN_PIXEL_THRESHOLD
-        ratio_ok   = (red_count == 0) or (green_count / max(red_count, 1) >= GREEN_RED_RATIO_MIN)
-        is_confirm = green_ok and ratio_ok
-        is_decoy   = red_count >= RED_PIXEL_THRESHOLD
-
-        result = TooltipClassification(
-            slot_idx=slot_idx,
-            green_pixels=green_count,
-            red_pixels=red_count,
-            is_confirm=is_confirm,
-            is_decoy=is_decoy,
-            confidence=confidence,
-        )
-        log.debug("%s", result)
-        return result
-
-    # ------------------------------------------------------------------
-    def has_green_confirm(
-        self,
-        slot_x: int,
-        slot_y: int,
-        slot_idx: int,
-        save_crop: bool = True,
-    ) -> bool:
-        """Convenience wrapper — returns True only for a clean confirm verdict."""
-        return self.classify(slot_x, slot_y, slot_idx, save_crop).is_confirm
-
-
-# ---------------------------------------------------------------------------
-# 7. Grid Navigator
-#    Sweeps slots 0-26, calls TooltipAnalyzer after each hover settle.
-# ---------------------------------------------------------------------------
-
-class GridNavigator:
-    def __init__(
-        self,
-        calib: CalibrationEngine,
-        analyzer: TooltipAnalyzer,
-        finder: WindowFinder,
-    ) -> None:
-        self.calib    = calib
-        self.analyzer = analyzer
-        self.finder   = finder
-
-    def find_and_click_target(self, dry_run: bool = False) -> bool:
-        """
-        Sweep all 27 slots.  For each slot:
-          • Glide the cursor smoothly (multi-step) to avoid instant-jump detection.
-          • Enforce a 120 ms settle so the tooltip renders before capture.
-          • Score green ("Click to Confirm") and red ("Do not click") channels.
-          • Skip slots flagged as decoys (red dominant).
-          • Click the first slot that passes both the green threshold and the
-            green-to-red confidence ratio check.
-          • Abort the entire sweep if SWEEP_TIMEOUT_SECONDS elapses — protects
-            against server lag spikes that leave the menu in a broken state.
-
-        dry_run=True: sweeps and classifies every slot but never sends a click.
-          All 27 results are logged at INFO level and a scan report is printed.
-
-        Returns True on a confirmed click (or dry-run confirm hit), False otherwise.
-        """
-        if not self.finder.focus():
-            log.warning("Could not focus target window — proceeding anyway")
-
-        deadline = time.monotonic() + SWEEP_TIMEOUT_SECONDS
-        best: Optional[TooltipClassification] = None
-        all_results: List[TooltipClassification] = []
-
-        for idx, (cx, cy) in enumerate(self.calib.slot_centers):
-
-            # --- Global timeout guard ---
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                log.error(
-                    "SWEEP TIMEOUT — %ds elapsed before slot %02d was reached.  "
-                    "Aborting to prevent stuck input state.",
-                    SWEEP_TIMEOUT_SECONDS, idx,
-                )
-                _move_to(10, 10)
-                if dry_run:
-                    self._print_scan_report(all_results, timed_out=True)
-                return False
-
-            log.debug(
-                "Gliding to slot %02d @ (%d, %d)  [%.1fs remaining]",
-                idx, cx, cy, remaining,
-            )
-
-            # --- Smooth glide, not an instant warp ---
-            _glide_to(cx, cy)
-
-            # --- Tooltip settle pause ---
-            time.sleep(HOVER_SETTLE_MS / 1000.0)
-
-            result = self.analyzer.classify(cx, cy, idx)
-            all_results.append(result)
-
-            if dry_run:
-                log.info("[DRY-RUN]  %s", result)
-                # In dry-run mode keep scanning even after a confirm hit
-                if best is None or result.confidence > best.confidence:
-                    best = result
-                continue
-
-            # --- Live mode decision ---
-            if result.is_decoy and not result.is_confirm:
-                log.info("Slot %02d — DECOY (red=%d, green=%d) — skipping",
-                         idx, result.red_pixels, result.green_pixels)
-                continue
-
-            if result.is_confirm:
-                log.info(
-                    "Slot %02d — CONFIRM  green=%d  red=%d  conf=%.2f — clicking (%d, %d)",
-                    idx, result.green_pixels, result.red_pixels, result.confidence, cx, cy,
-                )
-                _left_click(cx, cy)
-                return True
-
-            if best is None or result.confidence > best.confidence:
-                best = result
-
-        if dry_run:
-            self._print_scan_report(all_results, timed_out=False)
-            # Return True if at least one confirm-quality slot was found
-            return any(r.is_confirm for r in all_results)
-
-        # Live mode: no clean confirm found
-        if best is not None:
-            log.warning(
-                "Sweep complete — no CONFIRM found.  "
-                "Best candidate: slot %02d  green=%d  red=%d  conf=%.2f",
-                best.slot_idx, best.green_pixels, best.red_pixels, best.confidence,
-            )
-        return False
-
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _print_scan_report(
-        results: List[TooltipClassification],
-        timed_out: bool,
-    ) -> None:
-        """Print a formatted scan report table to stdout."""
-        divider = "─" * 58
-        print(f"\n{'─'*20}  DRY-RUN SCAN REPORT  {'─'*16}")
-        print(f"  {'Slot':>4}  {'Green':>6}  {'Red':>6}  {'Conf':>5}  Verdict")
-        print(divider)
-        for r in results:
-            verdict = (
-                "✓ CONFIRM" if r.is_confirm
-                else ("✗ DECOY  " if r.is_decoy
-                else "  empty  ")
-            )
-            print(
-                f"  [{r.slot_idx:>2}]  {r.green_pixels:>6}  "
-                f"{r.red_pixels:>6}  {r.confidence:>5.2f}  {verdict}"
-            )
-        if timed_out:
-            print(f"  *** TIMED OUT after {SWEEP_TIMEOUT_SECONDS}s ***")
-        confirms = [r for r in results if r.is_confirm]
-        decoys   = [r for r in results if r.is_decoy and not r.is_confirm]
-        print(divider)
-        print(
-            f"  Scanned {len(results)}/27 slots — "
-            f"{len(confirms)} confirm, {len(decoys)} decoy, "
-            f"{len(results) - len(confirms) - len(decoys)} empty"
-        )
-        if confirms:
-            best = max(confirms, key=lambda r: r.confidence)
-            print(f"  Best confirm → slot [{best.slot_idx:>2}]  conf={best.confidence:.2f}")
-        print()
-
-
-# ---------------------------------------------------------------------------
-# 8. Asset Sanitiser
-#    Backs up per-run tooltip crops to a timestamped folder then clears them.
-# ---------------------------------------------------------------------------
+# ── AssetSanitiser ────────────────────────────────────────────────────────────
 
 class AssetSanitiser:
+    """Moves per-run slot crops to a timestamped archive directory."""
+
     def __init__(self, capture_dir: Path = CAPTURE_DIR) -> None:
         self.capture_dir = capture_dir
+        self._run_dir: Optional[Path] = None
 
-    def archive_and_clear(self) -> None:
-        """Move captured crops into a timestamped subdirectory."""
-        pngs = list(self.capture_dir.glob("slot_*.png"))
-        if not pngs:
+    def run_dir(self) -> Path:
+        if self._run_dir is None:
+            ts = int(time.time())
+            self._run_dir = self.capture_dir / f"run_{ts}"
+            self._run_dir.mkdir(parents=True, exist_ok=True)
+        return self._run_dir
+
+    def slot_path(self, index: int) -> Path:
+        return self.capture_dir / f"slot_{index:02d}.png"
+
+    def archive(self) -> None:
+        """Move all slot_NN.png files into the run archive."""
+        crops = list(self.capture_dir.glob("slot_*.png"))
+        if not crops:
             return
-
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        archive = self.capture_dir / f"run_{ts}"
-        archive.mkdir(parents=True, exist_ok=True)
-
-        for p in pngs:
-            shutil.move(str(p), str(archive / p.name))
-
-        log.info("Archived %d crop(s) → %s", len(pngs), archive)
-
-    def hard_clear(self) -> None:
-        """Delete all slot crops without archiving (call on failed runs)."""
-        for p in self.capture_dir.glob("slot_*.png"):
-            p.unlink(missing_ok=True)
+        dest = self.run_dir()
+        for f in crops:
+            shutil.move(str(f), str(dest / f.name))
+        log.info("Archived %d crops → %s", len(crops), dest)
+        self._run_dir = None  # reset for next run
 
 
-# ---------------------------------------------------------------------------
-# 9. Safe Exit helpers
-# ---------------------------------------------------------------------------
-
-def _safe_exit(reason: str, capture: ScreenCapture) -> None:
-    """
-    Park the cursor at the top-left safe boundary and log a diagnostic
-    message before exiting.  Never leaves residual mouse-clicks pending.
-    """
-    log.error("SAFE EXIT — %s", reason)
-    try:
-        _move_to(10, 10)
-    except Exception:
-        pass
-    sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# 10. Main Solver Orchestrator
-# ---------------------------------------------------------------------------
+# ── AfkSolver ─────────────────────────────────────────────────────────────────
 
 class AfkSolver:
-    def __init__(self, script: Optional[str] = None) -> None:
-        self.calib    = CalibrationEngine()
-        self.capture  = ScreenCapture()
-        self.finder   = WindowFinder()
-        self.proc     = ProcessController(script=script or FARM_SCRIPT)
-        self.sanitiser = AssetSanitiser()
-        self.monitor: Optional[GuiMonitor] = None
-        self.analyzer: Optional[TooltipAnalyzer] = None
-        self.navigator: Optional[GridNavigator] = None
+    """Main orchestrator."""
 
-    # ------------------------------------------------------------------
-    def setup(self) -> None:
-        log.info("=== mc_afk_solver starting up ===")
-        CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        calibration:  CalibrationEngine,
+        capture:      ScreenCapture,
+        monitor:      GuiMonitor,
+        navigator:    GridNavigator,
+        analyzer:     TooltipAnalyzer,
+        controller:   ProcessController,
+        sanitiser:    AssetSanitiser,
+        window:       WindowFinder,
+        dry_run:      bool = False,
+    ) -> None:
+        self.calib      = calibration
+        self.capture    = capture
+        self.monitor    = monitor
+        self.nav        = navigator
+        self.analyzer   = analyzer
+        self.controller = controller
+        self.sanitiser  = sanitiser
+        self.window     = window
+        self.dry_run    = dry_run
 
-        # Calibrate grid geometry from reference assets
-        self.calib.calibrate()
+    # ── Popup wait ─────────────────────────────────────────────────────────
 
-        self.monitor   = GuiMonitor(self.calib, self.capture)
-        self.analyzer  = TooltipAnalyzer(self.capture)
-        self.navigator = GridNavigator(self.calib, self.analyzer, self.finder)
-
-    # ------------------------------------------------------------------
-    def run_forever(self) -> None:
-        """Main event loop — runs until the process is killed."""
-        self.setup()
-
+    def wait_for_popup(self, timeout: Optional[float] = None) -> bool:
+        """Block until the Afk Grinding popup is detected (or timeout)."""
+        deadline = time.monotonic() + timeout if timeout else None
+        log.info("Monitoring for popup (poll every %.2fs)…", MONITOR_POLL_SECONDS)
         while True:
-            # --- Step 1: Wait for the Afk Grinding GUI ---
-            detected = self.monitor.wait_for_gui()
-            if not detected:
+            if self.monitor.popup_visible():
+                log.info("Popup detected")
+                return True
+            if deadline and time.monotonic() >= deadline:
+                log.info("Popup wait timed out after %.0fs", timeout)
+                return False
+            time.sleep(MONITOR_POLL_SECONDS)
+
+    # ── Solve one popup ─────────────────────────────────────────────────────
+
+    def solve(self) -> bool:
+        """Sweep the grid, click the green slot. Return True on success."""
+
+        # 1. Verify window focus before any input
+        if not self.window.is_focused():
+            log.info("Minecraft not focused — attempting to raise window")
+            if not self.window.focus():
+                log.error("Cannot focus Minecraft window — aborting solve")
+                return False
+
+        # 2. Halt the grinder
+        self.controller.halt_farm()
+        time.sleep(0.15)
+
+        slots = self.calib.slot_centres
+        confirm_idx: Optional[int] = None
+        confirm_xy:  Optional[Tuple[int, int]] = None
+        sweep_start  = time.monotonic()
+
+        dry_run_results: List[Tuple[int, int]] = []  # (slot, green_px)
+
+        log.info("Beginning grid sweep (%d slots)…", len(slots))
+
+        for idx, (cx, cy) in enumerate(slots):
+
+            # Global sweep timeout failsafe
+            if time.monotonic() - sweep_start > SWEEP_TIMEOUT_SECONDS:
+                log.error(
+                    "Sweep timeout (%.0fs) — aborting after %d/%d slots",
+                    SWEEP_TIMEOUT_SECONDS, idx, len(slots),
+                )
+                self._failsafe()
+                self.sanitiser.archive()
+                return False
+
+            # Glide to slot centre
+            self.nav.move_to(cx, cy)
+
+            # Settle: let the game render the tooltip
+            time.sleep(HOVER_SETTLE_MS / 1000.0)
+
+            # Capture & analyse
+            save_path = self.sanitiser.slot_path(idx)
+            green_px  = self.analyzer.green_pixel_count(cx, cy, save_path=save_path)
+
+            log.debug("  slot [%2d] (%4d,%4d)  green_px=%d", idx, cx, cy, green_px)
+
+            if self.dry_run:
+                dry_run_results.append((idx, green_px))
                 continue
 
-            # --- Step 2: Halt grinding script immediately ---
-            self.proc.halt_farm()
-            time.sleep(0.05)   # brief yield so the bash loop notices the flag
+            if green_px >= GREEN_PIXEL_THRESHOLD:
+                log.info("  ✓ CONFIRM  slot [%d]  green_px=%d", idx, green_px)
+                confirm_idx = idx
+                confirm_xy  = (cx, cy)
+                break
 
-            # --- Step 3 & 4: Sweep grid and click matching slot ---
-            success = self.navigator.find_and_click_target()
+        # ── Dry-run report ────────────────────────────────────────────────
+        if self.dry_run:
+            self._print_dry_run_report(dry_run_results)
+            self.nav.park()
+            self.controller.resume_farm()
+            self.sanitiser.archive()
+            return True
 
-            if success:
-                log.info("Click dispatched — waiting %dms for UI to close", CLICK_RECOVERY_MS)
-                time.sleep(CLICK_RECOVERY_MS / 1000.0)
-
-                # --- Step 5a: Resume farm ---
-                self.proc.resume_farm()
-
-                # --- Step 5b: Archive slot crops ---
-                self.sanitiser.archive_and_clear()
-
-                log.info("Cycle complete — resuming monitor loop")
-
-            else:
-                # --- Step 5 (fail-safe): No green slot found ---
-                log.error(
-                    "TIMEOUT — swept all %d slots without finding a green "
-                    "confirm tooltip.  Aborting input tasks.", CHEST_SLOTS
-                )
-                try:
-                    _move_to(10, 10)
-                except Exception:
-                    pass
-
-                # Clean up crops from the failed run
-                self.sanitiser.hard_clear()
-
-                # Resume the farm so the player is not left stuck
-                self.proc.resume_farm()
-
-                log.warning("Grinder resumed after failed solve — continuing monitor loop")
-
-    # ------------------------------------------------------------------
-    def run_once(self, timeout: float = 30.0) -> bool:
-        """
-        Single-shot mode: wait up to `timeout` seconds for the popup,
-        solve it once, then return True/False.  Useful for testing.
-        """
-        self.setup()
-
-        log.info("Single-shot mode (timeout=%.1fs)", timeout)
-        detected = self.monitor.wait_for_gui(timeout=timeout)
-
-        if not detected:
-            log.warning("No GUI popup appeared within %.1fs", timeout)
+        # ── Failsafe: no slot found ───────────────────────────────────────
+        if confirm_xy is None:
+            log.error(
+                "FAILSAFE — no green slot found after sweeping all %d slots",
+                len(slots),
+            )
+            self._failsafe()
+            self.controller.resume_farm()
+            self.sanitiser.archive()
             return False
 
-        self.proc.halt_farm()
-        time.sleep(0.05)
+        # 3. Click
+        log.info("Clicking slot [%d] at (%d, %d)", confirm_idx, *confirm_xy)
+        self.nav.click(*confirm_xy)
 
-        success = self.navigator.find_and_click_target()
+        # 4. Recovery wait
+        time.sleep(CLICK_RECOVERY_MS / 1000.0)
 
-        if success:
-            time.sleep(CLICK_RECOVERY_MS / 1000.0)
-            self.proc.resume_farm()
-            self.sanitiser.archive_and_clear()
-            log.info("Single-shot solve succeeded")
+        # 5. Resume grinder
+        self.controller.resume_farm()
+
+        # 6. Archive crops
+        self.sanitiser.archive()
+
+        return True
+
+    # ── Failsafe ────────────────────────────────────────────────────────────
+
+    def _failsafe(self) -> None:
+        """Park cursor at screen boundary and log diagnostic."""
+        self.nav.park()
+        log.error(
+            "Failsafe triggered — cursor parked at (10,10). "
+            "Check /tmp/mc_afk_captures/ for tooltip crops. "
+            "Run --calibrate-only to verify grid geometry."
+        )
+
+    # ── Dry-run report ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _print_dry_run_report(results: List[Tuple[int, int]]) -> None:
+        sep = "─" * 58
+        print(f"\n{'─'*20}  DRY-RUN SCAN REPORT  {'─'*16}")
+        print(f"  {'Slot':>5}   {'Green px':>8}   {'Verdict'}")
+        print(sep)
+        best_idx, best_green = -1, -1
+        for idx, green in results:
+            verdict = "✓ CONFIRM" if green >= GREEN_PIXEL_THRESHOLD else "  empty  "
+            print(f"  [{idx:2d}]   {green:>8}   {verdict}")
+            if green > best_green:
+                best_green = green
+                best_idx   = idx
+        print(sep)
+        confirms = sum(1 for _, g in results if g >= GREEN_PIXEL_THRESHOLD)
+        print(f"  Scanned {len(results)}/27 slots — {confirms} confirm")
+        if best_green >= GREEN_PIXEL_THRESHOLD:
+            print(f"  Best confirm → slot [{best_idx}]  green_px={best_green}")
         else:
-            _move_to(10, 10)
-            self.sanitiser.hard_clear()
-            self.proc.resume_farm()
-            log.error("Single-shot solve failed — no green slot found")
+            print("  WARNING: no confirm slot detected — check calibration")
+        print()
 
-        return success
+    # ── Main loops ──────────────────────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    def run_dry(self, timeout: float = 30.0) -> bool:
-        """
-        Dry-run mode: wait for the popup, halt the grinder, glide through
-        all 27 slots, classify every tooltip, then print a full scan report
-        — WITHOUT sending a single click.
-
-        Use this on your desktop to verify calibration accuracy before going
-        live.  The grinder is resumed normally at the end so the session
-        continues uninterrupted.
-
-        Returns True if at least one confirm-quality slot was detected.
-        """
-        self.setup()
-        log.info("DRY-RUN mode — no clicks will be sent (timeout=%.1fs)", timeout)
-
-        detected = self.monitor.wait_for_gui(timeout=timeout)
-        if not detected:
-            log.warning("No GUI popup appeared within %.1fs — nothing to scan", timeout)
+    def run_once(self, timeout: Optional[float] = None) -> bool:
+        """Wait for one popup, solve it, return success flag."""
+        found = self.wait_for_popup(timeout=timeout)
+        if not found:
             return False
+        return self.solve()
 
-        self.proc.halt_farm()
-        time.sleep(0.05)
-
-        found = self.navigator.find_and_click_target(dry_run=True)
-
-        # Archive crops regardless of outcome — useful for visual inspection
-        self.sanitiser.archive_and_clear()
-
-        # Always resume the grinder so the session is not left halted
-        self.proc.resume_farm()
-
-        if found:
-            log.info("DRY-RUN complete — confirm slot(s) detected (would have clicked)")
-        else:
-            log.warning("DRY-RUN complete — no confirm slot found (check calibration)")
-
-        return found
+    def run_continuous(self) -> None:
+        """Loop forever: wait for popup, solve, repeat."""
+        log.info("Continuous mode — Ctrl-C to exit")
+        while True:
+            self.wait_for_popup()
+            self.solve()
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+# ── Factory ───────────────────────────────────────────────────────────────────
+
+def build_solver(script: str = "", dry_run: bool = False) -> AfkSolver:
+    calib      = CalibrationEngine()
+    capture    = ScreenCapture()
+    sanitiser  = AssetSanitiser()
+    window     = WindowFinder()
+
+    # Calibrate immediately so title_box is available
+    calib.calibrate()
+
+    monitor    = GuiMonitor(capture, calib.title_box)
+    navigator  = GridNavigator()
+    analyzer   = TooltipAnalyzer(capture)
+    controller = ProcessController(script=script)
+
+    return AfkSolver(
+        calibration=calib,
+        capture=capture,
+        monitor=monitor,
+        navigator=navigator,
+        analyzer=analyzer,
+        controller=controller,
+        sanitiser=sanitiser,
+        window=window,
+        dry_run=dry_run,
+    )
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    import argparse
-
     parser = argparse.ArgumentParser(
-        description="mc_afk_solver — AFK Grinding verification auto-clicker"
+        description="AFK-popup solver for JartexNetwork OneBlock",
     )
     parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Run a single detection/solve cycle and exit",
+        "--once", action="store_true",
+        help="Solve one popup then exit",
     )
     parser.add_argument(
-        "--timeout",
-        type=float,
-        default=30.0,
-        metavar="SECONDS",
-        help="Timeout for --once mode (default: 30s)",
+        "--dry-run", action="store_true",
+        help="Sweep all slots and print a scan report — no click sent",
     )
     parser.add_argument(
-        "--calibrate-only",
-        action="store_true",
-        help="Print calibrated geometry and exit (for debugging)",
+        "--calibrate-only", action="store_true",
+        help="Print auto-derived grid geometry and exit",
     )
     parser.add_argument(
-        "--script",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help=(
-            "Path to the grinding bash script to halt/resume "
-            "(default: mc_spam_2.sh next to this file)"
-        ),
+        "--timeout", type=float, default=30.0, metavar="SECONDS",
+        help="Popup wait timeout for --once / --dry-run (default: 30)",
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "Wait for the popup, sweep all 27 slots and classify each tooltip, "
-            "then print a full scan report — without sending any click. "
-            "Use this to verify calibration accuracy before going live."
-        ),
+        "--script", default="", metavar="PATH",
+        help="Path to grinder script to halt/resume (default: mc_spam_2.sh)",
     )
     args = parser.parse_args()
 
-    solver = AfkSolver(script=args.script)
+    # Write our PID so mc_spam_2.sh can kill us on stop
+    Path(SOLVER_PID_FILE).write_text(str(os.getpid()))
 
     if args.calibrate_only:
-        solver.calib.calibrate()
-        print("\n--- Calibrated Geometry ---")
-        print(f"  Screen  : {solver.calib.screen_w} × {solver.calib.screen_h}")
-        print(f"  GUI left: {solver.calib.gui_left}   right: {solver.calib.gui_right}")
-        print(f"  GUI top : {solver.calib.gui_top}")
-        print(f"  Slot px : {solver.calib.slot_size}")
-        print(f"  Title strip (x,y,w,h): {solver.calib.title_strip}")
-        print(f"\n  Slot centres (0–{CHEST_SLOTS - 1}):")
-        for i, (x, y) in enumerate(solver.calib.slot_centers):
-            print(f"    [{i:2d}]  ({x}, {y})")
+        calib = CalibrationEngine()
+        calib.print_geometry()
         return
 
-    if args.dry_run:
-        ok = solver.run_dry(timeout=args.timeout)
-        sys.exit(0 if ok else 1)
+    solver = build_solver(script=args.script, dry_run=args.dry_run)
 
-    if args.once:
-        ok = solver.run_once(timeout=args.timeout)
-        sys.exit(0 if ok else 1)
-
-    solver.run_forever()
+    try:
+        if args.once or args.dry_run:
+            ok = solver.run_once(timeout=args.timeout)
+            sys.exit(0 if ok else 1)
+        else:
+            solver.run_continuous()
+    except KeyboardInterrupt:
+        log.info("Interrupted — exiting")
+    finally:
+        # Clean up PID file
+        try:
+            os.remove(SOLVER_PID_FILE)
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":
