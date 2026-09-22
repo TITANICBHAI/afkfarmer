@@ -32,6 +32,12 @@ SUCCESS_PATTERNS = (
     re.compile(r"\baccount created\b", re.IGNORECASE),
 )
 
+AUTHENTICATED_PATTERNS = (
+    re.compile(r"\bpersonal workspace\b", re.IGNORECASE),
+    re.compile(r"\bwhat are we working on today\b", re.IGNORECASE),
+    re.compile(r"\bmy repls\b", re.IGNORECASE),
+)
+
 
 def _text(value: Any) -> str:
     return " ".join(str(value or "").split())
@@ -85,3 +91,19 @@ def classify_signup_state(
     if _url_changed(current_url, signup_url):
         return "submitted"
     return "waiting"
+
+
+def classify_session_state(current_url: Any, page_text: Any) -> str:
+    """Classify the visible post-mobile browser state."""
+
+    text = str(page_text or "")
+    if any(pattern.search(text) for pattern in AUTHENTICATED_PATTERNS):
+        return "authenticated"
+
+    try:
+        path = urlsplit(str(current_url or "")).path.casefold()
+    except ValueError:
+        path = ""
+    if path.rstrip("/").endswith("/login"):
+        return "login_required"
+    return "unknown"

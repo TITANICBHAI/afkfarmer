@@ -1,12 +1,16 @@
 import os
 import shutil
-import time
 from typing import Optional
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from colorama import Fore, Style
 
-from pc_flow import classify_signup_state, find_validation_errors, has_captcha_text
+from pc_flow import (
+    classify_session_state,
+    classify_signup_state,
+    find_validation_errors,
+    has_captcha_text,
+)
 from temp_mail import TempMailOrgProvider
 
 
@@ -166,6 +170,51 @@ class PCAutomation:
         if has_captcha_text(self._page_text()):
             return True
         return self._visible_control(self.CAPTCHA_SELECTORS, timeout=500) is not None
+
+    def _wait_for_session_or_login(self, timeout=30_000) -> str:
+        """Wait for an observable authenticated or login-required state."""
+
+        try:
+            self.page.wait_for_function(
+                """() => {
+                    const text = (document.body?.innerText || "").toLowerCase();
+                    const path = window.location.pathname.toLowerCase();
+                    return text.includes("personal workspace") ||
+                           text.includes("what are we working on today") ||
+                           text.includes("my repls") ||
+                           path.endsWith("/login") ||
+                           Boolean(document.querySelector("input[type='password']"));
+                }""",
+                timeout=timeout,
+            )
+        except PlaywrightTimeoutError:
+            return "unknown"
+        state = classify_session_state(self.page.url, self._page_text())
+        if state == "authenticated":
+            return state
+        try:
+            if self.page.locator("input[type='password']").is_visible(timeout=500):
+                return "login_required"
+        except Exception:
+            pass
+        return state
+
+    def _wait_for_authenticated_state(self, timeout=30_000) -> bool:
+        """Wait for and require an observable authenticated state."""
+
+        try:
+            self.page.wait_for_function(
+                """() => {
+                    const text = (document.body?.innerText || "").toLowerCase();
+                    return text.includes("personal workspace") ||
+                           text.includes("what are we working on today") ||
+                           text.includes("my repls");
+                }""",
+                timeout=timeout,
+            )
+        except PlaywrightTimeoutError:
+            return False
+        return classify_session_state(self.page.url, self._page_text()) == "authenticated"
 
     def _save_failure(self, tag: str) -> None:
         try:
@@ -335,26 +384,47 @@ class PCAutomation:
         try:
             self.log("\n[1] Navigating to Replit home...", Fore.CYAN)
             self.page.goto("https://replit.com", wait_until="domcontentloaded")
-            time.sleep(5)
-            
-            page_content = self.page.content().lower()
-            if "personal workspace" in page_content or "what are we working on today" in page_content or "my repls" in page_content:
+            initial_state = self._wait_for_session_or_login()
+            if initial_state == "authenticated":
                 self.log("\n✅ Already logged in! Main interface loaded.", Fore.GREEN)
                 self.save_state()
                 return True
             
             self.log("[2] Logging in manually...", Fore.CYAN)
             self.page.goto("https://replit.com/login", wait_until="domcontentloaded")
-            time.sleep(3)
+            email_field = self.page.locator(
+                'input[type="text"], input[type="email"], input[name="email"]'
+            ).first
+            password_field = self.page.locator(
+                'input[type="password"], input[name="password"]'
+            ).first
+            email_field.wait_for(state="visible", timeout=15_000)
+            password_field.wait_for(state="visible", timeout=15_000)
+            email_field.fill(self.email or "")
+            password_field.fill(self.password)
             
-            self.page.fill('input[type="text"], input[type="email"], input[name="email"]', self.email)
-            self.page.fill('input[type="password"], input[name="password"]', self.password)
+            if not self.handle_captcha():
+                return False
             
-            self.handle_captcha()
-            
-            self.page.locator('button:has-text("Log In"), button[type="submit"]').first.click()
-            time.sleep(5)
-            self.log("\n✅ Login completed!", Fore.GREEN)
+            login_button = self._visible_control(
+                ('button:has-text("Log In")', 'button[type="submit"]'),
+                timeout=10_000,
+            )
+            if login_button is None:
+                self._save_failure("login_submit_not_found")
+                self.log("\n❌ Login control was not found.", Fore.RED)
+                return False
+            login_button.click()
+
+            if self._captcha_present():
+                if not self.handle_captcha():
+                    return False
+            if not self._wait_for_authenticated_state():
+                self._save_failure("login_success_not_observed")
+                self.log("\n❌ Login completed without an observed authenticated state.", Fore.RED)
+                return False
+
+            self.log("\n✅ Login completed with an observed authenticated state!", Fore.GREEN)
             self.save_state()
             return True
             

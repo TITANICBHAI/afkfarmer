@@ -15,10 +15,11 @@ This tracker is mandatory for every agent working on this repository.
 ## Current status
 
 - **Current phase:** Phase 2 — PC Replit registration and verification
-  implementation, with live mailbox evidence blocked
+  implementation, with offline readiness waits hardened and live evidence blocked
 - **Overall verdict:** Not ready for a real end-to-end run
-- **Next action:** Use the PC runtime wrapper for any future live run, then
-  rerun live browser checks only if the provider permits the workspace browser
+- **Next action:** Continue the remaining offline-safe Phase 2 checks; use the
+  PC runtime wrapper for any future live run only after explicit operator
+  confirmation and a permitted mailbox/browser session
 - **Last updated:** 2026-09-22
 - **Blockers:** The runtime wrapper can launch Playwright, but the live
   `temp-mail.org` page returns a Cloudflare block page. No bypass is permitted,
@@ -105,7 +106,14 @@ This tracker is mandatory for every agent working on this repository.
   - Browser implementation requires an explicit success text; controlled live
     mailbox evidence is blocked because the temporary mailbox could not be
     opened.
-- [ ] Replace readiness sleeps with Playwright locator/state waits.
+- [x] Replace readiness sleeps with Playwright locator/state waits.
+   - Evidence: `pc_automation.py` now waits for observable login/dashboard
+     states and visible login controls; `main.py` reload failure is explicit
+     instead of using fixed synchronization sleeps. `python -m py_compile
+     config.py temp_mail.py pc_flow.py android_automation.py pc_automation.py
+     main.py preflight.py`, `python -m unittest -v test_temp_mail.py
+     test_pc_flow.py` (9 tests), `python preflight.py`, and `git diff --check`
+     passed. No browser, mailbox, account, or Android flow was started.
 - [x] Add focused tests for message filtering and verification-link validation.
   - Evidence: `python -m unittest -v test_temp_mail.py` passes 4 tests covering
     sender/subject filtering and expected-host URL extraction/validation.
@@ -334,3 +342,21 @@ Add one entry after each meaningful session:
   bypass is permitted.
 - Next action: use `bash run_pc_automation.sh` only if a permitted mailbox
   browser session is available; do not start Android.
+
+### 2026-09-22 — Offline readiness waits
+- Completed: replaced the remaining PC session/login readiness sleeps with
+  explicit Playwright state and locator waits, and added pure authenticated
+  session classification coverage.
+- Evidence: restored the pinned Python dependencies after preflight detected
+  environment drift; `python -m py_compile config.py temp_mail.py pc_flow.py
+  android_automation.py pc_automation.py main.py preflight.py`, `python -m
+  unittest -v test_temp_mail.py test_pc_flow.py` (9 tests), `python
+  preflight.py`, and `git diff --check` passed. Requirements were normalized
+  back to the three pinned entries. No browser, mailbox, account, or Android
+  flow was started.
+- Still open: remaining Phase 2 registration and mailbox evidence, all Android,
+  checkpoint/recovery, GitHub-import, and end-to-end validation items.
+- Blockers: `temp-mail.org` still blocks the workspace browser with Cloudflare;
+  live account/device execution requires explicit operator confirmation.
+- Next action: continue offline-safe Phase 2 work, or perform a permitted PC
+  smoke test through `bash run_pc_automation.sh` only after confirmation.

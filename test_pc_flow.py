@@ -1,6 +1,11 @@
 import unittest
 
-from pc_flow import classify_signup_state, find_validation_errors, has_captcha_text
+from pc_flow import (
+    classify_session_state,
+    classify_signup_state,
+    find_validation_errors,
+    has_captcha_text,
+)
 
 
 class PcFlowClassificationTests(unittest.TestCase):
@@ -48,6 +53,29 @@ class PcFlowClassificationTests(unittest.TestCase):
                 "Please verify you are human",
             ),
             "captcha",
+        )
+
+    def test_session_state_requires_authenticated_content(self):
+        self.assertEqual(
+            classify_session_state(
+                "https://replit.com/",
+                "Welcome back. Sign in to continue.",
+            ),
+            "unknown",
+        )
+        self.assertEqual(
+            classify_session_state(
+                "https://replit.com/login",
+                "Log in to Replit",
+            ),
+            "login_required",
+        )
+        self.assertEqual(
+            classify_session_state(
+                "https://replit.com/",
+                "Personal workspace My Repls",
+            ),
+            "authenticated",
         )
 
 

@@ -135,12 +135,11 @@ class ReplitAutomationOrchestrator:
         self.log("=" * 60, Fore.MAGENTA)
         self._ensure_browser()
         self.log("\n⏳ Waiting for session sync, then refreshing the browser...", Fore.CYAN)
-        time.sleep(10)
         try:
             self.pc.page.reload(wait_until="domcontentloaded")
-            time.sleep(4)
         except Exception:
-            pass
+            self.log("❌ Browser reload failed before PC login.", Fore.RED)
+            return False
         return bool(self.pc.login_after_mobile())
 
     def stage_github(self):
