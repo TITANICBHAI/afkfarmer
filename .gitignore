@@ -47,3 +47,18 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Python runtime
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local automation state and failure evidence
+/state.json
+/auth_state.json
+/android_actions.log
+/ui.xml
+/screenshots/
+/debug.png
+/android_error.png
+/error.png

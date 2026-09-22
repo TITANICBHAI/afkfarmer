@@ -31,8 +31,9 @@ names: `config.py`, `android_automation.py`, `pc_automation.py`, and `main.py`.
 The code behavior still needs the state-driven refactor described in the
 implementation documents.
 
-The project is documentation-first at this point. The automation code has not
-been refactored or executed as part of this planning pass.
+The repository setup is complete, but the automation code has not been
+refactored or executed against a real browser or Android device. The pinned
+dependencies are now available at the root as `requirements.txt`.
 
 Every new agent must read `PROGRESS_TRACKER.md` before editing and tick items
 only after completing and verifying them.
@@ -60,6 +61,15 @@ adb devices
 
 Do not run a real end-to-end flow until the operator confirms the connected
 device, the browser session, and the manual-intervention points.
+
+For a non-destructive local readiness check, run:
+
+```bash
+python preflight.py
+```
+
+This checks source syntax, configuration keys, Python dependencies, and `adb`.
+It does not open a browser, contact the mailbox, or launch the Android app.
 
 ## Runtime artifacts
 

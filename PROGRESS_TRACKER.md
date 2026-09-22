@@ -14,13 +14,13 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Current status
 
-- **Current phase:** Planning complete; implementation hardening not started
+- **Current phase:** Phase 1 — PC temporary-mail flow
 - **Overall verdict:** Not ready for a real end-to-end run
-- **Next action:** Move `requirements.txt` to the root, then begin the
-  state-driven PC adapter
+- **Next action:** Define the temporary-mail provider interface and implement
+  the requested `temp-mail.org` browser flow
 - **Last updated:** 2026-09-22
-- **Blockers:** The current code still uses the old 1secmail API path and
-  optimistic Android coordinate fallbacks instead of fully verified states.
+- **Blockers:** The code still uses the old 1secmail API path and optimistic
+  Android coordinate fallbacks. No real browser or device run has been done.
 
 ## Phase 0 — Baseline and repository setup
 
@@ -38,12 +38,19 @@ This tracker is mandatory for every agent working on this repository.
 - [x] Confirm the active Python files compile.
   - Evidence: `python -m py_compile config.py android_automation.py
     pc_automation.py main.py`.
-- [ ] Move the supplied dependency list to the project root as
+- [x] Move the supplied dependency list to the project root as
   `requirements.txt`.
-- [ ] Confirm required Python packages and external tools are available.
-- [ ] Add runtime artifacts to ignore/protection rules.
+  - Evidence: root `requirements.txt` matches the supplied three pinned
+    dependencies.
+- [x] Confirm required Python packages and external tools are available.
+  - Evidence: `python preflight.py` passes source syntax, configuration,
+    `playwright`, `requests`, `colorama`, and `adb` checks. `adb version`
+    reports Android Debug Bridge 35.0.1.
+- [x] Add runtime artifacts to ignore/protection rules.
   - Targets: `state.json`, `auth_state.json`, logs, screenshots, and `ui.xml`.
-- [ ] Add a non-destructive import/configuration smoke check.
+- [x] Add a non-destructive import/configuration smoke check.
+  - Evidence: `preflight.py` passes syntax/configuration checks and exits
+    without opening a browser or starting Android actions.
 
 ## Phase 1 — PC temporary-mail flow
 
@@ -146,3 +153,25 @@ Add one entry after each meaningful session:
 - Blockers:
 - Next action:
 ```
+
+### 2026-09-22 — Repository preparation
+- Completed: moved `requirements.txt` to the root, added runtime ignore rules,
+  and added `preflight.py`.
+- Evidence: `python -m py_compile config.py android_automation.py
+  pc_automation.py main.py preflight.py` passed; `python preflight.py`
+  completed without launching browser or Android automation.
+- Still open: dependency/tool availability and all implementation phases.
+- Blockers: `playwright`, `requests`, `colorama`, and `adb` are missing.
+- Next action: install/configure the local prerequisites, then implement the
+  state-driven PC adapter.
+
+### 2026-09-22 — Local prerequisites
+- Completed: installed the managed Python toolchain, pinned Python
+  dependencies, and `android-tools`.
+- Evidence: `python preflight.py` passed; direct imports of `playwright`,
+  `requests`, and `colorama` passed; `adb version` passed.
+- Still open: all browser-flow, Android-flow, checkpoint, and validation items.
+- Blockers: no real browser or device run has been authorized or performed;
+  the current code still needs the state-driven refactor.
+- Next action: define the temporary-mail provider interface and implement the
+  requested `temp-mail.org` browser flow.
