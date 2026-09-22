@@ -35,7 +35,7 @@ The active Python files are present at the project root with canonical names:
 The state-driven offline implementation is verified, including atomic
 checkpoints, PC registration classification, Android UI-state transitions,
 session synchronization after Android completion, and safe GitHub-import
-failure handling. The combined offline test suite passes 35 tests.
+failure handling. The combined offline test suite passes 36 tests.
 
 Live mailbox, Replit registration, Android-device, PC-resume, GitHub-import,
 and complete end-to-end evidence remain open. The workspace browser previously
