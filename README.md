@@ -138,7 +138,7 @@ the browser must have been started with remote debugging enabled. For example,
 on Windows:
 
 ```cmd
-start "" "C:\Program Files\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
+start "" "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
 set "PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222"
 ```
 
