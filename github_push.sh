@@ -52,6 +52,8 @@ Environment:
   GITHUB_REMOTE             Git remote (default: origin).
   GITHUB_BRANCH             Target branch (default: current branch).
   GITHUB_COMMIT_MESSAGE     Sync commit message.
+  GITHUB_COMMIT_NAME        Optional commit author name.
+  GITHUB_COMMIT_EMAIL       Optional commit author email.
   GITHUB_PERSONAL_ACCESS_TOKEN, GITHUB_TOKEN, or GH_TOKEN
                             Token used for HTTPS sync and repository deletion.
   gh auth token              Optional fallback for repository deletion.
@@ -165,6 +167,27 @@ github_token() {
   return 1
 }
 
+commit_with_identity() {
+  local target="$1"
+  local configured_name configured_email name email
+
+  configured_name="$(git -C "$ROOT" config --get user.name 2>/dev/null || true)"
+  configured_email="$(git -C "$ROOT" config --get user.email 2>/dev/null || true)"
+  name="${configured_name:-${GITHUB_COMMIT_NAME:-${target%%/*}}}"
+  email="${configured_email:-${GITHUB_COMMIT_EMAIL:-${target%%/*}@users.noreply.github.com}}"
+
+  [[ -n "$name" ]] || die "Could not determine a Git commit author name."
+  [[ -n "$email" ]] || die "Could not determine a Git commit author email."
+
+  log "Creating commit as $name <$email>..."
+  # Use command-local config so the workflow does not depend on global Git
+  # identity and does not rewrite the operator's Git configuration.
+  git -C "$ROOT" \
+    -c "user.name=$name" \
+    -c "user.email=$email" \
+    commit -m "$COMMIT_MESSAGE"
+}
+
 git_remote_command() {
   local url token
   url="$(remote_url)"
@@ -214,8 +237,7 @@ sync_workspace() {
   if git -C "$ROOT" diff --cached --quiet; then
     log "No local file changes need a commit."
   else
-    log "Creating commit..."
-    git -C "$ROOT" commit -m "$COMMIT_MESSAGE"
+    commit_with_identity "$target"
   fi
 
   log "Refreshing the remote branch lease..."

@@ -1,6 +1,8 @@
 import json
 import os
+import tempfile
 import time
+from datetime import datetime, timezone
 
 from colorama import Fore, Style, init
 
@@ -18,15 +20,24 @@ init(autoreset=True)
 
 STATE_FILE = "state.json"
 STAGES = ["EMAIL", "SIGNUP", "VERIFY", "ANDROID", "PC_LOGIN", "GITHUB", "DONE"]
+PASSWORD_REF = "config.REPLIT_PASSWORD"
 
-FRESH_STATE = {
-    "stage": "EMAIL",
-    "temp_email": None,
-    "username": None,
-    "password": REPLIT_PASSWORD,
-    "verification_link": None,
-    "github_repo": GITHUB_REPO_URL,
-}
+
+def fresh_state():
+    """Return a new redacted state record for one run."""
+    return {
+        "stage": "EMAIL",
+        "in_progress": None,
+        "temp_email": None,
+        "username": None,
+        "password_ref": PASSWORD_REF,
+        "verification_link": None,
+        "github_repo": GITHUB_REPO_URL,
+        "decisions": [],
+    }
+
+
+FRESH_STATE = fresh_state()
 
 
 class ReplitAutomationOrchestrator:
@@ -46,19 +57,78 @@ class ReplitAutomationOrchestrator:
                 with open(STATE_FILE, "r") as f:
                     loaded = json.load(f)
                 if isinstance(loaded, dict) and loaded.get("stage") in STAGES:
-                    return loaded
+                    state = fresh_state()
+                    state.update(loaded)
+                    # Migrate old checkpoints without carrying the password
+                    # into the persisted state or browser-resume metadata.
+                    state.pop("password", None)
+                    state["password_ref"] = PASSWORD_REF
+                    if not isinstance(state.get("decisions"), list):
+                        state["decisions"] = []
+                    return state
             except Exception:
                 pass
-        return dict(FRESH_STATE)
+        return fresh_state()
 
-    def _save_state(self, stage):
+    @staticmethod
+    def _timestamp():
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def _state_payload(self):
+        payload = dict(self.state)
+        payload.pop("password", None)
+        payload["password_ref"] = PASSWORD_REF
+        return payload
+
+    def _write_state_atomically(self):
+        state_path = os.path.abspath(STATE_FILE)
+        state_dir = os.path.dirname(state_path) or "."
+        fd, temp_path = tempfile.mkstemp(
+            prefix=".state.",
+            suffix=".tmp",
+            dir=state_dir,
+            text=True,
+        )
+        try:
+            os.chmod(temp_path, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(self._state_payload(), f, indent=2)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, state_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def _save_state(self, stage, *, in_progress=None, outcome=None):
         self.state["stage"] = stage
-        with open(STATE_FILE, "w") as f:
-            json.dump(self.state, f, indent=2)
-        self.log(f"💾 Checkpoint: next stage = {stage}", Fore.GREEN)
+        self.state["in_progress"] = in_progress
+        if outcome:
+            self.state.setdefault("decisions", []).append(
+                {
+                    "stage": outcome["stage"],
+                    "outcome": outcome["outcome"],
+                    "at": outcome.get("at", self._timestamp()),
+                }
+            )
+        self._write_state_atomically()
+        status = " in progress" if in_progress else ""
+        self.log(f"Checkpoint: next stage = {stage}{status}", Fore.GREEN)
+
+    def _next_stage(self, stage):
+        index = STAGES.index(stage)
+        return STAGES[index + 1]
+
+    def _record_outcome(self, stage, outcome):
+        self._save_state(
+            stage,
+            in_progress=self.state.get("in_progress"),
+            outcome={"stage": stage, "outcome": outcome},
+        )
 
     def reset_state(self):
-        self.state = dict(FRESH_STATE)
+        self.state = fresh_state()
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
 
@@ -68,7 +138,7 @@ class ReplitAutomationOrchestrator:
         if self.pc is None:
             self.pc = PCAutomation(
                 self.state.get("temp_email"),
-                self.state["password"],
+                REPLIT_PASSWORD,
                 temp_mail_provider=TEMP_MAIL_PROVIDER,
                 temp_mail_url=TEMP_MAIL_URL,
             )
@@ -118,7 +188,7 @@ class ReplitAutomationOrchestrator:
         return bool(
             self.android.complete_onboarding(
                 self.state["temp_email"],
-                self.state["password"],
+                REPLIT_PASSWORD,
                 self.state["username"],
             )
         )
@@ -154,7 +224,14 @@ class ReplitAutomationOrchestrator:
 
     def run_stage(self, name, fn):
         while True:
-            self._save_state(name)  # mark stage as in-progress (crash-safe)
+            self._save_state(
+                name,
+                in_progress={
+                    "stage": name,
+                    "status": "running",
+                    "started_at": self._timestamp(),
+                },
+            )
             try:
                 ok = bool(fn())
             except Exception as e:
@@ -162,8 +239,17 @@ class ReplitAutomationOrchestrator:
                 ok = False
 
             if ok:
+                self._save_state(self._next_stage(name))
                 return True
 
+            self._save_state(
+                name,
+                in_progress={
+                    "stage": name,
+                    "status": "failed",
+                    "observed_at": self._timestamp(),
+                },
+            )
             self.log(f"\n⚠️ Stage [{name}] did not complete.", Fore.YELLOW)
             choice = input(
                 "Choose: [r]etry / [m]anual takeover then continue / "
@@ -171,13 +257,19 @@ class ReplitAutomationOrchestrator:
             ).strip().lower()
 
             if choice == "r":
+                self._record_outcome(name, "retry")
                 continue
             if choice == "m":
                 input("🖐️ Finish this step by hand (browser/phone). Press ENTER when done...")
+                self._record_outcome(name, "manual_takeover")
+                self._save_state(self._next_stage(name))
                 return True
             if choice == "s":
                 self.log(f"⏭️ Skipping stage {name}.", Fore.YELLOW)
+                self._record_outcome(name, "skip")
+                self._save_state(self._next_stage(name))
                 return True
+            self._record_outcome(name, "quit")
             return False
 
     # ---------------- main runner ----------------

@@ -14,11 +14,12 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Current status
 
-- **Current phase:** Phase 3 — Android login and onboarding offline
-  implementation, with live device evidence pending
+- **Current phase:** Phase 4 — Checkpoint and recovery hardening
+  (checkpoint core complete; interruption matrix and live evidence remain)
 - **Overall verdict:** Not ready for a real end-to-end run
-- **Next action:** Run a controlled Android smoke test from the home screen only
-  after explicit operator confirmation and intended-device readiness
+- **Next action:** Add recovery tests for interruption before and after every
+  stage; separately run a deliberate GitHub sync only when branch replacement
+  is intended
 - **Last updated:** 2026-09-22
 - **Blockers:** No Android device run has been authorized or performed. The PC
   runtime wrapper can launch Playwright, but the live `temp-mail.org` page
@@ -155,11 +156,23 @@ This tracker is mandatory for every agent working on this repository.
 ## Phase 4 — Checkpoint and recovery
 
 - [ ] Define checkpoint semantics as “next stage to run”.
-- [ ] Add an explicit in-progress marker for crash diagnosis.
-- [ ] Write state atomically through a temporary file and replacement.
-- [ ] Preserve the mailbox, username, verification link, and stage safely.
-- [ ] Redact secrets from logs and normal final output.
-- [ ] Make retry, manual takeover, skip, and quit outcomes distinct.
+  - [x] Evidence: successful stage checkpoints advance to the next stage and
+    clear the in-progress marker in `test_main.py`.
+- [x] Add an explicit in-progress marker for crash diagnosis.
+  - Evidence: failed/running checkpoints record stage, status, and timestamp;
+    covered by `test_main.py`.
+- [x] Write state atomically through a temporary file and replacement.
+  - Evidence: same-directory temporary write, flush/fsync, `os.replace`, and
+    temporary-file cleanup are covered by `test_main.py`.
+- [x] Preserve the mailbox, username, verification link, and stage safely.
+  - Evidence: `test_main.py` verifies those fields survive a redacted atomic
+    checkpoint.
+- [x] Redact secrets from logs and normal final output.
+  - Evidence: persisted checkpoints remove legacy `password` values and keep
+    only `password_ref`; static scan and offline tests passed.
+- [x] Make retry, manual takeover, skip, and quit outcomes distinct.
+  - Evidence: `test_main.py` records and distinguishes retry, manual takeover,
+    skip, and quit decisions.
 - [ ] Prevent later-stage resume from creating another account.
 - [ ] Add recovery tests for interruption before and after every stage.
 
@@ -388,3 +401,19 @@ Add one entry after each meaningful session:
 - Next action: after explicit confirmation, run only the Android smoke test from
   the home screen, verify the intended device, and stop on any unexpected UI
   state with the saved evidence.
+
+### 2026-09-22 — Checkpoint and GitHub sync hardening
+- Completed: began Phase 4 recovery work with redacted atomic checkpoints,
+  explicit in-progress state, next-stage advancement, and distinct recovery
+  decisions. Hardened `github_push.sh` so a workflow without Git identity can
+  create a commit using command-local identity fallback.
+- Evidence: Python compilation, `python preflight.py`, shell syntax/help,
+  workspace dry-run, and an isolated no-identity Git commit-path test passed.
+  The token secret exists in the shared environment and was never printed.
+- Still open: the full combined Python suite requires the supported GCC
+  library-path wrapper for Playwright imports; no real GitHub push was run.
+- Blockers: an actual sync would replace the target branch and remove
+  remote-only files, so it remains operator-authorized work. Android/browser
+  live runs remain unapproved or provider-blocked.
+- Next action: use the workflow for a deliberate GitHub sync when branch
+  replacement is intended; otherwise continue Phase 4 recovery tests.

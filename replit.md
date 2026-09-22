@@ -55,6 +55,10 @@ _Populate as you build — sharp edges, "always run X before Y" rules._
 - `bash github_push.sh --sync --yes` — commit local changes and mirror the
   workspace to the configured GitHub branch. Remote-only files on that branch
   are removed.
+- If the workflow has no Git identity configured, the script uses
+  `GITHUB_COMMIT_NAME`/`GITHUB_COMMIT_EMAIL` when supplied, otherwise a
+  repository-owner `users.noreply.github.com` identity for that commit only.
+  It does not modify global Git configuration.
 - `bash github_push.sh --delete-remote-repo --confirm-delete OWNER/REPO --yes`
   — permanently delete the entire GitHub repository. Use only when that
   destructive action is intentional.
