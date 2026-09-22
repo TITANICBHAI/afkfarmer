@@ -36,6 +36,8 @@ _Describe the high-level user-facing capabilities of this app once they exist._
 
 _Populate as you build — explicit user instructions worth remembering across sessions._
 
+- Treat the screenshot assets in `attached_assets/` as visual references for future automation-step descriptions, even when the user does not repeat that instruction.
+
 ## Gotchas
 
 _Populate as you build — sharp edges, "always run X before Y" rules._
