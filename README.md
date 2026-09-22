@@ -15,6 +15,10 @@ not a bulk-account tool, a rate-limit bypass, or a credential-harvesting tool.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — system design and Kotlin decision.
 - [`AUTOMATION_PROMPT.md`](AUTOMATION_PROMPT.md) — implementation handoff
   prompt for a future coding pass.
+- [`AGENT_START_PROMPT.md`](AGENT_START_PROMPT.md) — zero-context startup
+  prompt for any new agent.
+- [`PROGRESS_TRACKER.md`](PROGRESS_TRACKER.md) — mandatory checklist and
+  session handoff record.
 
 The visual references are stored in `attached_assets/`. The numbered Android
 screenshots are especially important for the email-login, invalid-credentials,
@@ -29,6 +33,9 @@ implementation documents.
 
 The project is documentation-first at this point. The automation code has not
 been refactored or executed as part of this planning pass.
+
+Every new agent must read `PROGRESS_TRACKER.md` before editing and tick items
+only after completing and verifying them.
 
 ## Intended runtime
 
