@@ -15,8 +15,21 @@ class FakeLocator:
     def first(self):
         return self
 
+    def count(self):
+        return 1 if self.visible else 0
+
+    def nth(self, _index):
+        return self
+
     def is_visible(self, timeout=0):
         return self.visible
+
+    def wait_for(self, state="visible", timeout=0):
+        if state == "visible" and not self.visible:
+            raise TimeoutError("locator is hidden")
+
+    def click(self):
+        return None
 
     def fill(self, value):
         self.value = value
@@ -25,6 +38,9 @@ class FakeLocator:
         self.pressed = key
         if key == "Enter":
             self.page.url = "https://replit.com/~/imported"
+
+    def inner_text(self):
+        return ""
 
 
 class FakePage:

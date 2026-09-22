@@ -14,12 +14,12 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Current status
 
-- **Current phase:** Phase 4 — Checkpoint and recovery hardening
-  (checkpoint core complete; interruption matrix and live evidence remain)
+- **Current phase:** Phase 5 — PC resume and GitHub import
+  (offline behavior hardened; live evidence remains)
 - **Overall verdict:** Not ready for a real end-to-end run
-- **Next action:** Add recovery tests for interruption before and after every
-  stage; separately run a deliberate GitHub sync only when branch replacement
-  is intended
+- **Next action:** Perform live PC/Android smoke tests only with explicit
+  operator authorization; run a deliberate GitHub sync only when branch
+  replacement is intended
 - **Last updated:** 2026-09-22
 - **Blockers:** No Android device run has been authorized or performed. The PC
   runtime wrapper can launch Playwright, but the live `temp-mail.org` page
@@ -160,7 +160,7 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Phase 4 — Checkpoint and recovery
 
-- [ ] Define checkpoint semantics as “next stage to run”.
+- [x] Define checkpoint semantics as “next stage to run”.
   - [x] Evidence: successful stage checkpoints advance to the next stage and
     clear the in-progress marker in `test_main.py`.
 - [x] Add an explicit in-progress marker for crash diagnosis.
@@ -178,8 +178,12 @@ This tracker is mandatory for every agent working on this repository.
 - [x] Make retry, manual takeover, skip, and quit outcomes distinct.
   - Evidence: `test_main.py` records and distinguishes retry, manual takeover,
     skip, and quit decisions.
-- [ ] Prevent later-stage resume from creating another account.
-- [ ] Add recovery tests for interruption before and after every stage.
+- [x] Prevent later-stage resume from creating another account.
+  - Evidence: `test_main.py` resumes from `ANDROID` without calling the
+    `EMAIL` handler.
+- [x] Add recovery tests for interruption before and after every stage.
+  - Evidence: `test_main.py` covers interruption while each stage is running
+    and successful advancement after each stage; the combined suite passed.
 
 ## Phase 5 — PC resume and GitHub import
 
@@ -188,14 +192,21 @@ This tracker is mandatory for every agent working on this repository.
 - [ ] Log in only when required and verify the result.
 - [ ] Require or safely collect the operator's GitHub repository URL.
 - [ ] Submit the supported import flow.
-- [ ] Verify import progress with a real UI or URL state.
-- [ ] Treat a missing import control as failure/manual takeover, not success.
+- [x] Verify import progress with a real UI or URL state.
+  - Offline evidence: mocked Playwright import tests require observed progress
+    and a project URL; live Replit verification remains pending.
+- [x] Treat a missing import control as failure/manual takeover, not success.
+  - Evidence: `PCAutomation.import_github_repo()` returns failure and saves
+    tagged evidence when the control is absent; mocked tests pass.
 
 ## Phase 6 — Validation
 
-- [ ] Run Python syntax and import checks.
-- [ ] Run unit checks for state transitions, link extraction, retries, and
+- [x] Run Python syntax and import checks.
+  - Evidence: `py_compile` and `python preflight.py` passed.
+- [x] Run unit checks for state transitions, link extraction, retries, and
   checkpoint recovery.
+  - Evidence: the combined offline suite passed 33 tests, including mocked PC
+    registration/import and GitHub sync/auth tests.
 - [ ] Run a PC smoke test with manual CAPTCHA handling.
 - [ ] Run an Android smoke test from the home screen on the operator's device.
 - [ ] Run one complete end-to-end test only after the smoke tests pass.
@@ -422,3 +433,26 @@ Add one entry after each meaningful session:
   live runs remain unapproved or provider-blocked.
 - Next action: use the workflow for a deliberate GitHub sync when branch
   replacement is intended; otherwise continue Phase 4 recovery tests.
+
+### 2026-09-22 — Recovery matrix and offline PC/GitHub tests
+- Completed: documented the deferred OCR/computer-vision/pixel fallback,
+  completed interruption and resume coverage for every stage, hardened GitHub
+  HTTPS authentication, added read-only auth checking, and added mocked PC
+  registration/import plus GitHub workflow tests.
+- Evidence: combined offline suite passed 33 tests; `python preflight.py`,
+  compilation, `bash -n github_push.sh`, `git diff --check`, and
+  `bash github_push.sh --check-auth` passed. The auth check confirmed the
+  configured token can read `TITANICBHAI/afkfarmer` and the repository reports
+  push permission. No remote files were staged, committed, or pushed by the
+  read-only check.
+- Still open: live mailbox/registration evidence, live Android verification,
+  PC resume/import smoke testing, and the deliberate branch-replacing GitHub
+  push.
+- Blockers: `temp-mail.org` blocks the workspace browser with Cloudflare;
+  Android execution remains operator-authorized only. The previous workflow
+  attempt created a local commit but failed before push because the old
+  Bearer Git transport fell back to interactive askpass; the script now uses
+  non-interactive Basic auth.
+- Next action: review the updated script, then explicitly authorize a real
+  GitHub sync if replacing the remote `main` branch is intended; otherwise
+  continue with offline work.

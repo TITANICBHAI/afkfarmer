@@ -1,2 +1,3 @@
 - [Python dependency readiness](python-dependency-readiness.md) — run preflight after environment changes; the tracker may outlive installed package state.
 - [PC browser runtime](pc-browser-runtime.md) — Playwright needs the Nix GCC library path; temp-mail.org may Cloudflare-block workspace Chromium.
+- [GitHub HTTPS authentication](github-https-auth.md) — GitHub Git pushes need non-interactive Basic auth; a rejected header can fall through to Replit askpass.
