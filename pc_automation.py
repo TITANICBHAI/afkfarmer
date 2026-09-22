@@ -1,16 +1,30 @@
-import time
 import os
+import time
+from typing import Optional
+
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from colorama import Fore, Style
 
+from temp_mail import TempMailOrgProvider
+
+
 class PCAutomation:
-    def __init__(self, email, password):
+    def __init__(
+        self,
+        email: Optional[str],
+        password: str,
+        temp_mail_provider: str = "temp-mail.org",
+        temp_mail_url: str = TempMailOrgProvider.URL,
+    ):
         self.email = email
         self.password = password
+        self.temp_mail_provider = temp_mail_provider
+        self.temp_mail_url = temp_mail_url
         self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
+        self.temp_mail = None
         self.state_file = "auth_state.json"
 
     def log(self, message, color=Fore.WHITE):
@@ -27,6 +41,23 @@ class PCAutomation:
         self.context = self.browser.new_context(storage_state=storage_state)
         self.page = self.context.new_page()
         self.page.set_default_timeout(30000)
+
+    def obtain_temp_email(self) -> str:
+        """Open temp-mail.org and return an address whose Copy action passed."""
+
+        if self.temp_mail_provider != "temp-mail.org":
+            raise ValueError(
+                f"Unsupported temporary-mail provider: {self.temp_mail_provider}"
+            )
+        if self.context is None:
+            self.setup_browser()
+        if self.temp_mail is None:
+            self.temp_mail = TempMailOrgProvider(
+                self.context,
+                url=self.temp_mail_url,
+            )
+        self.email = self.temp_mail.obtain_address()
+        return self.email
 
     def save_state(self):
         """Save cookies and session state for future runs"""

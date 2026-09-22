@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SOURCE_FILES = (
     "config.py",
+    "temp_mail.py",
     "android_automation.py",
     "pc_automation.py",
     "main.py",

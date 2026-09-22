@@ -16,11 +16,12 @@ This tracker is mandatory for every agent working on this repository.
 
 - **Current phase:** Phase 1 — PC temporary-mail flow
 - **Overall verdict:** Not ready for a real end-to-end run
-- **Next action:** Define the temporary-mail provider interface and implement
-  the requested `temp-mail.org` browser flow
+- **Next action:** Run an authorized live mailbox smoke test, then implement
+  browser-based verification-message handling
 - **Last updated:** 2026-09-22
-- **Blockers:** The code still uses the old 1secmail API path and optimistic
-  Android coordinate fallbacks. No real browser or device run has been done.
+- **Blockers:** No live browser run has been authorized or performed. The
+  verification stage still refuses to use the legacy 1secmail API until its
+  browser-mail flow is implemented.
 
 ## Phase 0 — Baseline and repository setup
 
@@ -54,13 +55,27 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Phase 1 — PC temporary-mail flow
 
-- [ ] Define a temporary-mail provider interface.
-- [ ] Implement the requested `temp-mail.org` browser flow.
+- [x] Define a temporary-mail provider interface.
+  - Evidence: `temp_mail.py` defines `TempMailProvider` and
+    `TempMailOrgProvider`; syntax and preflight checks pass.
+- [x] Implement the requested `temp-mail.org` browser flow.
+  - Evidence: `TempMailOrgProvider.obtain_address()` opens the configured
+    page, reads the address, clicks Copy, and requires proof of the copy.
+    Live browser verification remains pending.
 - [ ] Wait for the real mailbox address instead of accepting a loading state.
+  - Implementation is present; live DOM verification is still pending.
 - [ ] Click Copy and verify that the copied value matches the visible address.
-- [ ] Keep the mailbox page and Replit page in the same Playwright context.
-- [ ] Make the provider choice explicit; do not silently substitute 1secmail.
-- [ ] Add failure evidence and manual takeover for provider/UI changes.
+  - Implementation is present; live clipboard/feedback verification is still
+    pending.
+- [x] Keep the mailbox page and Replit page in the same Playwright context.
+  - Evidence: `PCAutomation` creates `TempMailOrgProvider` from its shared
+    browser context.
+- [x] Make the provider choice explicit; do not silently substitute 1secmail.
+  - Evidence: `config.py` selects `temp-mail.org`; unsupported providers raise
+    instead of falling back.
+- [x] Add failure evidence and manual takeover for provider/UI changes.
+  - Evidence: provider failures save a tagged screenshot; the existing stage
+    recovery menu handles retry/manual takeover. Live behavior remains pending.
 
 ## Phase 2 — PC Replit registration and verification
 
@@ -175,3 +190,25 @@ Add one entry after each meaningful session:
   the current code still needs the state-driven refactor.
 - Next action: define the temporary-mail provider interface and implement the
   requested `temp-mail.org` browser flow.
+
+### 2026-09-22 — Temporary-mail provider
+- Completed: added the browser-backed `temp_mail.py` provider, wired it into
+  `PCAutomation` and `main.py`, made `temp-mail.org` explicit, and disabled the
+  legacy API verification path for this provider.
+- Evidence: `python -m py_compile ...` passed, `python -m unittest -v
+  test_temp_mail.py` passed 2 tests, and `python preflight.py` passed.
+- Still open: live verification of the address-loading and Copy selectors, then
+  browser-based verification-message handling.
+- Blockers: live external browser testing has not been authorized or performed.
+- Next action: run an authorized mailbox smoke test, then implement the
+  verification-message portion of the PC flow.
+
+### 2026-09-22 — Provider hardening
+- Completed: made address readiness inspect input values as well as visible
+  body text, and added `temp_mail.py` to the preflight source set.
+- Evidence: syntax compilation, 2 provider parsing tests, `python preflight.py`,
+  and `git diff --check` all passed.
+- Still open: live selector and clipboard verification, then browser-based
+  verification-message handling.
+- Blockers: no live external browser run has been authorized or performed.
+- Next action: run the authorized mailbox smoke test when the operator is ready.

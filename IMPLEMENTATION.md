@@ -14,6 +14,7 @@ The active source files now use the canonical names expected by their imports:
 
 ```text
 config.py
+temp_mail.py
 android_automation.py
 pc_automation.py
 main.py
@@ -44,15 +45,22 @@ The password should be supplied through a local configuration mechanism rather
 than printed or embedded in logs. Existing values must be reviewed before the
 first real run.
 
+### `temp_mail.py`
+
+Owns the browser-backed provider interface and the `temp-mail.org` adapter.
+It waits for a real address, extracts it from likely address controls or page
+text, finds a visible Copy control, and requires either matching clipboard text
+or visible copy confirmation. Failures save a tagged screenshot.
+
+The module does not contact the provider at import time.
+
 ### `pc_automation.py`
 
 `PCAutomation` owns one Playwright instance, browser context, and page set.
 Required operations:
 
 - `setup_browser()`;
-- `open_temp_mail()`;
-- `read_temp_address()`;
-- `copy_temp_address()`;
+- `obtain_temp_email()`;
 - `open_replit_signup()`;
 - `create_account(email, password)`;
 - `handle_captcha()` with a manual pause;
@@ -110,9 +118,10 @@ The supplied flow is visual and begins at `temp-mail.org`. The implementation
 must wait for the visible address, capture it, and confirm that the Copy action
 produced the same value. Do not continue from a loading placeholder.
 
-The current orchestrator instead calls the 1secmail API in `main.py`. That is a
-contract mismatch, not an implementation detail. Keep provider-specific
-behavior behind an adapter and make the selected provider explicit.
+The current `stage_email` now uses the browser-backed provider in `temp_mail.py`
+and selects `temp-mail.org` explicitly. The later verification stage still
+needs its own browser-mail implementation; until then, the legacy 1secmail API
+path is refused instead of being used silently.
 
 ### Replit registration
 

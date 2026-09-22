@@ -15,7 +15,8 @@ LOGIN_RETRY_DELAY = 3          # Delay before retrying login if it fails
 ELEMENT_WAIT_TIMEOUT = 10      # Max seconds to wait for a UI element on the phone
 
 # --- Temp Mail Settings ---
-TEMP_MAIL_PROVIDER = "1secmail"  # Fallback provider ("mailtm") can be added later
+TEMP_MAIL_PROVIDER = "temp-mail.org"
+TEMP_MAIL_URL = "https://temp-mail.org/"
 
 # --- GitHub Import ---
 GITHUB_REPO_URL = ""  # Optional: pre-fill a repo URL to skip the manual prompt

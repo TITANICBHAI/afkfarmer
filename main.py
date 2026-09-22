@@ -13,6 +13,8 @@ from config import (
     EMAIL_CHECK_TIMEOUT,
     GITHUB_REPO_URL,
     REPLIT_PASSWORD,
+    TEMP_MAIL_PROVIDER,
+    TEMP_MAIL_URL,
 )
 from pc_automation import PCAutomation
 
@@ -91,7 +93,12 @@ class ReplitAutomationOrchestrator:
 
     def _ensure_browser(self):
         if self.pc is None:
-            self.pc = PCAutomation(self.state["temp_email"], self.state["password"])
+            self.pc = PCAutomation(
+                self.state.get("temp_email"),
+                self.state["password"],
+                temp_mail_provider=TEMP_MAIL_PROVIDER,
+                temp_mail_url=TEMP_MAIL_URL,
+            )
             self.pc.setup_browser()
 
     # ---------------- stages (return True/False) ----------------
@@ -101,17 +108,13 @@ class ReplitAutomationOrchestrator:
         self.log("📧 STAGE 1/6: Getting Temporary Email", Fore.MAGENTA)
         self.log("=" * 60, Fore.MAGENTA)
         try:
-            response = requests.get(
-                "https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1",
-                timeout=15,
-            )
-            self.state["temp_email"] = response.json()[0]
+            self._ensure_browser()
+            self.state["temp_email"] = self.pc.obtain_temp_email()
             self.state["username"] = self.state["temp_email"].split("@")[0]
         except Exception as e:
             self.log(f"❌ Failed to get temp email: {e}", Fore.RED)
             return False
         self.log(f"✅ Email: {self.state['temp_email']}", Fore.GREEN)
-        self.log(f"🔑 Password: {self.state['password']}", Fore.GREEN)
         self.log(f"👤 Username: {self.state['username']}", Fore.GREEN)
         return True
 
@@ -126,6 +129,13 @@ class ReplitAutomationOrchestrator:
         self.log("\n" + "=" * 60, Fore.MAGENTA)
         self.log("📧 STAGE 3/6: Email Verification", Fore.MAGENTA)
         self.log("=" * 60, Fore.MAGENTA)
+        if TEMP_MAIL_PROVIDER != "1secmail":
+            self.log(
+                "❌ Browser mailbox verification is not implemented yet. "
+                "The old 1secmail API path is disabled for this provider.",
+                Fore.RED,
+            )
+            return False
         self._ensure_browser()
 
         if not self.state.get("verification_link"):

@@ -31,6 +31,11 @@ names: `config.py`, `android_automation.py`, `pc_automation.py`, and `main.py`.
 The code behavior still needs the state-driven refactor described in the
 implementation documents.
 
+The first PC provider implementation is now in `temp_mail.py`. It is wired to
+`PCAutomation` and requires proof that the visible mailbox address was copied.
+Live selector verification is still pending because no external browser run has
+been started.
+
 The repository setup is complete, but the automation code has not been
 refactored or executed against a real browser or Android device. The pinned
 dependencies are now available at the root as `requirements.txt`.
@@ -70,6 +75,12 @@ python preflight.py
 
 This checks source syntax, configuration keys, Python dependencies, and `adb`.
 It does not open a browser, contact the mailbox, or launch the Android app.
+
+The provider parsing checks can be run locally with:
+
+```bash
+python -m unittest -v test_temp_mail.py
+```
 
 ## Runtime artifacts
 
