@@ -5,9 +5,10 @@ from pc_automation import PCAutomation
 
 
 class FakeLocator:
-    def __init__(self, page, visible=True):
+    def __init__(self, page, visible=True, text=""):
         self.page = page
         self.visible = visible
+        self.text = text
         self.value = None
         self.pressed = None
 
@@ -42,7 +43,7 @@ class FakeLocator:
             self.page.url = "https://replit.com/~/imported"
 
     def inner_text(self):
-        return ""
+        return self.text
 
 
 class FakePage:
@@ -96,15 +97,25 @@ class SessionSyncPage:
 
 
 class SignupPage(FakePage):
-    def __init__(self, body_text="Check your inbox for the verification email"):
+    def __init__(
+        self,
+        body_text="Check your inbox for the verification email",
+        dialog_text="Create an account\nPassword is valid",
+    ):
         super().__init__(chat_visible=False)
         self.url = "https://replit.com/signup"
         self.body_text = body_text
+        self.dialog_text = dialog_text
         self.visibility_timeouts = []
         self.function_timeouts = []
         self.email_field = FakeLocator(self)
         self.password_field = FakeLocator(self)
         self.control = FakeLocator(self, visible=True)
+        self.error_marker = FakeLocator(
+            self,
+            visible=True,
+            text="Password is valid",
+        )
 
     def goto(self, url, wait_until=None):
         self.url = url
@@ -121,6 +132,14 @@ class SignupPage(FakePage):
             body = FakeLocator(self)
             body.inner_text = lambda: self.body_text
             return body
+        if selector in {"[role='dialog']", "dialog", "form"}:
+            return FakeLocator(self, visible=True, text=self.dialog_text)
+        if selector in {
+            "[role='alert']",
+            "[aria-invalid='true']",
+            "[data-testid*='error' i]",
+        }:
+            return self.error_marker
         if "input[type='email']" in selector or "input[name='email']" in selector:
             return self.email_field
         if "input[type='password']" in selector or "input[name='password']" in selector:
@@ -135,6 +154,22 @@ class PcAutomationMockTests(unittest.TestCase):
         automation = PCAutomation("mail@example.test", "password")
         automation.page = page
         return automation
+
+    def test_explicit_cdp_endpoint_skips_local_port_probe(self):
+        automation = PCAutomation("mail@example.test", "password")
+
+        with patch.dict(
+            "os.environ",
+            {"PLAYWRIGHT_CDP_URL": "http://127.0.0.1:9876"},
+            clear=False,
+        ):
+            with patch("pc_automation.urlopen") as urlopen:
+                self.assertEqual(
+                    automation._candidate_cdp_urls(),
+                    ["http://127.0.0.1:9876"],
+                )
+
+        urlopen.assert_not_called()
 
     def test_import_requires_visible_control_and_observed_project_url(self):
         page = FakePage(chat_visible=True)
@@ -189,13 +224,20 @@ class PcAutomationMockTests(unittest.TestCase):
         self.assertEqual(page.password_field.value, "password")
 
     def test_signup_mock_rejects_visible_validation_error(self):
-        page = SignupPage(body_text="Email is required")
+        page = SignupPage(dialog_text="Create an account\nEmail is required")
         automation = self.make_automation(page)
 
         with patch.object(automation, "_save_failure") as save_failure:
             self.assertFalse(automation.create_account())
 
         save_failure.assert_called_once_with("signup_validation_before_submit")
+
+    def test_signup_ignores_non_error_validation_marker_in_valid_modal(self):
+        page = SignupPage()
+        automation = self.make_automation(page)
+
+        self.assertTrue(automation.create_account())
+        self.assertEqual(page.error_marker.inner_text(), "Password is valid")
 
     def test_session_sync_reloads_until_authenticated_state_is_observed(self):
         page = SessionSyncPage(

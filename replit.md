@@ -46,12 +46,14 @@ _Populate as you build — sharp edges, "always run X before Y" rules._
 
 - Run the PC browser flow with `bash run_pc_automation.sh`; the wrapper adds
   the Nix C++ library path required by Playwright's Python runtime.
-- Set `PLAYWRIGHT_CDP_URL` to a browser started with remote debugging to reuse
-  existing Replit and temp-mail tabs. Without CDP, Playwright cannot attach to
-  a normal already-running browser process.
-- The workspace has Chromium rather than Microsoft Edge, so browser setup
-  explicitly falls back to Chromium. Temporary-mail provider Cloudflare
-  blocks are reported and are not bypassed.
+- Start an existing Chromium-family browser with remote debugging to reuse its
+  Replit and temp-mail tabs. `PLAYWRIGHT_CDP_URL` is supported explicitly, and
+  local CDP ports 9222-9225 are discovered automatically when it is omitted.
+  Without CDP, Playwright cannot attach to a normal already-running browser
+  process.
+- Browser setup detects configured or installed Edge, Chrome, Brave, and
+  Chromium executables before trying a managed Playwright browser. Temporary-
+  mail provider Cloudflare blocks are reported and are not bypassed.
 
 ## GitHub workspace sync
 

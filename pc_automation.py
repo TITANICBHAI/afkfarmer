@@ -1,7 +1,9 @@
 import os
+import shutil
 import time
 from typing import Optional
 from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from colorama import Fore, Style
@@ -30,7 +32,6 @@ class PCAutomation:
         "[role='alert']",
         "[aria-invalid='true']",
         "[data-testid*='error' i]",
-        "[class*='error' i]",
     )
 
     def __init__(
@@ -62,33 +63,17 @@ class PCAutomation:
 
         # Prefer attaching to a browser the operator already opened. A normal
         # browser process cannot be attached to after launch; it must have been
-        # started with a Chromium remote-debugging endpoint.
-        cdp_url = os.environ.get("PLAYWRIGHT_CDP_URL", "").strip()
-        if cdp_url:
+        # started with a Chromium remote-debugging endpoint. When the endpoint
+        # is not explicitly configured, probe common local CDP ports before
+        # starting a managed browser.
+        cdp_urls = self._candidate_cdp_urls()
+        for cdp_url in cdp_urls:
             try:
-                self.browser = self.playwright.chromium.connect_over_cdp(cdp_url)
-                contexts = self.browser.contexts
-                if not contexts:
-                    raise RuntimeError("The attached browser has no browser context.")
-                self.context = contexts[0]
-                self._attached_to_browser = True
-                self._owns_browser = False
-                self.page = self._find_page_for_host("replit.com")
-                if self.page is None:
-                    self.page = self._first_open_page()
-                if self.page is None:
-                    self.page = self.context.new_page()
-                self.page.set_default_timeout(30_000)
-                self.log(
-                    f"Attached to the existing browser at {cdp_url}; "
-                    f"reusing its open tabs.",
-                    Fore.GREEN,
-                )
-                return
+                if self._attach_to_cdp(cdp_url):
+                    return
             except Exception as exc:
                 self.log(
-                    f"Could not attach to PLAYWRIGHT_CDP_URL ({exc}); "
-                    "starting a managed browser instead.",
+                    f"Could not attach to browser at {cdp_url} ({exc}).",
                     Fore.YELLOW,
                 )
                 self.browser = None
@@ -98,42 +83,168 @@ class PCAutomation:
         # Load previous session state if it exists (skips login on future runs).
         # This is only used for a browser launched by this process.
         storage_state = self.state_file if os.path.exists(self.state_file) else None
-        requested_executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH", "").strip()
         browser_channel = os.environ.get("PLAYWRIGHT_BROWSER_CHANNEL", "").strip()
 
-        if requested_executable:
-            self.log(
-                f"Using configured browser executable: {requested_executable}",
-                Fore.CYAN,
-            )
-            self.browser = self.playwright.chromium.launch(
-                executable_path=requested_executable,
-                headless=False,
-            )
-        elif browser_channel:
-            self.log(f"Using configured Chromium browser channel: {browser_channel}.", Fore.CYAN)
-            self.browser = self.playwright.chromium.launch(
-                channel=browser_channel,
-                headless=False,
-            )
-        else:
-            chromium_path = "/repl/tools/bin/chromium"
-            if not os.path.exists(chromium_path):
-                raise RuntimeError(
-                    "No browser was configured and workspace Chromium was not found. "
-                    "Set PLAYWRIGHT_CDP_URL, PLAYWRIGHT_EXECUTABLE_PATH, or "
-                    "PLAYWRIGHT_BROWSER_CHANNEL."
+        launch_errors = []
+        if browser_channel:
+            try:
+                self.log(
+                    f"Using configured Chromium browser channel: {browser_channel}.",
+                    Fore.CYAN,
                 )
-            self.log("Using workspace Chromium.", Fore.CYAN)
-            self.browser = self.playwright.chromium.launch(
-                executable_path=chromium_path,
-                headless=False,
-                args=["--no-sandbox"],
-            )
+                self.browser = self.playwright.chromium.launch(
+                    channel=browser_channel,
+                    headless=False,
+                )
+            except Exception as exc:
+                launch_errors.append(f"channel {browser_channel}: {exc}")
+                self.log(
+                    f"Configured browser channel was unavailable ({exc}); "
+                    "trying detected executables.",
+                    Fore.YELLOW,
+                )
+
+        if self.browser is None:
+            for executable_path in self._browser_executable_candidates():
+                try:
+                    self.log(
+                        f"Using detected browser executable: {executable_path}",
+                        Fore.CYAN,
+                    )
+                    launch_args = ["--no-sandbox"] if os.name != "nt" else None
+                    self.browser = self.playwright.chromium.launch(
+                        executable_path=executable_path,
+                        headless=False,
+                        args=launch_args,
+                    )
+                    break
+                except Exception as exc:
+                    launch_errors.append(f"{executable_path}: {exc}")
+
+        if self.browser is None:
+            try:
+                self.log(
+                    "No configured or detected browser launched; "
+                    "trying Playwright's bundled Chromium.",
+                    Fore.CYAN,
+                )
+                self.browser = self.playwright.chromium.launch(
+                    headless=False,
+                    args=["--no-sandbox"] if os.name != "nt" else None,
+                )
+            except Exception as exc:
+                launch_errors.append(f"Playwright bundled Chromium: {exc}")
+                details = "; ".join(launch_errors)
+                raise RuntimeError(
+                    "No controllable or launchable Chromium-family browser was found. "
+                    "Start a browser with remote debugging or install/configure "
+                    "Chrome, Edge, Brave, or Chromium. "
+                    f"Attempts: {details}"
+                ) from exc
+
         self._owns_browser = True
         self.context = self.browser.new_context(storage_state=storage_state)
         self.page = self.context.new_page()
         self.page.set_default_timeout(30000)
+
+    def _candidate_cdp_urls(self) -> list[str]:
+        """Return explicit and discoverable local Chromium CDP endpoints."""
+
+        configured = os.environ.get("PLAYWRIGHT_CDP_URL", "").strip()
+        if configured:
+            return [configured]
+
+        configured_ports = os.environ.get("PLAYWRIGHT_CDP_PORTS", "").strip()
+        ports = []
+        for raw_port in configured_ports.split(","):
+            raw_port = raw_port.strip()
+            if raw_port.isdigit():
+                ports.append(int(raw_port))
+        for port in (9222, 9223, 9224, 9225):
+            if port not in ports:
+                ports.append(port)
+
+        discovered = []
+        for port in ports:
+            url = f"http://127.0.0.1:{port}"
+            try:
+                with urlopen(f"{url}/json/version", timeout=0.25) as response:
+                    body = response.read(4096)
+                if b"webSocketDebuggerUrl" in body:
+                    discovered.append(url)
+                    self.log(
+                        f"Detected a browser remote-debugging endpoint at {url}.",
+                        Fore.CYAN,
+                    )
+            except Exception:
+                continue
+        return discovered
+
+    def _attach_to_cdp(self, cdp_url: str) -> bool:
+        """Attach to one CDP endpoint and select its Replit or first tab."""
+
+        self.browser = self.playwright.chromium.connect_over_cdp(cdp_url)
+        contexts = self.browser.contexts
+        if not contexts:
+            raise RuntimeError("The attached browser has no browser context.")
+        self.context = contexts[0]
+        self._attached_to_browser = True
+        self._owns_browser = False
+        self.page = self._find_page_for_host("replit.com")
+        if self.page is None:
+            self.page = self._first_open_page()
+        if self.page is None:
+            self.page = self.context.new_page()
+        self.page.set_default_timeout(30_000)
+        self.log(
+            f"Attached to the existing browser at {cdp_url}; "
+            "reusing its open tabs.",
+            Fore.GREEN,
+        )
+        return True
+
+    def _browser_executable_candidates(self) -> list[str]:
+        """Find usable Chromium-family browser executables without assuming Edge."""
+
+        candidates = []
+
+        def add(path: Optional[str]) -> None:
+            if not path:
+                return
+            path = os.path.expandvars(os.path.expanduser(path))
+            if path not in candidates and os.path.isfile(path):
+                candidates.append(path)
+
+        add(os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH", "").strip())
+
+        if os.name == "nt":
+            program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+            program_files_x86 = os.environ.get(
+                "PROGRAMFILES(X86)",
+                r"C:\Program Files (x86)",
+            )
+            local_app_data = os.environ.get(
+                "LOCALAPPDATA",
+                os.path.expanduser(r"~\AppData\Local"),
+            )
+            for root in (program_files, program_files_x86, local_app_data):
+                add(os.path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"))
+                add(os.path.join(root, "Google", "Chrome", "Application", "chrome.exe"))
+                add(os.path.join(root, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"))
+                add(os.path.join(root, "Chromium", "Application", "chromium.exe"))
+        else:
+            for command in (
+                "google-chrome",
+                "google-chrome-stable",
+                "chromium",
+                "chromium-browser",
+                "microsoft-edge",
+                "brave",
+            ):
+                add(shutil.which(command))
+            add("/repl/tools/bin/chromium")
+
+        return candidates
 
     def _open_pages(self):
         """Return open pages from the attached/launched context."""
@@ -262,7 +373,25 @@ class PCAutomation:
             return ""
 
     def _validation_errors(self) -> list[str]:
-        errors = find_validation_errors(self._page_text())
+        # Replit keeps the landing page mounted behind the signup modal. Read
+        # the visible dialog/form first so unrelated page text cannot block a
+        # valid registration attempt.
+        scoped_text = ""
+        for scope_selector in ("[role='dialog']", "dialog", "form"):
+            scope = self.page.locator(scope_selector)
+            try:
+                for index in range(scope.count()):
+                    candidate = scope.nth(index)
+                    if candidate.is_visible(timeout=500):
+                        scoped_text = " ".join(candidate.inner_text().split())
+                        if scoped_text:
+                            break
+                if scoped_text:
+                    break
+            except Exception:
+                continue
+
+        errors = find_validation_errors(scoped_text or self._page_text())
         for selector in self.VALIDATION_SELECTORS:
             locator = self.page.locator(selector)
             try:
@@ -270,8 +399,13 @@ class PCAutomation:
                     candidate = locator.nth(index)
                     if candidate.is_visible(timeout=500):
                         text = " ".join(candidate.inner_text().split())
-                        if text and text not in errors:
-                            errors.append(text)
+                        # Class names and aria-invalid markers are signals, not
+                        # error messages. Only retain text matching the known
+                        # validation patterns; this avoids treating helper
+                        # text such as "Password is valid" as a failure.
+                        for error in find_validation_errors(text):
+                            if error not in errors:
+                                errors.append(error)
             except Exception:
                 continue
         return errors

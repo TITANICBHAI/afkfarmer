@@ -35,7 +35,7 @@ The active Python files are present at the project root with canonical names:
 The state-driven offline implementation is verified, including atomic
 checkpoints, PC registration classification, Android UI-state transitions,
 session synchronization after Android completion, and safe GitHub-import
-failure handling. The combined offline test suite passes 36 tests.
+failure handling. The combined offline test suite passes 38 tests.
 
 Live mailbox, Replit registration, Android-device, PC-resume, GitHub-import,
 and complete end-to-end evidence remain open. The workspace browser previously
@@ -129,11 +129,12 @@ python -m pip install -r requirements.txt
 
 ### 3. Configure the browser
 
-The automation first tries to attach to an already-open Chromium-family browser
-when `PLAYWRIGHT_CDP_URL` is set. This reuses the existing browser context and
-tabs, and the automation will not close that browser when it finishes. A
-regular browser process cannot be attached to after launch, so start the
-browser with remote debugging enabled before running the script. For example,
+The automation first tries to attach to an already-open Chromium-family
+browser. It uses `PLAYWRIGHT_CDP_URL` when set; otherwise it checks common local
+CDP ports (`9222` through `9225`) automatically. This reuses the existing
+browser context and tabs, and the automation will not close that browser when
+it finishes. A regular browser process cannot be attached to after launch, so
+the browser must have been started with remote debugging enabled. For example,
 on Windows:
 
 ```cmd
@@ -142,12 +143,20 @@ set "PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222"
 ```
 
 The same approach works with Chrome, Chromium, or another Chromium-family
-browser; only the executable path changes. Keep the `temp-mail.org` and
-`replit.com` tabs open if you want those exact tabs reused.
+browser. Keep the `temp-mail.org` and `replit.com` tabs open if you want those
+exact tabs reused. If the browser uses another debugging port, either set it
+explicitly:
+
+```cmd
+set "PLAYWRIGHT_CDP_PORTS=9333"
+```
+
+or set the complete endpoint with `PLAYWRIGHT_CDP_URL`.
 
 If `PLAYWRIGHT_CDP_URL` is not set or the endpoint is unavailable, the script
-starts a managed browser. It does not force Microsoft Edge: configure either a
-browser executable:
+automatically looks for installed Edge, Chrome, Brave, and Chromium
+executables. It does not force Microsoft Edge. You can still prioritize a
+specific executable:
 
 ```cmd
 set "PLAYWRIGHT_EXECUTABLE_PATH=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -165,6 +174,10 @@ Or configure a Playwright browser channel such as `chrome`, `msedge`, or
 ```cmd
 set "PLAYWRIGHT_BROWSER_CHANNEL=chrome"
 ```
+
+If no existing browser can be controlled and no installed executable can be
+launched, the script makes one final attempt to use Playwright's bundled
+Chromium. This is the automatic managed-browser fallback.
 
 Check the configured path:
 
