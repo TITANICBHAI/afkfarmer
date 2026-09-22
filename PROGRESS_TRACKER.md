@@ -489,3 +489,16 @@ Add one entry after each meaningful session:
   the temporary-mail provider may block automated browser access.
 - Next action: use the README procedure for Windows setup, then perform only
   the explicitly authorized smoke tests.
+
+### 2026-09-22 — Android package correction
+- Completed: corrected the configured and defensive fallback Replit Android
+  package name to `com.replit.app` and updated the force-stop acceptance
+  reference.
+- Evidence: source compilation, preflight configuration checks, focused Android
+  parsing tests, and `git diff --check` passed. No device was queried or
+  launched.
+- Still open: live verification that the installed app exposes the expected
+  UI hierarchy under this package.
+- Blockers: no Android run has been authorized in this session.
+- Next action: during the authorized Android smoke test, verify that
+  `com.replit.app` launches and is the foreground package before transitions.

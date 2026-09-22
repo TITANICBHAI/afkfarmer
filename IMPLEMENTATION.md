@@ -203,7 +203,7 @@ The earlier PNG references cover the PC registration and mailbox states.
 | Scroll | Log Out is visible |
 | Log Out | Confirmation dialog is visible |
 | Confirm Log Out | Logged-out state is visible |
-| Force-stop | `com.replit.android` is not foreground |
+| Force-stop | `com.replit.app` is not foreground |
 
 Keyboard visibility must be observed, not inferred from a fixed Y coordinate.
 When the keyboard is open, use the current UI node bounds. Hide the keyboard

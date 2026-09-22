@@ -21,7 +21,7 @@ try:
     from config import ELEMENT_WAIT_TIMEOUT, REPLIT_PACKAGE_NAME
 except ImportError:
     ELEMENT_WAIT_TIMEOUT = 10
-    REPLIT_PACKAGE_NAME = "com.replit.android"
+    REPLIT_PACKAGE_NAME = "com.replit.app"
 
 
 BOUNDS_PATTERN = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")

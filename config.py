@@ -4,7 +4,7 @@
 REPLIT_PASSWORD = "12345678"
 
 # --- Android Settings ---
-REPLIT_PACKAGE_NAME = "com.replit.android"
+REPLIT_PACKAGE_NAME = "com.replit.app"
 ANDROID_DEVICE_ID = None  # Leave as None to auto-detect
 
 # --- Timing Settings (in seconds) ---
