@@ -518,10 +518,11 @@ Add one entry after each meaningful session:
 
 ### 2026-09-22 — Patient Replit entry flow
 - Completed: changed PC registration to open the Replit home page first and
-  added a 60-second wait for the Create Account/email form controls before
-  reporting the stage as failed or offering manual takeover.
+  added a 60-second wait after the final signup button is clicked for Replit
+  to expose a processing, validation, CAPTCHA, or verification-result state.
 - Evidence: mocked PC registration now asserts the home URL and 60-second
-  control wait; the combined 36-test offline suite, preflight, compilation,
+  post-submit result wait; the combined 36-test offline suite, preflight,
+  compilation,
   and `git diff --check` pass. No browser or account flow was started.
 - Still open: live confirmation that the current Replit home page exposes the
   expected Create Account and Email controls within that wait.

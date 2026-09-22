@@ -18,7 +18,7 @@ from temp_mail import TempMailOrgProvider
 class PCAutomation:
     REPLIT_URL = "https://replit.com/"
     SIGNUP_URL = "https://replit.com/signup"
-    CREATE_ACCOUNT_WAIT_MS = 60_000
+    SIGNUP_RESULT_WAIT_MS = 60_000
     CAPTCHA_SELECTORS = (
         "iframe[title*='captcha' i]",
         "iframe[src*='recaptcha' i]",
@@ -335,17 +335,13 @@ class PCAutomation:
                     "button:has-text('Sign up')",
                     "a:has-text('Sign up')",
                 ),
-                timeout=self.CREATE_ACCOUNT_WAIT_MS,
+                timeout=2_000,
             )
             if signup_btn is not None:
                 signup_btn.click()
-                self.log(
-                    "⏳ Waiting for the account form to appear (up to 60 seconds)...",
-                    Fore.CYAN,
-                )
             else:
                 self.log(
-                    "ℹ️ Create Account was not visible after 60 seconds; "
+                    "ℹ️ Create Account was not visible; "
                     "checking whether the account form is already open.",
                     Fore.YELLOW,
                 )
@@ -356,16 +352,12 @@ class PCAutomation:
                     "button:has-text('Continue with Email')",
                     "button:has-text('Email')",
                 ),
-                timeout=self.CREATE_ACCOUNT_WAIT_MS,
+                timeout=2_000,
             )
             if email_btn is not None:
                 email_btn.click()
             else:
-                self.log(
-                    "ℹ️ Email option was not needed or is already visible "
-                    "after the 60-second form wait.",
-                    Fore.YELLOW,
-                )
+                self.log("ℹ️ Email option already visible", Fore.YELLOW)
             
             self.log("[5] Entering credentials...", Fore.CYAN)
             email_field = self.page.locator(
@@ -376,11 +368,11 @@ class PCAutomation:
             ).first
             email_field.wait_for(
                 state="visible",
-                timeout=self.CREATE_ACCOUNT_WAIT_MS,
+                timeout=15_000,
             )
             password_field.wait_for(
                 state="visible",
-                timeout=self.CREATE_ACCOUNT_WAIT_MS,
+                timeout=15_000,
             )
             email_field.fill(self.email or "")
             password_field.fill(self.password)
@@ -415,6 +407,11 @@ class PCAutomation:
                 self.log("❌ Registration submit control was not found.", Fore.RED)
                 return False
             submit_btn.click()
+            self.log(
+                "⏳ Waiting up to 60 seconds for Replit to process signup "
+                "before offering manual takeover...",
+                Fore.CYAN,
+            )
 
             try:
                 self.page.wait_for_function(
@@ -426,7 +423,7 @@ class PCAutomation:
                                location.href !== signupUrl;
                     }""",
                     arg=self.SIGNUP_URL,
-                    timeout=30_000,
+                    timeout=self.SIGNUP_RESULT_WAIT_MS,
                 )
             except PlaywrightTimeoutError:
                 self._save_failure("signup_result_timeout")

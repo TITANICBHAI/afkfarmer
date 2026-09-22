@@ -101,6 +101,7 @@ class SignupPage(FakePage):
         self.url = "https://replit.com/signup"
         self.body_text = body_text
         self.visibility_timeouts = []
+        self.function_timeouts = []
         self.email_field = FakeLocator(self)
         self.password_field = FakeLocator(self)
         self.control = FakeLocator(self, visible=True)
@@ -112,6 +113,7 @@ class SignupPage(FakePage):
         return None
 
     def wait_for_function(self, _script, timeout=0, **_kwargs):
+        self.function_timeouts.append(timeout)
         return None
 
     def locator(self, selector):
@@ -182,7 +184,7 @@ class PcAutomationMockTests(unittest.TestCase):
 
         self.assertTrue(automation.create_account())
         self.assertEqual(page.url, PCAutomation.REPLIT_URL)
-        self.assertIn(PCAutomation.CREATE_ACCOUNT_WAIT_MS, page.visibility_timeouts)
+        self.assertIn(PCAutomation.SIGNUP_RESULT_WAIT_MS, page.function_timeouts)
         self.assertEqual(page.email_field.value, "mail@example.test")
         self.assertEqual(page.password_field.value, "password")
 
