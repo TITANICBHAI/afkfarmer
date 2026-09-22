@@ -16,7 +16,9 @@ from temp_mail import TempMailOrgProvider
 
 
 class PCAutomation:
+    REPLIT_URL = "https://replit.com/"
     SIGNUP_URL = "https://replit.com/signup"
+    CREATE_ACCOUNT_WAIT_MS = 60_000
     CAPTCHA_SELECTORS = (
         "iframe[title*='captcha' i]",
         "iframe[src*='recaptcha' i]",
@@ -304,8 +306,8 @@ class PCAutomation:
         self.log("="*60, Fore.MAGENTA)
         
         try:
-            self.log("\n[1] Navigating to Replit signup...", Fore.CYAN)
-            self.page.goto(self.SIGNUP_URL, wait_until="domcontentloaded")
+            self.log("\n[1] Navigating to Replit...", Fore.CYAN)
+            self.page.goto(self.REPLIT_URL, wait_until="domcontentloaded")
             try:
                 self.page.wait_for_load_state("networkidle", timeout=10_000)
             except PlaywrightTimeoutError:
@@ -333,12 +335,20 @@ class PCAutomation:
                     "button:has-text('Sign up')",
                     "a:has-text('Sign up')",
                 ),
-                timeout=2_000,
+                timeout=self.CREATE_ACCOUNT_WAIT_MS,
             )
             if signup_btn is not None:
                 signup_btn.click()
+                self.log(
+                    "⏳ Waiting for the account form to appear (up to 60 seconds)...",
+                    Fore.CYAN,
+                )
             else:
-                self.log("ℹ️ Signup button not found, might already be on the form.", Fore.YELLOW)
+                self.log(
+                    "ℹ️ Create Account was not visible after 60 seconds; "
+                    "checking whether the account form is already open.",
+                    Fore.YELLOW,
+                )
             
             self.log("[4] Selecting 'Continue with Email'...", Fore.CYAN)
             email_btn = self._visible_control(
@@ -346,12 +356,16 @@ class PCAutomation:
                     "button:has-text('Continue with Email')",
                     "button:has-text('Email')",
                 ),
-                timeout=2_000,
+                timeout=self.CREATE_ACCOUNT_WAIT_MS,
             )
             if email_btn is not None:
                 email_btn.click()
             else:
-                self.log("ℹ️ Email option already visible", Fore.YELLOW)
+                self.log(
+                    "ℹ️ Email option was not needed or is already visible "
+                    "after the 60-second form wait.",
+                    Fore.YELLOW,
+                )
             
             self.log("[5] Entering credentials...", Fore.CYAN)
             email_field = self.page.locator(
@@ -360,8 +374,14 @@ class PCAutomation:
             password_field = self.page.locator(
                 "input[type='password'], input[name='password']"
             ).first
-            email_field.wait_for(state="visible", timeout=15_000)
-            password_field.wait_for(state="visible", timeout=15_000)
+            email_field.wait_for(
+                state="visible",
+                timeout=self.CREATE_ACCOUNT_WAIT_MS,
+            )
+            password_field.wait_for(
+                state="visible",
+                timeout=self.CREATE_ACCOUNT_WAIT_MS,
+            )
             email_field.fill(self.email or "")
             password_field.fill(self.password)
             self.log(f"✅ Email: {self.email}", Fore.GREEN)

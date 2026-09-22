@@ -515,3 +515,17 @@ Add one entry after each meaningful session:
 - Blockers: no Android run has been authorized in this session.
 - Next action: verify email/password entry on the real device during the
   authorized Android smoke test.
+
+### 2026-09-22 — Patient Replit entry flow
+- Completed: changed PC registration to open the Replit home page first and
+  added a 60-second wait for the Create Account/email form controls before
+  reporting the stage as failed or offering manual takeover.
+- Evidence: mocked PC registration now asserts the home URL and 60-second
+  control wait; the combined 36-test offline suite, preflight, compilation,
+  and `git diff --check` pass. No browser or account flow was started.
+- Still open: live confirmation that the current Replit home page exposes the
+  expected Create Account and Email controls within that wait.
+- Blockers: live browser testing remains provider/runtime dependent and no
+  external-account run was started in this session.
+- Next action: use the Windows command-line procedure for an authorized PC
+  smoke test; stop for manual CAPTCHA or unexpected UI states.

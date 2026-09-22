@@ -22,6 +22,8 @@ class FakeLocator:
         return self
 
     def is_visible(self, timeout=0):
+        if hasattr(self.page, "visibility_timeouts"):
+            self.page.visibility_timeouts.append(timeout)
         return self.visible
 
     def wait_for(self, state="visible", timeout=0):
@@ -98,6 +100,7 @@ class SignupPage(FakePage):
         super().__init__(chat_visible=False)
         self.url = "https://replit.com/signup"
         self.body_text = body_text
+        self.visibility_timeouts = []
         self.email_field = FakeLocator(self)
         self.password_field = FakeLocator(self)
         self.control = FakeLocator(self, visible=True)
@@ -178,6 +181,8 @@ class PcAutomationMockTests(unittest.TestCase):
         automation = self.make_automation(page)
 
         self.assertTrue(automation.create_account())
+        self.assertEqual(page.url, PCAutomation.REPLIT_URL)
+        self.assertIn(PCAutomation.CREATE_ACCOUNT_WAIT_MS, page.visibility_timeouts)
         self.assertEqual(page.email_field.value, "mail@example.test")
         self.assertEqual(page.password_field.value, "password")
 
