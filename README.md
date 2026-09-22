@@ -153,6 +153,62 @@ set "PLAYWRIGHT_CDP_PORTS=9333"
 
 or set the complete endpoint with `PLAYWRIGHT_CDP_URL`.
 
+#### Executable path versus existing-browser attachment
+
+These settings have different purposes:
+
+- `PLAYWRIGHT_EXECUTABLE_PATH` tells Playwright which browser executable to
+  launch. It does **not** attach to an already-running browser.
+- `PLAYWRIGHT_CDP_URL` tells Playwright to attach to the existing browser
+  process, preserving its context and open tabs.
+- When `PLAYWRIGHT_CDP_URL` is omitted, the script automatically probes local
+  CDP ports `9222` through `9225`.
+
+If the log only says:
+
+```text
+Using detected browser executable: C:\...\msedge.exe
+```
+
+or:
+
+```text
+Using configured browser executable: C:\...\msedge.exe
+```
+
+the script is launching its own isolated browser context. A successful
+existing-browser attachment must show:
+
+```text
+Detected a browser remote-debugging endpoint at http://127.0.0.1:9222.
+Attached to the existing browser at http://127.0.0.1:9222; reusing its open tabs.
+```
+
+To check whether a Windows browser is exposing CDP, use one of these commands
+from the same machine:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:9222/json/version
+```
+
+```cmd
+curl http://127.0.0.1:9222/json/version
+```
+
+If the check cannot connect, the existing browser was probably started without
+remote debugging. Close the normal browser process once, start it with
+debugging enabled, and then run the automation:
+
+```cmd
+start "" "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
+set "PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222"
+python main.py
+```
+
+Opening the Replit and `temp-mail.org` tabs in that browser lets the script
+reuse those exact tabs. A normal browser process cannot be retrofitted with
+remote debugging after it has started.
+
 If `PLAYWRIGHT_CDP_URL` is not set or the endpoint is unavailable, the script
 automatically looks for installed Edge, Chrome, Brave, and Chromium
 executables. It does not force Microsoft Edge. You can still prioritize a
