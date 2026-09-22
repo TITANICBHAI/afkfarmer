@@ -52,7 +52,9 @@ class PCAutomation:
         self.temp_mail = None
         self.state_file = "auth_state.json"
         self._owns_browser = False
+        self._owns_context = False
         self._attached_to_browser = False
+        self._persistent_context = False
 
     def log(self, message, color=Fore.WHITE):
         print(f"{color}{message}{Style.RESET_ALL}")
@@ -86,51 +88,64 @@ class PCAutomation:
         browser_channel = os.environ.get("PLAYWRIGHT_BROWSER_CHANNEL", "").strip()
 
         launch_errors = []
+        profile_mode_attempted = False
         if browser_channel:
             try:
                 self.log(
                     f"Using configured Chromium browser channel: {browser_channel}.",
                     Fore.CYAN,
                 )
-                self.browser = self.playwright.chromium.launch(
+                profile_mode_attempted = bool(
+                    self._profile_user_data_dir(channel=browser_channel)
+                )
+                self._launch_managed_context(
                     channel=browser_channel,
-                    headless=False,
+                    storage_state=storage_state,
                 )
             except Exception as exc:
                 launch_errors.append(f"channel {browser_channel}: {exc}")
                 self.log(
-                    f"Configured browser channel was unavailable ({exc}); "
+                    f"Configured browser channel/profile was unavailable ({exc}); "
                     "trying detected executables.",
                     Fore.YELLOW,
                 )
 
-        if self.browser is None:
+        if self.context is None:
             for executable_path in self._browser_executable_candidates():
                 try:
                     self.log(
                         f"Using detected browser executable: {executable_path}",
                         Fore.CYAN,
                     )
-                    launch_args = ["--no-sandbox"] if os.name != "nt" else None
-                    self.browser = self.playwright.chromium.launch(
+                    profile_mode_attempted = profile_mode_attempted or bool(
+                        self._profile_user_data_dir(executable_path=executable_path)
+                    )
+                    self._launch_managed_context(
                         executable_path=executable_path,
-                        headless=False,
-                        args=launch_args,
+                        storage_state=storage_state,
                     )
                     break
                 except Exception as exc:
                     launch_errors.append(f"{executable_path}: {exc}")
 
-        if self.browser is None:
+        if self.context is None and profile_mode_attempted:
+            details = "; ".join(launch_errors)
+            raise RuntimeError(
+                "A browser profile was detected, but it could not be opened. "
+                "Close the normal Edge/Chrome window using that profile, or "
+                "start it with remote debugging and set PLAYWRIGHT_CDP_URL. "
+                f"Attempts: {details}"
+            )
+
+        if self.context is None:
             try:
                 self.log(
                     "No configured or detected browser launched; "
                     "trying Playwright's bundled Chromium.",
                     Fore.CYAN,
                 )
-                self.browser = self.playwright.chromium.launch(
-                    headless=False,
-                    args=["--no-sandbox"] if os.name != "nt" else None,
+                self._launch_managed_context(
+                    storage_state=storage_state,
                 )
             except Exception as exc:
                 launch_errors.append(f"Playwright bundled Chromium: {exc}")
@@ -142,10 +157,118 @@ class PCAutomation:
                     f"Attempts: {details}"
                 ) from exc
 
-        self._owns_browser = True
-        self.context = self.browser.new_context(storage_state=storage_state)
-        self.page = self.context.new_page()
-        self.page.set_default_timeout(30000)
+    def _launch_managed_context(
+        self,
+        *,
+        executable_path: Optional[str] = None,
+        channel: Optional[str] = None,
+        storage_state: Optional[str] = None,
+    ) -> None:
+        """Launch a browser using the operator profile when one is available."""
+
+        user_data_dir = self._profile_user_data_dir(
+            executable_path=executable_path,
+            channel=channel,
+        )
+        launch_args = []
+        if user_data_dir:
+            profile_directory = self._profile_directory()
+            launch_args.append(f"--profile-directory={profile_directory}")
+            self.log(
+                f"Using browser profile '{profile_directory}' from "
+                f"{user_data_dir}.",
+                Fore.GREEN,
+            )
+
+            launch_kwargs = {
+                "headless": False,
+                "args": launch_args,
+            }
+            if executable_path:
+                launch_kwargs["executable_path"] = executable_path
+            if channel:
+                launch_kwargs["channel"] = channel
+            context = self.playwright.chromium.launch_persistent_context(
+                user_data_dir,
+                **launch_kwargs,
+            )
+            self.context = context
+            self.browser = context.browser
+            self._persistent_context = True
+            self._owns_context = True
+            self._owns_browser = False
+        else:
+            launch_args = ["--no-sandbox"] if os.name != "nt" else None
+            launch_kwargs = {
+                "headless": False,
+            }
+            if launch_args is not None:
+                launch_kwargs["args"] = launch_args
+            if executable_path:
+                launch_kwargs["executable_path"] = executable_path
+            if channel:
+                launch_kwargs["channel"] = channel
+            browser = self.playwright.chromium.launch(**launch_kwargs)
+            self.browser = browser
+            self.context = browser.new_context(storage_state=storage_state)
+            self._persistent_context = False
+            self._owns_context = True
+            self._owns_browser = True
+
+        self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+        self.page.set_default_timeout(30_000)
+
+    def _profile_directory(self) -> str:
+        return (
+            os.environ.get("PLAYWRIGHT_PROFILE_DIRECTORY", "").strip()
+            or "Default"
+        )
+
+    def _profile_user_data_dir(
+        self,
+        *,
+        executable_path: Optional[str] = None,
+        channel: Optional[str] = None,
+    ) -> Optional[str]:
+        """Return the browser's real profile root, if it can be identified."""
+
+        configured = os.environ.get("PLAYWRIGHT_USER_DATA_DIR", "").strip()
+        if configured:
+            return os.path.abspath(os.path.expandvars(os.path.expanduser(configured)))
+
+        if os.name != "nt":
+            return None
+
+        browser_name = (executable_path or channel or "").casefold()
+        local_app_data = os.environ.get(
+            "LOCALAPPDATA",
+            os.path.expanduser(r"~\AppData\Local"),
+        )
+        app_data = os.environ.get(
+            "APPDATA",
+            os.path.expanduser(r"~\AppData\Roaming"),
+        )
+
+        if "edge" in browser_name or browser_name == "msedge":
+            return os.path.join(local_app_data, "Microsoft", "Edge", "User Data")
+        if "brave" in browser_name:
+            return os.path.join(
+                local_app_data,
+                "BraveSoftware",
+                "Brave-Browser",
+                "User Data",
+            )
+        if "chrome" in browser_name:
+            return os.path.join(local_app_data, "Google", "Chrome", "User Data")
+        if "chromium" in browser_name:
+            return os.path.join(local_app_data, "Chromium", "User Data")
+
+        # The workspace Chromium is intentionally left on the existing
+        # isolated-context path unless the operator explicitly supplies a
+        # profile root.
+        if os.environ.get("PLAYWRIGHT_PROFILE_DIRECTORY"):
+            return os.path.join(app_data, "Chromium", "User Data")
+        return None
 
     def _candidate_cdp_urls(self) -> list[str]:
         """Return explicit and discoverable local Chromium CDP endpoints."""
@@ -215,7 +338,15 @@ class PCAutomation:
             if path not in candidates and os.path.isfile(path):
                 candidates.append(path)
 
-        add(os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH", "").strip())
+        configured_executable = os.environ.get(
+            "PLAYWRIGHT_EXECUTABLE_PATH",
+            "",
+        ).strip()
+        if configured_executable:
+            add(configured_executable)
+            # An explicit executable is an operator choice. Do not silently
+            # switch to a different installed browser if its profile is locked.
+            return candidates
 
         if os.name == "nt":
             program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
@@ -824,7 +955,15 @@ class PCAutomation:
         self.log("\n🛑 Closing browser...", Fore.CYAN)
         if self.context:
             self.save_state()
-        if self.browser and self._owns_browser:
+        if self.context and self._persistent_context and self._owns_context:
+            try:
+                self.context.close()
+            except Exception as exc:
+                self.log(
+                    f"ℹ️ Browser profile was already unavailable during shutdown ({exc}).",
+                    Fore.YELLOW,
+                )
+        elif self.browser and self._owns_browser:
             try:
                 is_connected = getattr(self.browser, "is_connected", None)
                 if callable(is_connected) and not is_connected():
@@ -854,3 +993,7 @@ class PCAutomation:
         self.context = None
         self.browser = None
         self.playwright = None
+        self._owns_browser = False
+        self._owns_context = False
+        self._persistent_context = False
+        self._attached_to_browser = False

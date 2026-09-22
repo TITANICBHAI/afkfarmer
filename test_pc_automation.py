@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import Mock, patch
 
@@ -170,6 +171,37 @@ class PcAutomationMockTests(unittest.TestCase):
                 )
 
         urlopen.assert_not_called()
+
+    def test_edge_profile_directory_uses_selected_user_data_root(self):
+        automation = PCAutomation("mail@example.test", "password")
+
+        with patch("pc_automation.os.name", "nt"):
+            with patch.dict(
+                "os.environ",
+                {
+                    "LOCALAPPDATA": r"C:\Users\DELL\AppData\Local",
+                    "PLAYWRIGHT_PROFILE_DIRECTORY": "Profile 2",
+                },
+                clear=False,
+            ):
+                self.assertEqual(
+                    automation._profile_directory(),
+                    "Profile 2",
+                )
+                self.assertEqual(
+                    automation._profile_user_data_dir(
+                        executable_path=(
+                            r"C:\Program Files (x86)\Microsoft\Edge"
+                            r"\Application\msedge.exe"
+                        )
+                    ),
+                    os.path.join(
+                        r"C:\Users\DELL\AppData\Local",
+                        "Microsoft",
+                        "Edge",
+                        "User Data",
+                    ),
+                )
 
     def test_import_requires_visible_control_and_observed_project_url(self):
         page = FakePage(chat_visible=True)

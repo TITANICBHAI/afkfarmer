@@ -35,7 +35,7 @@ The active Python files are present at the project root with canonical names:
 The state-driven offline implementation is verified, including atomic
 checkpoints, PC registration classification, Android UI-state transitions,
 session synchronization after Android completion, and safe GitHub-import
-failure handling. The combined offline test suite passes 40 tests.
+failure handling. The combined offline test suite passes 41 tests.
 
 Live mailbox, Replit registration, Android-device, PC-resume, GitHub-import,
 and complete end-to-end evidence remain open. The workspace browser previously
@@ -209,6 +209,29 @@ Opening the Replit and `temp-mail.org` tabs in that browser lets the script
 reuse those exact tabs. A normal browser process cannot be retrofitted with
 remote debugging after it has started.
 
+#### Use an Edge profile when launching a managed browser
+
+If CDP attachment is unavailable, the Windows fallback uses Edge's real user
+data directory instead of creating a private Playwright context. By default it
+uses the `Default` profile. To select another Edge profile, set its directory
+name:
+
+```cmd
+set "PLAYWRIGHT_PROFILE_DIRECTORY=Profile 1"
+set "PLAYWRIGHT_USER_DATA_DIR=%LOCALAPPDATA%\Microsoft\Edge\User Data"
+```
+
+Common profile directory names are `Default`, `Profile 1`, `Profile 2`, and
+similar. In Edge, open `edge://version` and use the final folder name from
+**Profile path**. For example, a path ending in
+`...\Microsoft\Edge\User Data\Profile 1` means the value is `Profile 1`.
+
+The profile must not be locked by a normal Edge process when the automation
+launches it. Either close that Edge window first or start Edge with remote
+debugging and let the script attach through CDP instead. If the selected
+profile cannot be opened, the script stops with an explanation rather than
+silently switching to a private or unrelated browser profile.
+
 If `PLAYWRIGHT_CDP_URL` is not set or the endpoint is unavailable, the script
 automatically looks for installed Edge, Chrome, Brave, and Chromium
 executables. It does not force Microsoft Edge. You can still prioritize a
@@ -231,9 +254,10 @@ Or configure a Playwright browser channel such as `chrome`, `msedge`, or
 set "PLAYWRIGHT_BROWSER_CHANNEL=chrome"
 ```
 
-If no existing browser can be controlled and no installed executable can be
-launched, the script makes one final attempt to use Playwright's bundled
-Chromium. This is the automatic managed-browser fallback.
+If no existing browser can be controlled, no profile-aware browser is
+available, and no installed executable can be launched, the script makes one
+final attempt to use Playwright's bundled Chromium. This fallback is only used
+when no operator profile was identified or requested.
 
 Check the configured path:
 
