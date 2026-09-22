@@ -251,3 +251,19 @@ Add one entry after each meaningful session:
 - Blockers: no external run is authorized or performed.
 - Next action: request explicit authorization and a ready operator-owned
   browser session before the mailbox smoke test; do not start Android yet.
+
+### 2026-09-22 — GitHub workspace sync
+- Completed: replaced the mislabeled JavaScript uploader with
+  `github_push.sh`, which mirrors the workspace through Git, includes
+  deletions, uses the configured remote/current branch by default, and keeps
+  entire-repository deletion behind exact confirmation.
+- Evidence: `bash -n github_push.sh`, `bash github_push.sh --help`, and
+  `bash github_push.sh --dry-run --sync` passed without staging, committing,
+  contacting GitHub, or deleting anything. The manual `GitHub workspace sync`
+  console workflow is registered with auto-start disabled.
+- Still open: an actual GitHub push and any repository deletion; neither was
+  run in this session.
+- Blockers: live remote mutation requires the operator to start the manual
+  workflow intentionally and have Git authentication available.
+- Next action: review the dry-run output, then start the workflow only when the
+  operator wants the workspace mirrored to GitHub.

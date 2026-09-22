@@ -1,261 +1,347 @@
-import { readFileSync, readdirSync } from 'fs';
-import { join, relative } from 'path';
-import { createHash } from 'crypto';
+#!/usr/bin/env bash
+#
+# Safe-by-default GitHub workspace sync.
+#
+# Normal sync mirrors the current workspace's Git tree to a GitHub branch:
+# tracked additions, edits, and deletions are pushed. Remote-only files are
+# removed because the branch is updated to the local commit tree.
+#
+# Deleting the entire GitHub repository is a separate, explicit operation:
+#   bash github_push.sh --delete-remote-repo \
+#     --confirm-delete OWNER/REPOSITORY --yes
+#
+# This script never prints tokens or credential values.
 
-const TOKEN =
-  process.env.GITHUB_PERSONAL_ACCESS_TOKEN ||
-  process.env.GITHUB_PAT ||
-  process.env.GH_PAT ||
-  process.env.PAT;
-const OWNER = 'TITANICBHAI';
-const REPO = 'afkfarmer';
-const BRANCH = 'main';
-const BASE = '/home/runner/workspace';
-// GitHub's secondary rate limit triggers around ~10 parallel POSTs to /git/blobs.
-// Keep concurrency low and rely on retries to absorb the occasional 403/429.
-const CONCURRENCY = 4;
-const MAX_RETRIES = 6;
+set -Eeuo pipefail
 
-const EXCLUDE_PATTERNS = [
-  /node_modules/,
-  /\/android\//,
-  /\.cache\//,
-  /\.local\//,
-  /\.expo/,
-  /\/dist\//,
-  /\/tmp\//,
-  /\/out-tsc\//,
-  /\.git\//,
-  /\.keystore$/,
-  /\.jks$/,
-  /credentials\.json$/,
-  /\.DS_Store$/,
-  /Thumbs\.db$/,
-  /\.tsbuildinfo$/,
-  /tbtechs-release\.keystore/,
-];
+ROOT="${WORKSPACE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
+REMOTE="${GITHUB_REMOTE:-origin}"
+BRANCH="${GITHUB_BRANCH:-}"
+COMMIT_MESSAGE="${GITHUB_COMMIT_MESSAGE:-chore: sync workspace to GitHub}"
+YES=0
+DRY_RUN=0
+MODE=""
+CONFIRM_DELETE=""
 
-const MUST_INCLUDE_PATTERNS = [
-  /^artifacts\/focusflow\/android-native\//,
-];
+usage() {
+  cat <<'EOF'
+Usage:
+  bash github_push.sh --sync [--yes] [--dry-run]
+  bash github_push.sh --delete-remote-repo --confirm-delete OWNER/REPO --yes
+  bash github_push.sh --help
 
-function shouldExclude(filePath) {
-  const rel = relative(BASE, filePath);
-  if (MUST_INCLUDE_PATTERNS.some(p => p.test(rel))) return false;
-  return EXCLUDE_PATTERNS.some(p => p.test(rel) || p.test(filePath));
+Options:
+  --sync                    Stage and push the workspace to the GitHub branch.
+                            Remote-only files are deleted from that branch.
+  --dry-run                 Show the local changes without changing Git state
+                            or contacting GitHub.
+  --delete-remote-repo      Permanently delete the entire GitHub repository.
+                            This cannot be combined with --sync.
+  --confirm-delete OWNER/REPO
+                            Exact repository name required for repository
+                            deletion. Must be used with --delete-remote-repo.
+  --remote NAME             Git remote to use (default: origin).
+  --branch NAME             Branch to replace (default: current branch).
+  --message TEXT            Commit message for a sync commit.
+  --yes                     Skip confirmation prompts. Required for deletion
+                            modes and recommended for the manual workflow.
+  --help                    Show this help.
+
+Environment:
+  WORKSPACE_DIR             Workspace root (default: script directory).
+  GITHUB_REMOTE             Git remote (default: origin).
+  GITHUB_BRANCH             Target branch (default: current branch).
+  GITHUB_COMMIT_MESSAGE     Sync commit message.
+  GITHUB_PERSONAL_ACCESS_TOKEN, GITHUB_TOKEN, or GH_TOKEN
+                            Token used for HTTPS sync and repository deletion.
+  gh auth token              Optional fallback for repository deletion.
+
+Examples:
+  bash github_push.sh --dry-run --sync
+  bash github_push.sh --sync --yes
+  bash github_push.sh --delete-remote-repo \
+    --confirm-delete TITANICBHAI/afkfarmer --yes
+EOF
 }
 
-function collectFiles(dir, files = []) {
-  let entries;
-  try { entries = readdirSync(dir, { withFileTypes: true }); }
-  catch { return files; }
-  for (const entry of entries) {
-    const fullPath = join(dir, entry.name);
-    if (shouldExclude(fullPath)) continue;
-    if (entry.isDirectory()) collectFiles(fullPath, files);
-    else files.push(fullPath);
-  }
-  return files;
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
 }
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-async function ghFetch(path, method = 'GET', body = null) {
-  const opts = {
-    method,
-    headers: {
-      Authorization: `token ${TOKEN}`,
-      'Content-Type': 'application/json',
-      'User-Agent': 'focusflow-push-bot',
-      Accept: 'application/vnd.github+json',
-    },
-  };
-  if (body) opts.body = JSON.stringify(body);
-
-  // Retry on secondary rate limit (403) and primary rate limit (429).
-  // GitHub's body for these contains "secondary rate limit" / "abuse" / "rate limit".
-  // We honor Retry-After when present; otherwise exponential backoff.
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const resp = await fetch(`https://api.github.com${path}`, opts);
-    const txt = await resp.text();
-    if (resp.ok) return JSON.parse(txt);
-
-    const isRateLimited =
-      resp.status === 429 ||
-      (resp.status === 403 && /rate limit|abuse|secondary/i.test(txt));
-
-    const isServerError = resp.status === 502 || resp.status === 503 || resp.status === 504;
-
-    if ((isRateLimited || isServerError) && attempt < MAX_RETRIES) {
-      const retryAfter = parseInt(resp.headers.get('retry-after') || '0', 10);
-      const backoffMs = isServerError
-        ? Math.min(10_000, 1_000 * (attempt + 1))
-        : retryAfter > 0 ? retryAfter * 1000 : Math.min(60_000, 1000 * 2 ** attempt);
-      console.warn(`  Retrying (${resp.status}) in ${Math.round(backoffMs / 1000)}s… (attempt ${attempt + 1}/${MAX_RETRIES})`);
-      await sleep(backoffMs);
-      continue;
-    }
-    throw new Error(`GitHub ${method} ${path} → ${resp.status}: ${txt.slice(0, 200)}`);
-  }
-  throw new Error(`GitHub ${method} ${path} → exhausted retries`);
+log() {
+  printf '%s\n' "$*"
 }
 
-async function createBlob(content, encoding) {
-  const data = await ghFetch(`/repos/${OWNER}/${REPO}/git/blobs`, 'POST', { content, encoding });
-  return data.sha;
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
 }
 
-function isExcludedRelativePath(path) {
-  return EXCLUDE_PATTERNS.some(pattern => pattern.test(path));
+repo_root_check() {
+  require_command git
+  [[ -d "$ROOT/.git" ]] || die "Workspace is not a Git repository: $ROOT"
+  git -C "$ROOT" rev-parse --show-toplevel >/dev/null 2>&1 \
+    || die "Could not resolve the Git root for $ROOT"
 }
 
-async function getRemoteTree(treeSha) {
-  const tree = await ghFetch(`/repos/${OWNER}/${REPO}/git/trees/${treeSha}?recursive=1`);
-  if (tree.truncated) {
-    throw new Error('GitHub returned a truncated repository tree; refusing to calculate deletions from an incomplete file list.');
-  }
-  return (tree.tree || []).filter(entry => entry.type === 'blob');
+current_branch() {
+  git -C "$ROOT" branch --show-current
 }
 
-function getGitBlobSha(buffer) {
-  return createHash('sha1')
-    .update(`blob ${buffer.length}\0`)
-    .update(buffer)
-    .digest('hex');
+remote_url() {
+  git -C "$ROOT" remote get-url "$REMOTE" 2>/dev/null \
+    || die "Git remote '$REMOTE' does not exist."
 }
 
-async function processInBatches(items, concurrency, fn) {
-  const results = [];
-  for (let i = 0; i < items.length; i += concurrency) {
-    const batch = items.slice(i, i + concurrency);
-    const batchResults = await Promise.all(batch.map(fn));
-    results.push(...batchResults);
-    if (i % 50 === 0) console.log(`  Processed ${Math.min(i + concurrency, items.length)}/${items.length}`);
-  }
-  return results;
+github_repo_from_url() {
+  local url="$1"
+  local path=""
+
+  case "$url" in
+    https://github.com/*/*|http://github.com/*/*)
+      path="${url#*github.com/}"
+      ;;
+    git@github.com:*/*)
+      path="${url#git@github.com:}"
+      ;;
+    ssh://git@github.com/*/*)
+      path="${url#ssh://git@github.com/}"
+      ;;
+    *)
+      die "Remote '$REMOTE' is not a GitHub URL: $url"
+      ;;
+  esac
+
+  path="${path%.git}"
+  [[ "$path" == */* && "$path" != */*/* ]] \
+    || die "Could not determine OWNER/REPO from GitHub remote."
+  printf '%s\n' "$path"
 }
 
-function getAppVersion() {
-  try {
-    const appJson = JSON.parse(readFileSync('/home/runner/workspace/artifacts/focusflow/app.json', 'utf-8'));
-    const version = appJson?.expo?.version ?? 'unknown';
-    const versionCode = appJson?.expo?.android?.versionCode ?? '?';
-    return { version, versionCode };
-  } catch {
-    return { version: 'unknown', versionCode: '?' };
-  }
+confirm_text() {
+  local expected="$1"
+  local answer
+
+  if (( YES )); then
+    return 0
+  fi
+
+  printf 'Type exactly "%s" to continue: ' "$expected"
+  read -r answer
+  [[ "$answer" == "$expected" ]] \
+    || die "Confirmation did not match; no remote action was taken."
 }
 
-async function run() {
-  if (!TOKEN) {
-    throw new Error('Missing GitHub token secret. Add GITHUB_PERSONAL_ACCESS_TOKEN, GITHUB_PAT, GH_PAT, or PAT in Secrets.');
-  }
-
-  const { version, versionCode } = getAppVersion();
-  console.log(`Pushing FocusFlow → https://github.com/${OWNER}/${REPO}`);
-  console.log(`Branch:      ${BRANCH}`);
-  console.log(`Version:     v${version}`);
-  console.log(`versionCode: ${versionCode}\n`);
-
-  console.log('Getting current branch ref...');
-  const refData = await ghFetch(`/repos/${OWNER}/${REPO}/git/ref/heads/${BRANCH}`);
-  const latestSha = refData.object.sha;
-  console.log('Base commit:', latestSha);
-  const baseCommit = await ghFetch(`/repos/${OWNER}/${REPO}/git/commits/${latestSha}`);
-  const remoteTree = await getRemoteTree(baseCommit.tree.sha);
-  const remoteShaByPath = new Map(remoteTree.map(entry => [entry.path, entry.sha]));
-
-  console.log('Collecting files...');
-  const allFiles = collectFiles(BASE);
-  console.log(`Found ${allFiles.length} files`);
-
-  const fileMetas = allFiles.map(fp => {
-    const rel = relative(BASE, fp);
-    let content, encoding;
-    try {
-      const buf = readFileSync(fp);
-      const isText = !buf.slice(0, 512).includes(0);
-      if (isText) { content = buf.toString('utf8'); encoding = 'utf-8'; }
-      else { content = buf.toString('base64'); encoding = 'base64'; }
-      return { path: rel, content, encoding, gitSha: getGitBlobSha(buf) };
-    } catch { return null; }
-  }).filter(Boolean);
-
-  const changedMetas = fileMetas.filter(meta => remoteShaByPath.get(meta.path) !== meta.gitSha);
-  console.log(`\nCreating ${changedMetas.length} changed blobs in parallel (batch size ${CONCURRENCY})...`);
-
-  const treeItems = [];
-  const failures = [];
-  await processInBatches(changedMetas, CONCURRENCY, async (meta) => {
-    try {
-      const sha = await createBlob(meta.content, meta.encoding);
-      treeItems.push({ path: meta.path, mode: '100644', type: 'blob', sha });
-    } catch (e) {
-      console.warn(`  SKIP: ${meta.path} — ${e.message.slice(0, 200)}`);
-      failures.push({ path: meta.path, message: e.message });
-    }
-  });
-
-  if (failures.length > 0) {
-    console.error(`\n${failures.length} file(s) failed to upload after retries — aborting to avoid pushing a half-broken tree:`);
-    for (const f of failures.slice(0, 20)) console.error(`  - ${f.path}`);
-    if (failures.length > 20) console.error(`  ... and ${failures.length - 20} more`);
-    process.exit(1);
-  }
-
-  const remotePaths = remoteTree.map(entry => entry.path);
-  const localPaths = new Set(fileMetas.map(meta => meta.path));
-  const deletionItems = remotePaths
-    .filter(path => !localPaths.has(path) && !isExcludedRelativePath(path))
-    .map(path => ({ path, mode: '100644', type: 'blob', sha: null }));
-
-  if (deletionItems.length > 0) {
-    console.log(`Found ${deletionItems.length} deleted managed file(s) to remove from GitHub:`);
-    for (const item of deletionItems.slice(0, 20)) console.log(`  DELETE: ${item.path}`);
-    if (deletionItems.length > 20) console.log(`  ... and ${deletionItems.length - 20} more`);
-  } else {
-    console.log('No deleted managed files found.');
-  }
-
-  if (treeItems.length === 0 && deletionItems.length === 0) {
-    console.log('\nRemote tree already matches the workspace; no commit needed.');
-    return;
-  }
-
-  // GitHub's tree API times out on huge replacement trees (~400+ entries).
-  // Build the tree incrementally in chunks, each layered on top of the
-  // previous tree via base_tree. Deletion entries use sha: null; excluded
-  // paths are intentionally left untouched.
-  let currentTreeSha = baseCommit.tree.sha;
-  const TREE_CHUNK = 100;
-  const syncItems = [...treeItems, ...deletionItems];
-  console.log(`Layering ${syncItems.length} additions/updates/deletions in chunks of ${TREE_CHUNK}...`);
-  for (let i = 0; i < syncItems.length; i += TREE_CHUNK) {
-    const chunk = syncItems.slice(i, i + TREE_CHUNK);
-    const layered = await ghFetch(`/repos/${OWNER}/${REPO}/git/trees`, 'POST', {
-      base_tree: currentTreeSha,
-      tree: chunk,
-    });
-    currentTreeSha = layered.sha;
-    console.log(`  Layered ${Math.min(i + TREE_CHUNK, syncItems.length)}/${syncItems.length}`);
-  }
-  const newTree = { sha: currentTreeSha };
-
-  console.log('Committing...');
-  const newCommit = await ghFetch(`/repos/${OWNER}/${REPO}/git/commits`, 'POST', {
-    message: `chore: sync Replit workspace — v${version} (versionCode ${versionCode}) — ${new Date().toISOString()}`,
-    tree: newTree.sha,
-    parents: [latestSha],
-  });
-
-  console.log('Updating branch ref...');
-  await ghFetch(`/repos/${OWNER}/${REPO}/git/refs/heads/${BRANCH}`, 'PATCH', {
-    sha: newCommit.sha,
-    force: false,
-  });
-
-  console.log('\nSuccess!');
-  console.log(`Repo:  https://github.com/${OWNER}/${REPO}`);
+show_sync_preview() {
+  local target="$1"
+  log "Workspace: $ROOT"
+  log "Remote:   $REMOTE ($target)"
+  log "Branch:   $BRANCH"
+  log
+  git -C "$ROOT" status --short
+  log
+  log "A normal sync stages all unignored workspace changes with git add -A."
+  log "The target branch is then replaced with the resulting local commit tree."
+  log "Files absent from this workspace are removed from the target branch."
 }
 
-run().catch(err => { console.error('FATAL:', err.message); process.exit(1); });
+github_token() {
+  if [[ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]]; then
+    printf '%s\n' "$GITHUB_PERSONAL_ACCESS_TOKEN"
+    return 0
+  fi
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    printf '%s\n' "$GITHUB_TOKEN"
+    return 0
+  fi
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    printf '%s\n' "$GH_TOKEN"
+    return 0
+  fi
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    gh auth token
+    return 0
+  fi
+  return 1
+}
+
+git_remote_command() {
+  local url token
+  url="$(remote_url)"
+  case "$url" in
+    https://github.com/*|http://github.com/*)
+      token="$(github_token)" \
+        || die "No GitHub token available for HTTPS sync. Set GITHUB_PERSONAL_ACCESS_TOKEN, GITHUB_TOKEN, GH_TOKEN, or authenticate gh."
+      # The header is passed only to this Git process and is never printed.
+      git -C "$ROOT" -c "http.extraHeader=Authorization: Bearer $token" "$@"
+      ;;
+    *)
+      git -C "$ROOT" "$@"
+      ;;
+  esac
+}
+
+sync_workspace() {
+  local url target remote_sha
+  url="$(remote_url)"
+  target="$(github_repo_from_url "$url")"
+
+  if [[ -z "$BRANCH" ]]; then
+    BRANCH="$(current_branch)"
+  fi
+  [[ -n "$BRANCH" ]] || die "Detached HEAD: pass --branch NAME explicitly."
+
+  show_sync_preview "$target"
+  if (( DRY_RUN )); then
+    log
+    log "Dry run complete. No files were staged, committed, or pushed."
+    return 0
+  fi
+
+  case "$url" in
+    https://github.com/*|http://github.com/*)
+      github_token >/dev/null \
+        || die "No GitHub token available for HTTPS sync. Set GITHUB_PERSONAL_ACCESS_TOKEN, GITHUB_TOKEN, GH_TOKEN, or authenticate gh."
+      ;;
+  esac
+
+  confirm_text "SYNC $target/$BRANCH"
+
+  log
+  log "Staging the workspace..."
+  git -C "$ROOT" add -A -- .
+
+  if git -C "$ROOT" diff --cached --quiet; then
+    log "No local file changes need a commit."
+  else
+    log "Creating commit..."
+    git -C "$ROOT" commit -m "$COMMIT_MESSAGE"
+  fi
+
+  log "Refreshing the remote branch lease..."
+  git_remote_command fetch --prune "$REMOTE" "$BRANCH"
+
+  if remote_sha="$(git -C "$ROOT" rev-parse --verify "$REMOTE/$BRANCH" 2>/dev/null)"; then
+    log "Pushing with force-with-lease; remote-only files will be removed."
+    git_remote_command push \
+      "--force-with-lease=refs/heads/$BRANCH:$remote_sha" \
+      "$REMOTE" "HEAD:refs/heads/$BRANCH"
+  else
+    log "Remote branch does not exist; creating it from the workspace."
+    git_remote_command push "$REMOTE" "HEAD:refs/heads/$BRANCH"
+  fi
+
+  log
+  log "Workspace sync completed: https://github.com/$target/tree/$BRANCH"
+}
+
+delete_remote_repository() {
+  local url target token http_code response_file
+  [[ -n "$CONFIRM_DELETE" ]] \
+    || die "--confirm-delete OWNER/REPO is required for repository deletion."
+  [[ "$CONFIRM_DELETE" != */* || "$CONFIRM_DELETE" == */*/* ]] \
+    && die "--confirm-delete must be exactly OWNER/REPO."
+
+  url="$(remote_url)"
+  target="$(github_repo_from_url "$url")"
+  [[ "$CONFIRM_DELETE" == "$target" ]] \
+    || die "Confirmation '$CONFIRM_DELETE' does not match remote repository '$target'."
+
+  confirm_text "DELETE $target"
+  require_command curl
+  token="$(github_token)" \
+    || die "No GitHub token available. Set GITHUB_TOKEN/GH_TOKEN or authenticate gh."
+
+  response_file="$(mktemp)"
+  trap 'rm -f "$response_file"' RETURN
+
+  log "Deleting GitHub repository $target..."
+  http_code="$(
+    curl --silent --show-error \
+      --output "$response_file" \
+      --write-out '%{http_code}' \
+      --request DELETE \
+      --header "Accept: application/vnd.github+json" \
+      --header "Authorization: Bearer $token" \
+      --header "X-GitHub-Api-Version: 2022-11-28" \
+      "https://api.github.com/repos/$target"
+  )"
+
+  if [[ "$http_code" != "204" ]]; then
+    log "GitHub returned HTTP $http_code:"
+    sed -n '1,8p' "$response_file" >&2
+    return 1
+  fi
+  log "GitHub repository deleted: $target"
+}
+
+while (($#)); do
+  case "$1" in
+    --sync)
+      [[ -z "$MODE" ]] || die "Choose only one operation."
+      MODE="sync"
+      ;;
+    --delete-remote-repo)
+      [[ -z "$MODE" ]] || die "Choose only one operation."
+      MODE="delete"
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      ;;
+    --yes)
+      YES=1
+      ;;
+    --remote)
+      (($# >= 2)) || die "--remote requires a value."
+      REMOTE="$2"
+      shift
+      ;;
+    --branch)
+      (($# >= 2)) || die "--branch requires a value."
+      BRANCH="$2"
+      shift
+      ;;
+    --message)
+      (($# >= 2)) || die "--message requires a value."
+      COMMIT_MESSAGE="$2"
+      shift
+      ;;
+    --confirm-delete)
+      (($# >= 2)) || die "--confirm-delete requires OWNER/REPO."
+      CONFIRM_DELETE="$2"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      die "Unknown option: $1 (use --help)"
+      ;;
+  esac
+  shift
+done
+
+[[ -n "$MODE" ]] || {
+  usage
+  exit 2
+}
+
+if (( DRY_RUN )) && [[ "$MODE" != "sync" ]]; then
+  die "--dry-run is only available with --sync."
+fi
+
+if [[ "$MODE" == "delete" ]] && (( ! YES )); then
+  die "Repository deletion requires --yes in addition to exact confirmation."
+fi
+
+repo_root_check
+
+case "$MODE" in
+  sync)
+    sync_workspace
+    ;;
+  delete)
+    delete_remote_repository
+    ;;
+esac

@@ -42,6 +42,22 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 _Populate as you build — sharp edges, "always run X before Y" rules._
 
+## GitHub workspace sync
+
+- `bash github_push.sh --dry-run --sync` — inspect the workspace sync without
+  staging, committing, or contacting GitHub.
+- `bash github_push.sh --sync --yes` — commit local changes and mirror the
+  workspace to the configured GitHub branch. Remote-only files on that branch
+  are removed.
+- `bash github_push.sh --delete-remote-repo --confirm-delete OWNER/REPO --yes`
+  — permanently delete the entire GitHub repository. Use only when that
+  destructive action is intentional.
+
+The sync uses the existing `origin` remote and current branch by default.
+HTTPS sync and repository deletion use `GITHUB_PERSONAL_ACCESS_TOKEN`,
+`GITHUB_TOKEN`, `GH_TOKEN`, or an authenticated `gh` CLI session. The workflow
+is manual and is not auto-started.
+
 ## Pointers
 
 - See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
