@@ -1,7 +1,9 @@
 import unittest
 import xml.etree.ElementTree as ET
+from unittest.mock import patch
 
 from android_automation import (
+    AndroidAutomation,
     SCREENSHOT_REFERENCES,
     classify_screen,
     node_is_actionable,
@@ -56,6 +58,18 @@ class AndroidParsingTests(unittest.TestCase):
             )
         )
         self.assertFalse(node_is_actionable(ui_node(enabled="false")))
+
+    def test_press_key_uses_adb_keyevent_command(self):
+        automation = AndroidAutomation()
+        automation.last_adb_ok = True
+
+        with patch.object(automation, "run_adb") as run_adb:
+            self.assertTrue(automation.press_key(66))
+
+        run_adb.assert_called_once_with(
+            ["shell", "input", "keyevent", "66"],
+            wait=0.1,
+        )
 
 
 class AndroidScreenClassificationTests(unittest.TestCase):

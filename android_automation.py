@@ -268,7 +268,7 @@ class AndroidAutomation:
         return self.last_adb_ok
 
     def press_key(self, key_code: int) -> bool:
-        self.run_adb(["shell", "input", str(key_code)], wait=0.1)
+        self.run_adb(["shell", "input", "keyevent", str(key_code)], wait=0.1)
         return self.last_adb_ok
 
     def hide_keyboard(self) -> bool:

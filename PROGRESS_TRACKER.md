@@ -502,3 +502,16 @@ Add one entry after each meaningful session:
 - Blockers: no Android run has been authorized in this session.
 - Next action: during the authorized Android smoke test, verify that
   `com.replit.app` launches and is the foreground package before transitions.
+
+### 2026-09-22 — Android input command correction
+- Completed: corrected key injection to use ADB's required
+  `shell input keyevent <code>` form; text injection continues to use
+  `shell input text`.
+- Evidence: the new command-shape test and the combined 36-test offline suite
+  pass; preflight, compilation, and `git diff --check` pass. No device was
+  queried or modified.
+- Still open: live verification of keyboard visibility, field focus, text
+  entry, and key-event behavior on the operator's device.
+- Blockers: no Android run has been authorized in this session.
+- Next action: verify email/password entry on the real device during the
+  authorized Android smoke test.
