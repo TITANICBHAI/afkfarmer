@@ -10,8 +10,7 @@ evasion, or third-party mailbox interception.
 
 ## Canonical project layout
 
-The current uploaded source names contain timestamps, while the code imports
-canonical names. The implementation should normalize them to:
+The active source files now use the canonical names expected by their imports:
 
 ```text
 config.py
@@ -26,8 +25,7 @@ ui.xml                     # failure evidence
 screenshots/               # failure evidence
 ```
 
-`main_2_1790062721028.py` is a duplicate orchestrator and must not remain on
-the active import path.
+Any duplicate orchestrator must remain outside the active import path.
 
 ## Module contracts
 
@@ -112,10 +110,9 @@ The supplied flow is visual and begins at `temp-mail.org`. The implementation
 must wait for the visible address, capture it, and confirm that the Copy action
 produced the same value. Do not continue from a loading placeholder.
 
-The current orchestrator instead calls the 1secmail API in
-`main_1790062721030.py`. That is a contract mismatch, not an implementation
-detail. Keep provider-specific behavior behind an adapter and make the selected
-provider explicit.
+The current orchestrator instead calls the 1secmail API in `main.py`. That is a
+contract mismatch, not an implementation detail. Keep provider-specific
+behavior behind an adapter and make the selected provider explicit.
 
 ### Replit registration
 

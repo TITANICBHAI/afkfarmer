@@ -36,9 +36,9 @@ Implement the exact flow in `CORE_FLOW.md`:
 
 ## Required engineering work
 
-1. Normalize the timestamped Python files to the canonical imports:
+1. Keep the Python modules under the canonical imports:
    `config.py`, `android_automation.py`, `pc_automation.py`, and `main.py`.
-2. Keep the duplicate `main_2` implementation out of the runtime path.
+2. Keep any duplicate orchestrator out of the runtime path.
 3. Use Playwright locator waits and explicit postconditions instead of fixed
    sleeps as readiness checks.
 4. Use Android UI Automator text, content descriptions, resource IDs, and live

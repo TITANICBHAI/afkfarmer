@@ -22,10 +22,10 @@ onboarding, profile, logout, and app-close states.
 
 ## Current state
 
-The uploaded Python files are present at the project root with timestamped
-names. Their imports currently expect canonical names such as `config.py` and
-`android_automation.py`; filename normalization is the first implementation
-step and has not been applied yet.
+The active Python files are now present at the project root with canonical
+names: `config.py`, `android_automation.py`, `pc_automation.py`, and `main.py`.
+The code behavior still needs the state-driven refactor described in the
+implementation documents.
 
 The project is documentation-first at this point. The automation code has not
 been refactored or executed as part of this planning pass.

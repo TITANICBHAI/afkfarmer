@@ -2,9 +2,10 @@
 
 ## Status
 
-This is the design and planning baseline for the onboarding-flow automation. The
-Python files have not been refactored yet. `CORE_FLOW.md` is the source copy of
-the flow supplied by the user.
+This is the design and planning baseline for the onboarding-flow automation.
+`CORE_FLOW.md` is the source copy of the flow supplied by the user. The active
+Python files now use their canonical names; behavior refactoring is still
+pending.
 
 ## Decisions
 
@@ -28,12 +29,11 @@ the flow supplied by the user.
 
 ## Phase 0 — Normalize the repository
 
-- Rename the timestamped source files to the canonical module names expected by
+- Keep the active source files under the canonical module names expected by
   their imports: `config.py`, `android_automation.py`, `pc_automation.py`, and
   `main.py`.
-- Keep the duplicate `main_2` implementation outside the runtime path as an
-  archived reference; do not let two orchestrators compete for the same state
-  file.
+- Keep any duplicate orchestrator outside the runtime path as an archived
+  reference; do not let two orchestrators compete for the same state file.
 - Place the runtime requirements at the root as `requirements.txt`.
 - Add a small `--dry-run` or inspection mode that verifies imports and config
   without opening a browser or touching a device.
