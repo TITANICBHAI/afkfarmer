@@ -269,6 +269,39 @@ class PcAutomationMockTests(unittest.TestCase):
 
         save_failure.assert_called_once_with("session_sync_timeout")
 
+    def test_close_browser_does_not_raise_when_managed_browser_is_already_gone(self):
+        automation = PCAutomation("mail@example.test", "password")
+        browser = Mock()
+        browser.is_connected.return_value = True
+        browser.close.side_effect = RuntimeError("Target page already closed")
+        playwright = Mock()
+        automation.browser = browser
+        automation.playwright = playwright
+        automation._owns_browser = True
+
+        with patch.object(automation, "save_state"):
+            automation.close_browser()
+
+        browser.close.assert_called_once()
+        playwright.stop.assert_called_once()
+        self.assertIsNone(automation.browser)
+        self.assertIsNone(automation.playwright)
+
+    def test_close_browser_never_closes_an_attached_browser(self):
+        automation = PCAutomation("mail@example.test", "password")
+        browser = Mock()
+        playwright = Mock()
+        automation.browser = browser
+        automation.playwright = playwright
+        automation._attached_to_browser = True
+        automation._owns_browser = False
+
+        with patch.object(automation, "save_state"):
+            automation.close_browser()
+
+        browser.close.assert_not_called()
+        playwright.stop.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

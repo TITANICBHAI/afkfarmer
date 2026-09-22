@@ -825,6 +825,32 @@ class PCAutomation:
         if self.context:
             self.save_state()
         if self.browser and self._owns_browser:
-            self.browser.close()
+            try:
+                is_connected = getattr(self.browser, "is_connected", None)
+                if callable(is_connected) and not is_connected():
+                    self.log(
+                        "ℹ️ Managed browser was already closed; skipping shutdown.",
+                        Fore.YELLOW,
+                    )
+                else:
+                    self.browser.close()
+            except Exception as exc:
+                # A page or browser can disappear while a failed stage is
+                # being abandoned. Cleanup must not turn that into a second
+                # traceback or hide the original stage failure.
+                self.log(
+                    f"ℹ️ Browser was already unavailable during shutdown ({exc}).",
+                    Fore.YELLOW,
+                )
         if self.playwright:
-            self.playwright.stop()
+            try:
+                self.playwright.stop()
+            except Exception as exc:
+                self.log(
+                    f"ℹ️ Playwright was already stopped during shutdown ({exc}).",
+                    Fore.YELLOW,
+                )
+        self.page = None
+        self.context = None
+        self.browser = None
+        self.playwright = None
