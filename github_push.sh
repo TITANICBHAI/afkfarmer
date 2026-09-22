@@ -27,12 +27,15 @@ usage() {
   cat <<'EOF'
 Usage:
   bash github_push.sh --sync [--yes] [--dry-run]
+  bash github_push.sh --check-auth
   bash github_push.sh --delete-remote-repo --confirm-delete OWNER/REPO --yes
   bash github_push.sh --help
 
 Options:
   --sync                    Stage and push the workspace to the GitHub branch.
                             Remote-only files are deleted from that branch.
+  --check-auth              Verify the configured token can read the remote
+                            without staging, committing, or pushing anything.
   --dry-run                 Show the local changes without changing Git state
                             or contacting GitHub.
   --delete-remote-repo      Permanently delete the entire GitHub repository.
@@ -189,14 +192,24 @@ commit_with_identity() {
 }
 
 git_remote_command() {
-  local url token
+  local url token encoded_token
   url="$(remote_url)"
   case "$url" in
     https://github.com/*|http://github.com/*)
       token="$(github_token)" \
         || die "No GitHub token available for HTTPS sync. Set GITHUB_PERSONAL_ACCESS_TOKEN, GITHUB_TOKEN, GH_TOKEN, or authenticate gh."
-      # The header is passed only to this Git process and is never printed.
-      git -C "$ROOT" -c "http.extraHeader=Authorization: Bearer $token" "$@"
+      require_command base64
+      encoded_token="$(
+        printf 'x-access-token:%s' "$token" | base64 | tr -d '\r\n'
+      )"
+      # GitHub's Git HTTPS endpoint expects Basic auth with the token as the
+      # password. Disable askpass so an invalid token fails directly instead
+      # of prompting and potentially hanging the workflow.
+      git -C "$ROOT" \
+        -c "credential.helper=" \
+        -c "core.askPass=" \
+        -c "http.extraHeader=Authorization: Basic $encoded_token" \
+        "$@"
       ;;
     *)
       git -C "$ROOT" "$@"
@@ -257,6 +270,26 @@ sync_workspace() {
   log "Workspace sync completed: https://github.com/$target/tree/$BRANCH"
 }
 
+check_auth() {
+  local url target
+  url="$(remote_url)"
+  target="$(github_repo_from_url "$url")"
+
+  case "$url" in
+    https://github.com/*|http://github.com/*)
+      github_token >/dev/null \
+        || die "No GitHub token available for HTTPS auth check. Set GITHUB_PERSONAL_ACCESS_TOKEN, GITHUB_TOKEN, GH_TOKEN, or authenticate gh."
+      ;;
+  esac
+
+  log "Checking GitHub authentication for $target..."
+  if git_remote_command ls-remote "$REMOTE" HEAD >/dev/null; then
+    log "GitHub authentication succeeded. No files were staged, committed, or pushed."
+  else
+    die "GitHub authentication failed for $target. The token may be invalid, expired, or missing repository permission."
+  fi
+}
+
 delete_remote_repository() {
   local url target token http_code response_file
   [[ -n "$CONFIRM_DELETE" ]] \
@@ -302,6 +335,10 @@ while (($#)); do
     --sync)
       [[ -z "$MODE" ]] || die "Choose only one operation."
       MODE="sync"
+      ;;
+    --check-auth)
+      [[ -z "$MODE" ]] || die "Choose only one operation."
+      MODE="auth"
       ;;
     --delete-remote-repo)
       [[ -z "$MODE" ]] || die "Choose only one operation."
@@ -362,6 +399,9 @@ repo_root_check
 case "$MODE" in
   sync)
     sync_workspace
+    ;;
+  auth)
+    check_auth
     ;;
   delete)
     delete_remote_repository
