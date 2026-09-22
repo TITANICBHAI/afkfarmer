@@ -15,11 +15,10 @@ This tracker is mandatory for every agent working on this repository.
 ## Current status
 
 - **Current phase:** Phase 5 — PC resume and GitHub import
-  (offline behavior hardened; live evidence remains)
+  (session synchronization verified offline; live evidence remains)
 - **Overall verdict:** Not ready for a real end-to-end run
-- **Next action:** Perform live PC/Android smoke tests only with explicit
-  operator authorization; run a deliberate GitHub sync only when branch
-  replacement is intended
+- **Next action:** Continue with browser-context resume/login and GitHub import
+  verification; live runs still require explicit operator authorization
 - **Last updated:** 2026-09-22
 - **Blockers:** No Android device run has been authorized or performed. The PC
   runtime wrapper can launch Playwright, but the live `temp-mail.org` page
@@ -187,7 +186,13 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Phase 5 — PC resume and GitHub import
 
-- [ ] Wait for session synchronization after Android completion.
+- [x] Wait for session synchronization after Android completion.
+  - Evidence: `PCAutomation.wait_for_session_sync()` performs bounded reload
+    probes and returns only observed `authenticated` or `login_required` states;
+    unknown/timeout saves tagged evidence and does not advance the stage.
+    `python -m unittest -v test_pc_automation.py test_main.py test_temp_mail.py
+    test_pc_flow.py test_android_automation.py test_github_push.py` passed all
+    35 tests; `python preflight.py`, compilation, and `git diff --check` passed.
 - [ ] Reload the browser context and verify the logged-in state.
 - [ ] Log in only when required and verify the result.
 - [ ] Require or safely collect the operator's GitHub repository URL.
@@ -456,3 +461,18 @@ Add one entry after each meaningful session:
 - Next action: review the updated script, then explicitly authorize a real
   GitHub sync if replacing the remote `main` branch is intended; otherwise
   continue with offline work.
+
+### 2026-09-22 — PC session synchronization
+- Completed: added a bounded, reload-based session synchronization probe after
+  Android completion; the PC stage now fails closed unless authenticated or
+  login-required state is observed.
+- Evidence: focused and combined offline suite passed 35 tests; `python
+  preflight.py`, Python compilation, and `git diff --check` passed. The
+  environment dependencies were restored through the managed package flow and
+  `requirements.txt` was normalized back to its three pinned entries.
+- Still open: browser-context login/import live evidence, Android evidence, and
+  the remaining Phase 5/6 live checks.
+- Blockers: `temp-mail.org` blocks the workspace browser with Cloudflare, and
+  no Android or real account run has been authorized.
+- Next action: adapt/verify the remaining PC resume and GitHub import flow in a
+  permitted environment; do not start Android without explicit confirmation.

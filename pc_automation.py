@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 from typing import Optional
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -215,6 +216,61 @@ class PCAutomation:
         except PlaywrightTimeoutError:
             return False
         return classify_session_state(self.page.url, self._page_text()) == "authenticated"
+
+    def wait_for_session_sync(self, timeout=30_000, poll_interval=1_000) -> str:
+        """Reload until the post-Android browser state is observable.
+
+        Android completion can be ahead of the browser's current document. Each
+        probe performs a real reload and classifies the resulting page. Only an
+        authenticated or login-required state ends the wait; an unknown page
+        remains a failure and never advances the stage.
+        """
+
+        if self.page is None:
+            return "unknown"
+
+        deadline = time.monotonic() + (timeout / 1_000)
+        attempted = False
+        last_state = "unknown"
+
+        while not attempted or time.monotonic() < deadline:
+            attempted = True
+            remaining_ms = max(
+                1,
+                int((deadline - time.monotonic()) * 1_000),
+            )
+            try:
+                self.page.reload(
+                    wait_until="domcontentloaded",
+                    timeout=remaining_ms,
+                )
+                try:
+                    self.page.wait_for_load_state(
+                        "networkidle",
+                        timeout=min(remaining_ms, 5_000),
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+                last_state = classify_session_state(
+                    self.page.url,
+                    self._page_text(),
+                )
+                if last_state in {"authenticated", "login_required"}:
+                    return last_state
+            except PlaywrightTimeoutError:
+                last_state = "unknown"
+            except Exception:
+                self._save_failure("session_sync_probe_failed")
+                return "unknown"
+
+            if time.monotonic() >= deadline:
+                break
+            self.page.wait_for_timeout(
+                min(poll_interval, max(1, int((deadline - time.monotonic()) * 1_000)))
+            )
+
+        self._save_failure("session_sync_timeout")
+        return "unknown"
 
     def _save_failure(self, tag: str) -> None:
         try:

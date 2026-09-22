@@ -198,11 +198,14 @@ class ReplitAutomationOrchestrator:
         self.log("💻 STAGE 5/6: PC Login After Mobile Onboarding", Fore.MAGENTA)
         self.log("=" * 60, Fore.MAGENTA)
         self._ensure_browser()
-        self.log("\n⏳ Waiting for session sync, then refreshing the browser...", Fore.CYAN)
-        try:
-            self.pc.page.reload(wait_until="domcontentloaded")
-        except Exception:
-            self.log("❌ Browser reload failed before PC login.", Fore.RED)
+        self.log("\n⏳ Waiting for Android session synchronization...", Fore.CYAN)
+        session_state = self.pc.wait_for_session_sync()
+        if session_state == "unknown":
+            self.log(
+                "❌ Browser did not expose an authenticated or login-required state "
+                "after synchronization probes.",
+                Fore.RED,
+            )
             return False
         return bool(self.pc.login_after_mobile())
 

@@ -63,6 +63,36 @@ class FakePage:
         self.screenshot_paths.append(path)
 
 
+class SessionSyncPage:
+    def __init__(self, states):
+        self.states = list(states)
+        self.url = "https://replit.com/"
+        self.body_text = ""
+        self.reload_count = 0
+        self.waits = []
+        self.screenshot_paths = []
+
+    def reload(self, wait_until=None, timeout=0):
+        self.reload_count += 1
+        self.url, self.body_text = self.states.pop(0)
+
+    def wait_for_load_state(self, state, timeout=0):
+        self.waits.append((state, timeout))
+
+    def wait_for_timeout(self, timeout):
+        self.waits.append(("poll", timeout))
+
+    def locator(self, selector):
+        if selector == "body":
+            body = FakeLocator(self)
+            body.inner_text = lambda: self.body_text
+            return body
+        return FakeLocator(self, visible=False)
+
+    def screenshot(self, path):
+        self.screenshot_paths.append(path)
+
+
 class SignupPage(FakePage):
     def __init__(self, body_text="Check your inbox for the verification email"):
         super().__init__(chat_visible=False)
@@ -159,6 +189,36 @@ class PcAutomationMockTests(unittest.TestCase):
             self.assertFalse(automation.create_account())
 
         save_failure.assert_called_once_with("signup_validation_before_submit")
+
+    def test_session_sync_reloads_until_authenticated_state_is_observed(self):
+        page = SessionSyncPage(
+            [
+                ("https://replit.com/", "Loading workspace"),
+                ("https://replit.com/~/home", "Personal workspace"),
+            ]
+        )
+        automation = self.make_automation(page)
+
+        self.assertEqual(
+            automation.wait_for_session_sync(timeout=5_000, poll_interval=1),
+            "authenticated",
+        )
+        self.assertEqual(page.reload_count, 2)
+        self.assertIn("poll", [kind for kind, _timeout in page.waits])
+
+    def test_session_sync_timeout_remains_unknown_and_saves_evidence(self):
+        page = SessionSyncPage(
+            [("https://replit.com/", "Still loading")]
+        )
+        automation = self.make_automation(page)
+
+        with patch.object(automation, "_save_failure") as save_failure:
+            self.assertEqual(
+                automation.wait_for_session_sync(timeout=0),
+                "unknown",
+            )
+
+        save_failure.assert_called_once_with("session_sync_timeout")
 
 
 if __name__ == "__main__":
