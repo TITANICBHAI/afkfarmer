@@ -28,20 +28,20 @@ the current source of truth.
 
 ## Current state
 
-The active Python files are now present at the project root with canonical
-names: `config.py`, `android_automation.py`, `pc_automation.py`, and `main.py`.
-The code behavior still needs the state-driven refactor described in the
-implementation documents.
+The active Python files are present at the project root with canonical names:
+`config.py`, `temp_mail.py`, `android_automation.py`, `pc_automation.py`, and
+`main.py`.
 
-The first PC provider implementation is now in `temp_mail.py`. It is wired to
-`PCAutomation` and requires proof that the visible mailbox address was copied.
-The workspace browser launched successfully during live testing, but
-`temp-mail.org` returned a Cloudflare block page before an address was
-available.
+The state-driven offline implementation is verified, including atomic
+checkpoints, PC registration classification, Android UI-state transitions,
+session synchronization after Android completion, and safe GitHub-import
+failure handling. The combined offline test suite passes 35 tests.
 
-The repository setup is complete, but the automation code has not been
-refactored or executed against a real browser or Android device. The pinned
-dependencies are now available at the root as `requirements.txt`.
+Live mailbox, Replit registration, Android-device, PC-resume, GitHub-import,
+and complete end-to-end evidence remain open. The workspace browser previously
+reached `temp-mail.org`, but the provider returned a Cloudflare block page
+before an address was available. The automation does not bypass provider,
+CAPTCHA, or anti-bot protections.
 
 Every new agent must read `PROGRESS_TRACKER.md` before editing and tick items
 only after completing and verifying them.
@@ -96,6 +96,197 @@ bash run_pc_automation.sh
 
 The wrapper uses Microsoft Edge when available and otherwise uses the
 workspace Chromium binary. Provider-side Cloudflare blocks are not bypassed.
+
+## Windows 10 usage
+
+The Python automation can be run from Windows 10, but the Linux shell wrappers
+are not Windows commands:
+
+- `run_pc_automation.sh` is for the Replit/Linux environment.
+- `github_push.sh` requires Git Bash or WSL on Windows and is separate from the
+  main onboarding flow.
+
+Use **Command Prompt** or PowerShell from the project directory. The commands
+below use Command Prompt syntax.
+
+### 1. Check Python
+
+Use Python 3.9 or newer; Python 3.11 is recommended:
+
+```cmd
+python --version
+```
+
+If `python` is not available, use `py` in the commands below instead.
+
+### 2. Install Python dependencies
+
+Run this once:
+
+```cmd
+python -m pip install -r requirements.txt
+```
+
+### 3. Configure Microsoft Edge
+
+The automation can use the installed Microsoft Edge executable. In Command
+Prompt, set the path for the current terminal window:
+
+```cmd
+set "PLAYWRIGHT_EXECUTABLE_PATH=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
+
+If Edge is installed under `C:\Program Files`, use:
+
+```cmd
+set "PLAYWRIGHT_EXECUTABLE_PATH=C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+```
+
+Check the configured path:
+
+```cmd
+if exist "%PLAYWRIGHT_EXECUTABLE_PATH%" (echo Edge found) else (echo Edge NOT found)
+```
+
+The `set` command applies only to the current Command Prompt window. To save
+the value for future terminals:
+
+```cmd
+setx PLAYWRIGHT_EXECUTABLE_PATH "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
+
+After using `setx`, close and reopen Command Prompt.
+
+PowerShell uses different syntax. If you are in PowerShell, use:
+
+```powershell
+$env:PLAYWRIGHT_EXECUTABLE_PATH = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
+
+Do not use the `$env:` form in Command Prompt. A prompt such as
+`C:\Users\YourName\project>` indicates Command Prompt.
+
+### 4. Add ADB to PATH
+
+Android Platform Tools must be installed and the folder containing `adb.exe`
+must be on PATH. A typical Android SDK path is:
+
+```text
+C:\Users\<your-user>\Documents\Android\SDK\platform-tools
+```
+
+For the current Command Prompt window:
+
+```cmd
+set "PATH=C:\Users\<your-user>\Documents\Android\SDK\platform-tools;%PATH%"
+```
+
+Replace `<your-user>` with the Windows account name. Then verify:
+
+```cmd
+where adb
+adb version
+adb devices
+```
+
+The phone should appear in the `adb devices` output. If it shows
+`unauthorized`, unlock the phone and accept the USB debugging authorization
+prompt.
+
+To add the folder permanently, use:
+
+1. Press `Win + R`.
+2. Enter `sysdm.cpl`.
+3. Open **Advanced** → **Environment Variables**.
+4. Under the user variables, select `Path` → **Edit** → **New**.
+5. Add the folder containing `adb.exe`.
+6. Confirm all dialogs and open a new terminal.
+
+### 5. Review configuration
+
+Open `config.py` and review:
+
+```python
+REPLIT_PASSWORD = "12345678"
+ANDROID_DEVICE_ID = None
+GITHUB_REPO_URL = ""
+```
+
+Change the sample password before a real run. Leave
+`ANDROID_DEVICE_ID = None` when one Android device is connected. If multiple
+devices are connected, set it to the serial returned by `adb devices`.
+
+Leave `GITHUB_REPO_URL` empty to be prompted during the run, or set it to the
+operator's repository URL.
+
+### 6. Run the safe preflight check
+
+This checks source syntax, configuration, Python dependencies, and ADB without
+opening Edge or launching the Android app:
+
+```cmd
+python preflight.py
+```
+
+### 7. Start the automation
+
+Keep the Edge and ADB environment variables configured in the same terminal,
+then run:
+
+```cmd
+python main.py
+```
+
+The process opens a visible browser, obtains the mailbox address, opens the
+Replit registration flow, pauses for manual CAPTCHA handling when necessary,
+verifies the mailbox message, controls the Replit Android app, resumes the PC
+session, and attempts the visible GitHub import flow.
+
+There is no separate desktop GUI. The user interface is the visible Edge
+window, the real Android app, and the interactive terminal prompts.
+
+### 8. Recovery and terminal choices
+
+When a stage fails, the terminal offers:
+
+```text
+[r]etry / [m]anual takeover / [s]kip / [q]uit
+```
+
+- `r` retries the failed stage.
+- `m` records that the operator completed the step manually and advances.
+- `s` records an intentional skip and advances; use sparingly.
+- `q` stops without advancing the failed stage.
+
+Press `Ctrl+C` to stop while preserving the checkpoint. Rerun:
+
+```cmd
+python main.py
+```
+
+and choose to resume when prompted. The checkpoint means the next stage to
+run, so a later-stage resume does not recreate the account.
+
+To deliberately start a fresh run, remove the saved state and browser session:
+
+```cmd
+del state.json 2>nul
+del auth_state.json 2>nul
+```
+
+Only do this intentionally; it removes the ability to resume the saved run.
+
+### Windows safety and readiness
+
+Before a real run, confirm that Edge is ready, `adb devices` shows the
+operator-owned unlocked phone, and manual CAPTCHA handling is available. Do not
+run the Android or external-account flow without explicit operator approval.
+
+The current code is ready for local setup and offline checks, but the complete
+live flow is not yet proven. Provider-side Cloudflare blocks, UI changes, login
+errors, device-specific UI hierarchy differences, and delayed verification
+mail remain possible failure points. The automation must stop and record
+evidence instead of bypassing those protections.
 
 ## Runtime artifacts
 

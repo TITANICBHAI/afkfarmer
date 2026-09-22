@@ -476,3 +476,16 @@ Add one entry after each meaningful session:
   no Android or real account run has been authorized.
 - Next action: adapt/verify the remaining PC resume and GitHub import flow in a
   permitted environment; do not start Android without explicit confirmation.
+
+### 2026-09-22 — Windows usage documentation
+- Completed: documented Windows 10 setup and operation in `README.md`,
+  including Command Prompt versus PowerShell syntax, Edge executable
+  configuration, ADB PATH setup and verification, preflight, startup, recovery,
+  checkpoint reset, and the no-GUI behavior.
+- Evidence: `git diff --check` passed after the documentation update.
+- Still open: live browser, Android, PC-resume, GitHub-import, and end-to-end
+  validation.
+- Blockers: live external-account and device execution remains operator-led;
+  the temporary-mail provider may block automated browser access.
+- Next action: use the README procedure for Windows setup, then perform only
+  the explicitly authorized smoke tests.
