@@ -1,0 +1,33 @@
+name: Push selected files to GitHub
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: push-to-github-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # The sync script creates "chore: sync ..." commits through the API.
+    # Do not launch a second sync for those commits.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !startsWith(github.event.head_commit.message, 'chore: sync ')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run GitHub sync
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_PERSONAL_ACCESS_TOKEN }}
+        run: |
+          test -n "$GITHUB_PERSONAL_ACCESS_TOKEN"
+          bash ./github_push.sh
