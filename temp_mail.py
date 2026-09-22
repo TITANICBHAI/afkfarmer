@@ -18,6 +18,12 @@ EMAIL_PATTERN = re.compile(
     r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
     flags=re.IGNORECASE,
 )
+PROVIDER_BLOCK_MARKERS = (
+    "sorry, you have been blocked",
+    "you are unable to access temp-mail.org",
+    "attention required",
+    "cloudflare ray id",
+)
 VERIFICATION_URL_PATTERN = re.compile(
     r"https://(?:[A-Z0-9-]+\.)*replit\.com/action-code(?:[/?#][^\s\"'<>)]*)?",
     flags=re.IGNORECASE,
@@ -34,6 +40,15 @@ def normalize_email(value: Any) -> str:
     if value is None:
         return ""
     return str(value).replace("\u200b", "").strip().lower()
+
+
+def provider_block_reason(value: Any) -> Optional[str]:
+    """Return a stable reason when the provider blocks the browser/IP."""
+
+    text = " ".join(str(value or "").casefold().split())
+    if any(marker in text for marker in PROVIDER_BLOCK_MARKERS):
+        return "provider_blocked"
+    return None
 
 
 def extract_email_candidates(values: list[Any]) -> list[str]:
@@ -209,6 +224,17 @@ class TempMailOrgProvider(TempMailProvider):
             self.open()
 
         try:
+            block_reason = provider_block_reason(self.page.locator("body").inner_text())
+        except Exception:
+            block_reason = None
+        if block_reason:
+            self._save_failure(block_reason)
+            raise TempMailError(
+                "Temporary-mail provider blocked this browser or IP; "
+                "manual takeover or a permitted provider-side resolution is required."
+            )
+
+        try:
             self.page.wait_for_function(
                 """() => {
                     const nodes = Array.from(document.querySelectorAll(
@@ -222,6 +248,18 @@ class TempMailOrgProvider(TempMailProvider):
                 timeout=self.timeout_ms,
             )
         except Exception as exc:
+            try:
+                block_reason = provider_block_reason(
+                    self.page.locator("body").inner_text()
+                )
+            except Exception:
+                block_reason = None
+            if block_reason:
+                self._save_failure(block_reason)
+                raise TempMailError(
+                    "Temporary-mail provider blocked this browser or IP; "
+                    "manual takeover or a permitted provider-side resolution is required."
+                ) from exc
             self._save_failure("address_loading")
             raise TempMailError(
                 "Temporary-mail address did not leave the loading state."

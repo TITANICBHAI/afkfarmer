@@ -14,15 +14,15 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Current status
 
-- **Current phase:** Phase 1 — PC temporary-mail flow, with the Phase 2
-  browser-mail verification implementation in progress
+- **Current phase:** Phase 2 — PC Replit registration and verification
+  implementation, with live mailbox evidence blocked
 - **Overall verdict:** Not ready for a real end-to-end run
-- **Next action:** Run the authorized mailbox smoke test for
-  address/copy/message/success states
+- **Next action:** Use the PC runtime wrapper for any future live run, then
+  rerun live browser checks only if the provider permits the workspace browser
 - **Last updated:** 2026-09-22
-- **Blockers:** No live browser run has been authorized or performed. The
-  next live evidence requires the operator's explicit confirmation and a
-  ready operator-owned browser session.
+- **Blockers:** The runtime wrapper can launch Playwright, but the live
+  `temp-mail.org` page returns a Cloudflare block page. No bypass is permitted,
+  and live address/copy/mailbox evidence remains pending.
 
 ## Phase 0 — Baseline and repository setup
 
@@ -64,10 +64,11 @@ This tracker is mandatory for every agent working on this repository.
     page, reads the address, clicks Copy, and requires proof of the copy.
     Live browser verification remains pending.
 - [ ] Wait for the real mailbox address instead of accepting a loading state.
-  - Implementation is present; live DOM verification is still pending.
+  - Implementation is present; live DOM verification is blocked by the
+    provider's Cloudflare block page in the workspace browser.
 - [ ] Click Copy and verify that the copied value matches the visible address.
-  - Implementation is present; live clipboard/feedback verification is still
-    pending.
+  - Implementation is present; live clipboard/feedback verification is blocked
+    because no mailbox address was available behind the provider block page.
 - [x] Keep the mailbox page and Replit page in the same Playwright context.
   - Evidence: `PCAutomation` creates `TempMailOrgProvider` from its shared
     browser context.
@@ -83,24 +84,35 @@ This tracker is mandatory for every agent working on this repository.
 - [ ] Open Replit and handle the optional Google sign-in popup.
 - [ ] Select Email and fill the address and configured password.
 - [ ] Detect validation errors before submitting.
+  - Offline implementation is present; live verification is blocked by the
+    Replit `libstdc++.so.6` runtime limitation.
 - [ ] Detect CAPTCHA or anti-bot challenges and pause for manual resolution.
+  - Offline implementation is present and remains manual-only; live
+    verification is blocked by the Replit runtime limitation.
 - [ ] Submit the account form and wait for an observed processing/result state.
+  - Offline implementation now requires an observed result classification; live
+    verification is blocked by the Replit runtime limitation.
 - [ ] Find the Replit verification message by sender and subject.
   - Browser implementation is present; controlled live mailbox evidence is
-    still required.
+    blocked because the temporary mailbox could not be opened.
 - [ ] Open the message and follow Verify Email.
   - Browser implementation is present; controlled live mailbox evidence is
-    still required.
+    blocked because the temporary mailbox could not be opened.
 - [ ] Follow Verify Now when present.
   - Browser implementation is present; controlled live mailbox evidence is
-    still required.
+    blocked because the temporary mailbox could not be opened.
 - [ ] Confirm an explicit verification success state.
   - Browser implementation requires an explicit success text; controlled live
-    mailbox evidence is still required.
+    mailbox evidence is blocked because the temporary mailbox could not be
+    opened.
 - [ ] Replace readiness sleeps with Playwright locator/state waits.
 - [x] Add focused tests for message filtering and verification-link validation.
   - Evidence: `python -m unittest -v test_temp_mail.py` passes 4 tests covering
     sender/subject filtering and expected-host URL extraction/validation.
+- [x] Add offline tests for registration validation, CAPTCHA detection, and
+  result classification.
+  - Evidence: `python -m unittest -v test_temp_mail.py test_pc_flow.py` passes
+    7 tests.
 
 ## Phase 3 — Android login and onboarding
 
@@ -248,9 +260,9 @@ Add one entry after each meaningful session:
   password-log scan all passed. No browser or Android flow was started.
 - Still open: all live browser evidence, the remaining registration waits, all
   Android, checkpoint/recovery, GitHub-import, and end-to-end validation items.
-- Blockers: no external run is authorized or performed.
-- Next action: request explicit authorization and a ready operator-owned
-  browser session before the mailbox smoke test; do not start Android yet.
+- Blockers: the authorized live browser attempt was blocked before page launch by
+  `greenlet` failing to load `libstdc++.so.6` in the Replit runtime.
+- Next action: continue offline registration handling; do not start Android.
 
 ### 2026-09-22 — GitHub workspace sync
 - Completed: replaced the mislabeled JavaScript uploader with
@@ -267,3 +279,58 @@ Add one entry after each meaningful session:
   workflow intentionally and have Git authentication available.
 - Next action: review the dry-run output, then start the workflow only when the
   operator wants the workspace mirrored to GitHub.
+
+### 2026-09-22 — Live browser limitation
+- Completed: attempted the authorized live temporary-mail address and Copy
+  smoke test using workspace Chromium.
+- Evidence: Playwright import failed before browser launch with
+  `ImportError: libstdc++.so.6` from `greenlet`; no external page or account
+  was reached.
+- Still open: live address/copy/mailbox verification and live registration
+  waits.
+- Blockers: the Replit workspace runtime does not expose the required
+  `libstdc++.so.6` to Python Playwright, even after the managed `gcc`
+  dependency install.
+- Next action: record the limitation and continue with offline registration
+  wait/validation handling.
+
+### 2026-09-22 — Offline registration handling
+- Completed: replaced registration sleeps and optimistic submit success with
+  explicit form waits, validation detection, manual-only CAPTCHA handling, and
+  observed result classification.
+- Evidence: `python -m py_compile config.py pc_flow.py temp_mail.py
+  android_automation.py pc_automation.py main.py preflight.py`, `python
+  preflight.py`, `python -m unittest -v test_temp_mail.py test_pc_flow.py`
+  (7 tests), and `git diff --check` passed.
+- Still open: live registration and mailbox evidence, because Playwright cannot
+  start in the current Replit runtime.
+- Blockers: `greenlet` cannot load `libstdc++.so.6`; no external page or account
+  was reached.
+- Next action: continue with offline-safe phases until the runtime limitation
+  is resolved; do not start Android.
+
+### 2026-09-22 — Live provider block
+- Completed: reran the authorized live mailbox check after making Playwright
+  launchable with the GCC library path and inspected the returned page state.
+- Evidence: `temp-mail.org` returned title `Attention Required! | Cloudflare`
+  and body text `Sorry, you have been blocked`; no mailbox address or Copy
+  control was present.
+- Still open: live address/copy/message/verification and registration evidence.
+- Blockers: the provider blocks the workspace browser/IP. Bypassing or evading
+  Cloudflare is prohibited, so this is recorded as a provider/manual-takeover
+  blocker.
+- Next action: fail fast on provider block pages and continue only with
+  offline-safe implementation work.
+
+### 2026-09-22 — Browser runtime wrapper
+- Completed: added a supported PC launch wrapper that exports the Nix GCC
+  library path, verifies Playwright startup, and lets browser setup fall back
+  explicitly to workspace Chromium when Edge is unavailable.
+- Evidence: `bash run_pc_automation.sh --check-runtime` passed and launched
+  `/repl/tools/bin/chromium`; the 8-test offline regression suite and preflight
+  also pass.
+- Still open: live mailbox, registration, and verification evidence.
+- Blockers: `temp-mail.org` blocks the workspace browser with Cloudflare; no
+  bypass is permitted.
+- Next action: use `bash run_pc_automation.sh` only if a permitted mailbox
+  browser session is available; do not start Android.

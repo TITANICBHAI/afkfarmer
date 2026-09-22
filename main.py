@@ -94,7 +94,7 @@ class ReplitAutomationOrchestrator:
 
     def stage_signup(self):
         self.log("\n" + "=" * 60, Fore.MAGENTA)
-        self.log("💻 STAGE 2/6: PC Account Creation (Edge)", Fore.MAGENTA)
+        self.log("💻 STAGE 2/6: PC Account Creation (browser)", Fore.MAGENTA)
         self.log("=" * 60, Fore.MAGENTA)
         self._ensure_browser()
         return bool(self.pc.create_account())
@@ -134,7 +134,7 @@ class ReplitAutomationOrchestrator:
         self.log("💻 STAGE 5/6: PC Login After Mobile Onboarding", Fore.MAGENTA)
         self.log("=" * 60, Fore.MAGENTA)
         self._ensure_browser()
-        self.log("\n⏳ Waiting for session sync, then refreshing Edge...", Fore.CYAN)
+        self.log("\n⏳ Waiting for session sync, then refreshing the browser...", Fore.CYAN)
         time.sleep(10)
         try:
             self.pc.page.reload(wait_until="domcontentloaded")

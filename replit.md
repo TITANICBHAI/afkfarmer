@@ -42,6 +42,12 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 _Populate as you build — sharp edges, "always run X before Y" rules._
 
+- Run the PC browser flow with `bash run_pc_automation.sh`; the wrapper adds
+  the Nix C++ library path required by Playwright's Python runtime.
+- The workspace has Chromium rather than Microsoft Edge, so browser setup
+  explicitly falls back to Chromium. Temporary-mail provider Cloudflare
+  blocks are reported and are not bypassed.
+
 ## GitHub workspace sync
 
 - `bash github_push.sh --dry-run --sync` — inspect the workspace sync without

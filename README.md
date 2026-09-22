@@ -33,8 +33,9 @@ implementation documents.
 
 The first PC provider implementation is now in `temp_mail.py`. It is wired to
 `PCAutomation` and requires proof that the visible mailbox address was copied.
-Live selector verification is still pending because no external browser run has
-been started.
+The workspace browser launched successfully during live testing, but
+`temp-mail.org` returned a Cloudflare block page before an address was
+available.
 
 The repository setup is complete, but the automation code has not been
 refactored or executed against a real browser or Android device. The pinned
@@ -46,7 +47,8 @@ only after completing and verifying them.
 ## Intended runtime
 
 - Python 3.8+
-- Playwright controlling Microsoft Edge
+- Playwright controlling Microsoft Edge when available, otherwise workspace
+  Chromium
 - ADB in `PATH`
 - An operator-owned Android device with USB debugging enabled
 - `requests`
@@ -81,6 +83,17 @@ The provider parsing checks can be run locally with:
 ```bash
 python -m unittest -v test_temp_mail.py
 ```
+
+For the PC browser flow in this Replit workspace, use the runtime wrapper so
+Playwright can load the Nix C++ library:
+
+```bash
+bash run_pc_automation.sh --check-runtime
+bash run_pc_automation.sh
+```
+
+The wrapper uses Microsoft Edge when available and otherwise uses the
+workspace Chromium binary. Provider-side Cloudflare blocks are not bypassed.
 
 ## Runtime artifacts
 

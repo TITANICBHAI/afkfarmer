@@ -1,13 +1,31 @@
 import os
+import shutil
+import time
 from typing import Optional
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from colorama import Fore, Style
 
+from pc_flow import classify_signup_state, find_validation_errors, has_captcha_text
 from temp_mail import TempMailOrgProvider
 
 
 class PCAutomation:
+    SIGNUP_URL = "https://replit.com/signup"
+    CAPTCHA_SELECTORS = (
+        "iframe[title*='captcha' i]",
+        "iframe[src*='recaptcha' i]",
+        "[data-sitekey]",
+        "[id*='captcha' i]",
+        "[class*='captcha' i]",
+    )
+    VALIDATION_SELECTORS = (
+        "[role='alert']",
+        "[aria-invalid='true']",
+        "[data-testid*='error' i]",
+        "[class*='error' i]",
+    )
+
     def __init__(
         self,
         email: Optional[str],
@@ -30,13 +48,44 @@ class PCAutomation:
         print(f"{color}{message}{Style.RESET_ALL}")
 
     def setup_browser(self):
-        self.log("\n🌐 Setting up Microsoft Edge...", Fore.CYAN)
+        self.log("\n🌐 Setting up the PC browser...", Fore.CYAN)
         self.playwright = sync_playwright().start()
-        
+
         # Load previous session state if it exists (skips login on future runs)
         storage_state = self.state_file if os.path.exists(self.state_file) else None
-        
-        self.browser = self.playwright.chromium.launch(channel="msedge", headless=False)
+
+        requested_executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH", "").strip()
+        edge_available = any(shutil.which(binary) for binary in ("msedge", "microsoft-edge"))
+        if requested_executable:
+            self.log(
+                f"Using configured browser executable: {requested_executable}",
+                Fore.CYAN,
+            )
+            self.browser = self.playwright.chromium.launch(
+                executable_path=requested_executable,
+                headless=False,
+            )
+        elif edge_available:
+            self.log("Using Microsoft Edge.", Fore.CYAN)
+            self.browser = self.playwright.chromium.launch(
+                channel=os.environ.get("PLAYWRIGHT_BROWSER_CHANNEL", "msedge"),
+                headless=False,
+            )
+        else:
+            chromium_path = "/repl/tools/bin/chromium"
+            if not os.path.exists(chromium_path):
+                raise RuntimeError(
+                    "Microsoft Edge is unavailable and workspace Chromium was not found."
+                )
+            self.log(
+                "Microsoft Edge is unavailable; using workspace Chromium instead.",
+                Fore.YELLOW,
+            )
+            self.browser = self.playwright.chromium.launch(
+                executable_path=chromium_path,
+                headless=False,
+                args=["--no-sandbox"],
+            )
         self.context = self.browser.new_context(storage_state=storage_state)
         self.page = self.context.new_page()
         self.page.set_default_timeout(30000)
@@ -80,20 +129,69 @@ class PCAutomation:
         except Exception:
             pass
 
-    def handle_captcha(self):
-        """Detect reCAPTCHA and pause for manual solving"""
+    def _visible_control(self, selectors, timeout=1_500):
+        for selector in selectors:
+            locator = self.page.locator(selector)
+            try:
+                for index in range(locator.count()):
+                    candidate = locator.nth(index)
+                    if candidate.is_visible(timeout=timeout):
+                        return candidate
+            except Exception:
+                continue
+        return None
+
+    def _page_text(self) -> str:
         try:
-            # Check for reCAPTCHA iframe or checkbox
-            captcha_frame = self.page.frame_locator("iframe[title*='reCAPTCHA']").first
-            if captcha_frame:
-                self.log("\n⚠️ reCAPTCHA detected!", Fore.YELLOW)
-                self.log("🛑 PAUSING: Please solve the CAPTCHA manually in the browser window.", Fore.YELLOW)
-                input("👉 Press ENTER here once you have solved it...")
-                self.log("✅ CAPTCHA solved. Resuming...", Fore.GREEN)
-                return True
+            return self.page.locator("body").inner_text()
         except Exception:
-            pass # No CAPTCHA found
-        return False
+            return ""
+
+    def _validation_errors(self) -> list[str]:
+        errors = find_validation_errors(self._page_text())
+        for selector in self.VALIDATION_SELECTORS:
+            locator = self.page.locator(selector)
+            try:
+                for index in range(locator.count()):
+                    candidate = locator.nth(index)
+                    if candidate.is_visible(timeout=500):
+                        text = " ".join(candidate.inner_text().split())
+                        if text and text not in errors:
+                            errors.append(text)
+            except Exception:
+                continue
+        return errors
+
+    def _captcha_present(self) -> bool:
+        if has_captcha_text(self._page_text()):
+            return True
+        return self._visible_control(self.CAPTCHA_SELECTORS, timeout=500) is not None
+
+    def _save_failure(self, tag: str) -> None:
+        try:
+            os.makedirs("screenshots", exist_ok=True)
+            self.page.screenshot(path=os.path.join("screenshots", f"pc_{tag}.png"))
+        except Exception:
+            pass
+
+    def handle_captcha(self):
+        """Pause for manual CAPTCHA handling and verify it is no longer visible."""
+
+        if not self._captcha_present():
+            return True
+        self.log("\n⚠️ CAPTCHA or anti-bot challenge detected.", Fore.YELLOW)
+        self.log(
+            "🛑 PAUSING: Solve it manually in the workspace browser window; "
+            "automation will not solve or retry it.",
+            Fore.YELLOW,
+        )
+        input("👉 Press ENTER here once it is solved...")
+        if self._captcha_present():
+            self._save_failure("captcha_unresolved")
+            self.log("❌ CAPTCHA still appears unresolved.", Fore.RED)
+            return False
+        self.log("✅ CAPTCHA no longer visible. Resuming.", Fore.GREEN)
+        return True
 
     def create_account(self):
         self.log("\n" + "="*60, Fore.MAGENTA)
@@ -102,53 +200,127 @@ class PCAutomation:
         
         try:
             self.log("\n[1] Navigating to Replit signup...", Fore.CYAN)
-            self.page.goto("https://replit.com/signup", wait_until="domcontentloaded")
-            
-            # Wait for page to be interactive
-            self.page.wait_for_load_state("networkidle")
-            time.sleep(2)
-            
-            self.log("[2] Checking for Google One-Tap popup...", Fore.CYAN)
+            self.page.goto(self.SIGNUP_URL, wait_until="domcontentloaded")
             try:
-                close_btn = self.page.locator('button[aria-label="Close"], div[role="dialog"] button[aria-label]').first
-                if close_btn.is_visible(timeout=3000):
-                    close_btn.click()
-                    self.log("✅ Closed Google popup", Fore.GREEN)
-                    time.sleep(1)
+                self.page.wait_for_load_state("networkidle", timeout=10_000)
             except PlaywrightTimeoutError:
+                pass
+
+            self.log("[2] Checking for Google One-Tap popup...", Fore.CYAN)
+            close_btn = self._visible_control(
+                (
+                    "button[aria-label='Close']",
+                    "[role='dialog'] button[aria-label='Close']",
+                    "[role='dialog'] button",
+                ),
+                timeout=1_500,
+            )
+            if close_btn is not None:
+                close_btn.click()
+                self.log("✅ Closed Google popup", Fore.GREEN)
+            else:
                 self.log("ℹ️ No popup found, continuing...", Fore.YELLOW)
             
             self.log("[3] Clicking 'Create account' or 'Sign up'...", Fore.CYAN)
-            try:
-                signup_btn = self.page.locator('button:has-text("Create account"), button:has-text("Sign up"), a:has-text("Sign up")').first
-                signup_btn.click(timeout=10000)
-                time.sleep(2)
-            except PlaywrightTimeoutError:
+            signup_btn = self._visible_control(
+                (
+                    "button:has-text('Create account')",
+                    "button:has-text('Sign up')",
+                    "a:has-text('Sign up')",
+                ),
+                timeout=2_000,
+            )
+            if signup_btn is not None:
+                signup_btn.click()
+            else:
                 self.log("ℹ️ Signup button not found, might already be on the form.", Fore.YELLOW)
             
             self.log("[4] Selecting 'Continue with Email'...", Fore.CYAN)
-            try:
-                email_btn = self.page.locator('button:has-text("Continue with Email"), button:has-text("Email")').first
-                email_btn.click(timeout=5000)
-                time.sleep(2)
-            except PlaywrightTimeoutError:
+            email_btn = self._visible_control(
+                (
+                    "button:has-text('Continue with Email')",
+                    "button:has-text('Email')",
+                ),
+                timeout=2_000,
+            )
+            if email_btn is not None:
+                email_btn.click()
+            else:
                 self.log("ℹ️ Email option already visible", Fore.YELLOW)
             
             self.log("[5] Entering credentials...", Fore.CYAN)
-            self.page.fill('input[type="email"], input[name="email"]', self.email)
-            self.page.fill('input[type="password"], input[name="password"]', self.password)
+            email_field = self.page.locator(
+                "input[type='email'], input[name='email']"
+            ).first
+            password_field = self.page.locator(
+                "input[type='password'], input[name='password']"
+            ).first
+            email_field.wait_for(state="visible", timeout=15_000)
+            password_field.wait_for(state="visible", timeout=15_000)
+            email_field.fill(self.email or "")
+            password_field.fill(self.password)
             self.log(f"✅ Email: {self.email}", Fore.GREEN)
             self.log("✅ Password entered.", Fore.GREEN)
             
+            validation_errors = self._validation_errors()
+            if validation_errors:
+                self._save_failure("signup_validation_before_submit")
+                self.log(
+                    f"❌ Registration validation blocked submission "
+                    f"({len(validation_errors)} visible error(s)).",
+                    Fore.RED,
+                )
+                return False
+
             # Handle CAPTCHA before submitting
-            self.handle_captcha()
+            if not self.handle_captcha():
+                return False
             
             self.log("[6] Submitting form...", Fore.CYAN)
-            self.page.locator('button:has-text("Create Account"), button[type="submit"]').first.click()
-            
-            # Wait for navigation or error message
-            time.sleep(5)
-            self.log("\n✅ Account creation form submitted!", Fore.GREEN)
+            submit_btn = self._visible_control(
+                (
+                    "button:has-text('Create Account')",
+                    "button:has-text('Create account')",
+                    "button[type='submit']",
+                ),
+                timeout=10_000,
+            )
+            if submit_btn is None:
+                self._save_failure("signup_submit_not_found")
+                self.log("❌ Registration submit control was not found.", Fore.RED)
+                return False
+            submit_btn.click()
+
+            try:
+                self.page.wait_for_function(
+                    """(signupUrl) => {
+                        const text = document.body?.innerText || "";
+                        return /captcha|recaptcha|not a robot|verify you are human/i.test(text) ||
+                               /invalid email|email.*required|password.*required|already exists|something went wrong|please enter/i.test(text) ||
+                               /check your (email|inbox)|verification email|verify your email|account created/i.test(text) ||
+                               location.href !== signupUrl;
+                    }""",
+                    arg=self.SIGNUP_URL,
+                    timeout=30_000,
+                )
+            except PlaywrightTimeoutError:
+                self._save_failure("signup_result_timeout")
+                self.log("❌ No registration processing/result state was observed.", Fore.RED)
+                return False
+
+            state = classify_signup_state(self.page.url, self._page_text(), self.SIGNUP_URL)
+            if state == "captcha":
+                return self.handle_captcha()
+            if state == "validation":
+                self._save_failure("signup_validation_after_submit")
+                self.log("❌ Registration returned a visible validation error.", Fore.RED)
+                return False
+            if state != "submitted":
+                self._save_failure("signup_result_unknown")
+                self.log("❌ Registration result could not be proven.", Fore.RED)
+                return False
+
+            self.log("\n✅ Account creation entered an observed result state.", Fore.GREEN)
             return True
             
         except Exception as e:

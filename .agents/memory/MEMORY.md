@@ -1,1 +1,2 @@
 - [Python dependency readiness](python-dependency-readiness.md) — run preflight after environment changes; the tracker may outlive installed package state.
+- [PC browser runtime](pc-browser-runtime.md) — Playwright needs the Nix GCC library path; temp-mail.org may Cloudflare-block workspace Chromium.

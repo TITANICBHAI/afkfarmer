@@ -6,6 +6,7 @@ from temp_mail import (
     is_expected_verification_url,
     is_replit_verification_message,
     normalize_email,
+    provider_block_reason,
 )
 
 
@@ -68,6 +69,15 @@ class TempMailParsingTests(unittest.TestCase):
         self.assertFalse(
             is_expected_verification_url("https://replit.com/action-code-evil/abc")
         )
+
+    def test_provider_block_page_is_classified_without_bypassing_it(self):
+        self.assertEqual(
+            provider_block_reason(
+                "Attention Required! Cloudflare - Sorry, you have been blocked"
+            ),
+            "provider_blocked",
+        )
+        self.assertIsNone(provider_block_reason("Mailbox: first@example.com"))
 
 
 if __name__ == "__main__":
