@@ -1,16 +1,13 @@
 import json
 import os
-import re
 import subprocess
 import time
 
-import requests
 from colorama import Fore, Style, init
 
 from android_automation import AndroidAutomation
 from config import (
     ANDROID_DEVICE_ID,
-    EMAIL_CHECK_TIMEOUT,
     GITHUB_REPO_URL,
     REPLIT_PASSWORD,
     TEMP_MAIL_PROVIDER,
@@ -66,29 +63,6 @@ class ReplitAutomationOrchestrator:
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
 
-    # ---------------- temp mail helpers ----------------
-
-    def check_inbox(self):
-        login, domain = self.state["temp_email"].split("@")
-        url = (
-            "https://www.1secmail.com/api/v1/?action=getMessages"
-            f"&login={login}&domain={domain}"
-        )
-        return requests.get(url).json()
-
-    def read_email(self, msg_id):
-        login, domain = self.state["temp_email"].split("@")
-        url = (
-            "https://www.1secmail.com/api/v1/?action=readMessage"
-            f"&login={login}&domain={domain}&id={msg_id}"
-        )
-        return requests.get(url).json()
-
-    def extract_verification_link(self, email_data):
-        content = (email_data.get("textBody") or "") + (email_data.get("body") or "")
-        matches = re.findall(r'https://replit\.com/action-code[^\s"\'<>]+', content)
-        return matches[0].replace("&amp;", "&") if matches else None
-
     # ---------------- browser helper ----------------
 
     def _ensure_browser(self):
@@ -129,46 +103,10 @@ class ReplitAutomationOrchestrator:
         self.log("\n" + "=" * 60, Fore.MAGENTA)
         self.log("📧 STAGE 3/6: Email Verification", Fore.MAGENTA)
         self.log("=" * 60, Fore.MAGENTA)
-        if TEMP_MAIL_PROVIDER != "1secmail":
-            self.log(
-                "❌ Browser mailbox verification is not implemented yet. "
-                "The old 1secmail API path is disabled for this provider.",
-                Fore.RED,
-            )
-            return False
         self._ensure_browser()
-
-        if not self.state.get("verification_link"):
-            self.log("\n⏳ Polling inbox for verification email...", Fore.CYAN)
-            deadline = time.time() + EMAIL_CHECK_TIMEOUT
-            while time.time() < deadline:
-                try:
-                    messages = self.check_inbox()
-                except Exception:
-                    messages = []
-                messages.sort(
-                    key=lambda m: 0 if "replit" in (m.get("from") or "").lower() else 1
-                )
-                for msg in messages:
-                    try:
-                        email_data = self.read_email(msg["id"])
-                    except Exception:
-                        continue
-                    link = self.extract_verification_link(email_data)
-                    if link:
-                        self.state["verification_link"] = link
-                        break
-                if self.state.get("verification_link"):
-                    break
-                print(".", end="", flush=True)
-                time.sleep(5)
-
-        if not self.state.get("verification_link"):
-            self.log("\n❌ Verification email not received in time.", Fore.RED)
-            return False
-
-        self.log(f"\n🔗 Link: {self.state['verification_link'][:60]}...", Fore.CYAN)
-        return bool(self.pc.verify_email(self.state["verification_link"]))
+        self.log("\n⏳ Waiting for the Replit verification message in the mailbox...", Fore.CYAN)
+        self.pc.open_verification_message()
+        return bool(self.pc.verify_email())
 
     def stage_android(self):
         self.log("\n" + "=" * 60, Fore.MAGENTA)
@@ -294,7 +232,6 @@ class ReplitAutomationOrchestrator:
             self.log("✅ AUTOMATION COMPLETE!", Fore.GREEN)
             self.log("=" * 60, Fore.GREEN)
             self.log(f"📧 Account: {self.state['temp_email']}")
-            self.log(f"🔑 Password: {self.state['password']}")
             self.log(f"👤 Username: {self.state['username']}")
             if self.state.get("github_repo"):
                 self.log(f"📥 GitHub: {self.state['github_repo']}")

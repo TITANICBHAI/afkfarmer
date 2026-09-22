@@ -1,0 +1,1 @@
+- [Python dependency readiness](python-dependency-readiness.md) — run preflight after environment changes; the tracker may outlive installed package state.

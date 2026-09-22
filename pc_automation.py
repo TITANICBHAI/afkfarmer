@@ -1,5 +1,4 @@
 import os
-import time
 from typing import Optional
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -49,6 +48,11 @@ class PCAutomation:
             raise ValueError(
                 f"Unsupported temporary-mail provider: {self.temp_mail_provider}"
             )
+        self._ensure_temp_mail()
+        self.email = self.temp_mail.obtain_address()
+        return self.email
+
+    def _ensure_temp_mail(self) -> TempMailOrgProvider:
         if self.context is None:
             self.setup_browser()
         if self.temp_mail is None:
@@ -56,8 +60,17 @@ class PCAutomation:
                 self.context,
                 url=self.temp_mail_url,
             )
-        self.email = self.temp_mail.obtain_address()
-        return self.email
+        return self.temp_mail
+
+    def open_verification_message(self):
+        """Open the Replit verification message in the shared mailbox tab."""
+
+        return self._ensure_temp_mail().open_verification_message()
+
+    def verify_email(self):
+        """Follow visible mailbox verification controls and prove success."""
+
+        return self._ensure_temp_mail().verify_email()
 
     def save_state(self):
         """Save cookies and session state for future runs"""
@@ -125,7 +138,7 @@ class PCAutomation:
             self.page.fill('input[type="email"], input[name="email"]', self.email)
             self.page.fill('input[type="password"], input[name="password"]', self.password)
             self.log(f"✅ Email: {self.email}", Fore.GREEN)
-            self.log(f"✅ Password: {self.password}", Fore.GREEN)
+            self.log("✅ Password entered.", Fore.GREEN)
             
             # Handle CAPTCHA before submitting
             self.handle_captcha()
@@ -140,41 +153,6 @@ class PCAutomation:
             
         except Exception as e:
             self.log(f"\n❌ Error creating account: {e}", Fore.RED)
-            return False
-
-    def verify_email(self, verification_link):
-        self.log("\n" + "="*60, Fore.MAGENTA)
-        self.log("📧 PC: Verifying Email", Fore.MAGENTA)
-        self.log("="*60, Fore.MAGENTA)
-        
-        try:
-            self.log(f"\n[1] Opening verification link...", Fore.CYAN)
-            self.page.goto(verification_link, wait_until="domcontentloaded")
-            time.sleep(4)
-            
-            self.log("[2] Clicking 'Verify Now'...", Fore.CYAN)
-            try:
-                verify_btn = self.page.locator('button:has-text("Verify Now"), a:has-text("Verify")').first
-                verify_btn.click(timeout=10000)
-                self.log("✅ Verification submitted", Fore.GREEN)
-            except PlaywrightTimeoutError:
-                self.log("ℹ️ 'Verify Now' button not found or already verified", Fore.YELLOW)
-            
-            self.log("[3] Waiting for verification to complete...", Fore.CYAN)
-            time.sleep(6)
-            
-            try:
-                if self.page.locator('text=Success').first.is_visible(timeout=5000):
-                    self.log("\n✅ Email verified successfully!", Fore.GREEN)
-                else:
-                    self.log("\nℹ️ Verification page processed", Fore.YELLOW)
-            except PlaywrightTimeoutError:
-                self.log("\nℹ️ Verification page processed", Fore.YELLOW)
-            
-            return True
-            
-        except Exception as e:
-            self.log(f"\n❌ Error verifying email: {e}", Fore.RED)
             return False
 
     def login_after_mobile(self):

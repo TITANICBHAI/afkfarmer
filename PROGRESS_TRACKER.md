@@ -14,14 +14,15 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Current status
 
-- **Current phase:** Phase 1 — PC temporary-mail flow
+- **Current phase:** Phase 1 — PC temporary-mail flow, with the Phase 2
+  browser-mail verification implementation in progress
 - **Overall verdict:** Not ready for a real end-to-end run
-- **Next action:** Run an authorized live mailbox smoke test, then implement
-  browser-based verification-message handling
+- **Next action:** Run the authorized mailbox smoke test for
+  address/copy/message/success states
 - **Last updated:** 2026-09-22
 - **Blockers:** No live browser run has been authorized or performed. The
-  verification stage still refuses to use the legacy 1secmail API until its
-  browser-mail flow is implemented.
+  next live evidence requires the operator's explicit confirmation and a
+  ready operator-owned browser session.
 
 ## Phase 0 — Baseline and repository setup
 
@@ -85,11 +86,21 @@ This tracker is mandatory for every agent working on this repository.
 - [ ] Detect CAPTCHA or anti-bot challenges and pause for manual resolution.
 - [ ] Submit the account form and wait for an observed processing/result state.
 - [ ] Find the Replit verification message by sender and subject.
+  - Browser implementation is present; controlled live mailbox evidence is
+    still required.
 - [ ] Open the message and follow Verify Email.
+  - Browser implementation is present; controlled live mailbox evidence is
+    still required.
 - [ ] Follow Verify Now when present.
+  - Browser implementation is present; controlled live mailbox evidence is
+    still required.
 - [ ] Confirm an explicit verification success state.
+  - Browser implementation requires an explicit success text; controlled live
+    mailbox evidence is still required.
 - [ ] Replace readiness sleeps with Playwright locator/state waits.
-- [ ] Add focused tests for message filtering and verification-link validation.
+- [x] Add focused tests for message filtering and verification-link validation.
+  - Evidence: `python -m unittest -v test_temp_mail.py` passes 4 tests covering
+    sender/subject filtering and expected-host URL extraction/validation.
 
 ## Phase 3 — Android login and onboarding
 
@@ -212,3 +223,31 @@ Add one entry after each meaningful session:
   verification-message handling.
 - Blockers: no live external browser run has been authorized or performed.
 - Next action: run the authorized mailbox smoke test when the operator is ready.
+
+### 2026-09-22 — Browser mailbox verification implementation
+- Completed: replaced the disabled 1secmail verification branch with shared
+  browser-context mailbox matching, visible Verify Email/Verify Now controls,
+  explicit success-state waiting, and URL validation.
+- Evidence: `python -m py_compile config.py temp_mail.py android_automation.py
+  pc_automation.py main.py preflight.py`, `python -m unittest -v
+  test_temp_mail.py` (4 tests), `python preflight.py`, and `git diff --check`
+  passed after restoring the managed Python dependencies.
+- Still open: live address/copy verification, live mailbox message and success
+  verification, and the remaining Phase 2 registration waits.
+- Blockers: no external run is authorized or performed.
+- Next action: request/perform an authorized mailbox smoke test without
+  starting Android automation.
+
+### 2026-09-22 — Final local verification
+- Completed: restored the managed Python dependencies, normalized the pinned
+  requirements list, recreated the mailbox adapter on resume, and removed the
+  final password-value log.
+- Evidence: `python -m py_compile config.py temp_mail.py android_automation.py
+  pc_automation.py main.py preflight.py`, `python preflight.py`, `python -m
+  unittest -v test_temp_mail.py` (4 tests), `git diff --check`, and a
+  password-log scan all passed. No browser or Android flow was started.
+- Still open: all live browser evidence, the remaining registration waits, all
+  Android, checkpoint/recovery, GitHub-import, and end-to-end validation items.
+- Blockers: no external run is authorized or performed.
+- Next action: request explicit authorization and a ready operator-owned
+  browser session before the mailbox smoke test; do not start Android yet.
