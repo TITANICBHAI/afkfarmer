@@ -22,7 +22,9 @@ not a bulk-account tool, a rate-limit bypass, or a credential-harvesting tool.
 
 The visual references are stored in `attached_assets/`. The numbered Android
 screenshots are especially important for the email-login, invalid-credentials,
-onboarding, profile, logout, and app-close states.
+onboarding, profile, logout, and app-close states. `VISUAL_FALLBACK.md` records
+a deferred OCR/computer-vision/pixel evidence fallback; UI Automator remains
+the current source of truth.
 
 ## Current state
 

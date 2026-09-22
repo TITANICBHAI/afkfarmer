@@ -112,6 +112,21 @@ fully semantic and must not be presented as resolution-independent proof of
 correctness: keyboard, system bars, scrolling, and layout changes can still
 move the target.
 
+### Deferred visual evidence fallback
+
+The screenshot set may later support a secondary OCR/computer-vision/pixel
+fallback when a device build exposes incomplete UI Automator nodes. The planned
+order is UI XML first, screenshot capture second, and optional visual analysis
+third. OCR may check required labels; computer vision may identify approximate
+dialogs, banners, or selected controls; tolerant region/perceptual checks may
+confirm distinctive visual cues.
+
+Visual analysis must never be the sole proof of a transition. A visual match
+cannot authorize a tap, advance a stage, or override a missing or contradictory
+UI node. Low confidence or disagreement remains a failure/manual-takeover
+state. The detailed deferred scope is in `VISUAL_FALLBACK.md`; no visual
+analysis dependency is part of the current implementation.
+
 ## Error model
 
 Each adapter operation returns one of:

@@ -152,6 +152,11 @@ This tracker is mandatory for every agent working on this repository.
 - [ ] Save screenshot and UI XML evidence for every failed transition.
   - Implementation is present in `save_failure_evidence()` and every named
     transition failure path; live device failure evidence remains unverified.
+- [ ] Plan the optional OCR/computer-vision/pixel fallback as secondary
+  evidence.
+  - Deferred only: `VISUAL_FALLBACK.md` defines OCR strings, visual landmarks,
+    tolerant region/perceptual checks, confidence handling, and the rule that
+    image evidence can never replace UI XML destination-state proof.
 
 ## Phase 4 — Checkpoint and recovery
 

@@ -223,6 +223,15 @@ Every failed transition saves:
 No catch-all path may return `True`. Network errors, missing nodes, malformed
 XML, ADB errors, and unexpected screens must remain failures.
 
+### Deferred visual fallback
+
+`VISUAL_FALLBACK.md` defines a future secondary evidence layer based on OCR,
+computer-vision landmarks, and tolerant pixel/perceptual checks. It is
+intentionally not implemented in this phase. If later device evidence shows
+that UI Automator cannot observe a required state, visual checks may supplement
+the XML classifier, but they must not replace destination-state verification or
+make a missing node successful.
+
 ## Acceptance criteria
 
 - Every step in `CORE_FLOW.md` has a named implementation transition.

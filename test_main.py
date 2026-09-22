@@ -111,6 +111,54 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(orchestrator.state["stage"], "SIGNUP")
         self.assertIsNone(orchestrator.state["in_progress"])
 
+    def test_interruption_before_completion_preserves_every_stage(self):
+        for stage in main.STAGES[:-1]:
+            with self.subTest(stage=stage):
+                orchestrator = self.make_orchestrator()
+
+                def interrupt():
+                    raise KeyboardInterrupt()
+
+                with self.assertRaises(KeyboardInterrupt):
+                    orchestrator.run_stage(stage, interrupt)
+
+                saved = self.read_state()
+                self.assertEqual(saved["stage"], stage)
+                self.assertEqual(saved["in_progress"]["stage"], stage)
+                self.assertEqual(saved["in_progress"]["status"], "running")
+
+    def test_success_after_every_stage_advances_exactly_once(self):
+        for index, stage in enumerate(main.STAGES[:-1]):
+            with self.subTest(stage=stage):
+                orchestrator = self.make_orchestrator()
+                self.assertTrue(orchestrator.run_stage(stage, lambda: True))
+
+                self.assertEqual(
+                    orchestrator.state["stage"],
+                    main.STAGES[index + 1],
+                )
+                self.assertIsNone(orchestrator.state["in_progress"])
+
+    def test_resume_from_later_stage_does_not_call_email_stage(self):
+        orchestrator = self.make_orchestrator()
+        orchestrator.state["stage"] = "ANDROID"
+        orchestrator.state["temp_email"] = "mail@example.test"
+        orchestrator.state["username"] = "mail"
+        orchestrator._save_state("ANDROID")
+        called = []
+
+        def fake_run_stage(name, _handler):
+            called.append(name)
+            return True
+
+        with patch("builtins.input", return_value="y"):
+            with patch.object(orchestrator, "run_stage", side_effect=fake_run_stage):
+                with patch("main.time.sleep"):
+                    orchestrator.run()
+
+        self.assertEqual(called, main.STAGES[main.STAGES.index("ANDROID"):-1])
+        self.assertNotIn("EMAIL", called)
+
 
 if __name__ == "__main__":
     unittest.main()

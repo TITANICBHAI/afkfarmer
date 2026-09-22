@@ -143,6 +143,14 @@ The first end-to-end test should stop after account creation and email
 verification unless the operator explicitly confirms that the Android device
 is connected and ready.
 
+## Deferred visual fallback
+
+Keep OCR, computer-vision landmarks, and tolerant pixel/perceptual checks as a
+planned secondary evidence layer only. Do not add dependencies or implement
+image-based stage success until live device evidence shows that the required
+state cannot be observed reliably through UI Automator. See
+`VISUAL_FALLBACK.md`.
+
 ## Open implementation questions
 
 - Is `temp-mail.org` a hard requirement for the final implementation, or is it

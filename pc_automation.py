@@ -450,19 +450,42 @@ class PCAutomation:
                 chat_input.press('Enter')
                 
                 self.log("\n✅ Import prompt submitted!", Fore.GREEN)
-                self.log("⏳ Waiting for Replit to process...", Fore.CYAN)
-                time.sleep(15)
-                
+                self.log("⏳ Waiting for Replit to expose the imported project...", Fore.CYAN)
+                try:
+                    self.page.wait_for_function(
+                        """() => {
+                            const text = document.body?.innerText || "";
+                            return window.location.href.includes("/~/") ||
+                                   /imported|creating|ready|project/i.test(text);
+                        }""",
+                        timeout=30_000,
+                    )
+                except PlaywrightTimeoutError:
+                    self._save_failure("github_import_result_timeout")
+                    self.log(
+                        "\n❌ Import was submitted, but no observable progress or "
+                        "project state appeared.",
+                        Fore.RED,
+                    )
+                    return False
+
                 current_url = self.page.url
                 if "/~/" in current_url:
-                    self.log(f"\n✅ Project imported successfully!", Fore.GREEN)
+                    self.log("\n✅ Project imported successfully!", Fore.GREEN)
                     self.log(f"📍 URL: {current_url}", Fore.GREEN)
-                else:
-                    self.log("\nℹ️ Import may still be processing in the background", Fore.YELLOW)
+                    return True
+
+                self._save_failure("github_import_success_not_observed")
+                self.log(
+                    "\n❌ Import progress was visible, but a project URL was not "
+                    "observed.",
+                    Fore.RED,
+                )
+                return False
             else:
+                self._save_failure("github_import_control_not_found")
                 self.log("\n⚠️ Could not find AI chat input. Please import manually.", Fore.RED)
-            
-            return True
+                return False
             
         except Exception as e:
             self.log(f"\n❌ Error importing repo: {e}", Fore.RED)
