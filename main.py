@@ -1,6 +1,5 @@
 import json
 import os
-import subprocess
 import time
 
 from colorama import Fore, Style, init
@@ -112,15 +111,10 @@ class ReplitAutomationOrchestrator:
         self.log("\n" + "=" * 60, Fore.MAGENTA)
         self.log("📱 STAGE 4/6: Android Onboarding (ADB)", Fore.MAGENTA)
         self.log("=" * 60, Fore.MAGENTA)
-        result = subprocess.run("adb devices", shell=True, capture_output=True, text=True)
-        lines = [l for l in result.stdout.splitlines() if l.strip() and not l.startswith("List")]
-        if not any(l.endswith("device") for l in lines):
-            self.log("❌ No Android device found via ADB.", Fore.RED)
-            self.log("Connect phone, enable USB debugging, accept the prompt.", Fore.YELLOW)
+        if not self.android.verify_device():
+            self.log("❌ Intended Android device was not verified.", Fore.RED)
+            self.log("Connect the operator-owned phone and verify its configured ID.", Fore.YELLOW)
             return False
-        self.log("✅ Android device connected!", Fore.GREEN)
-        self.log("⏳ Waiting 5s for verification to settle server-side...", Fore.CYAN)
-        time.sleep(5)
         return bool(
             self.android.complete_onboarding(
                 self.state["temp_email"],

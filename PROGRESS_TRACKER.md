@@ -14,16 +14,15 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Current status
 
-- **Current phase:** Phase 2 — PC Replit registration and verification
-  implementation, with offline readiness waits hardened and live evidence blocked
+- **Current phase:** Phase 3 — Android login and onboarding offline
+  implementation, with live device evidence pending
 - **Overall verdict:** Not ready for a real end-to-end run
-- **Next action:** Continue the remaining offline-safe Phase 2 checks; use the
-  PC runtime wrapper for any future live run only after explicit operator
-  confirmation and a permitted mailbox/browser session
+- **Next action:** Run a controlled Android smoke test from the home screen only
+  after explicit operator confirmation and intended-device readiness
 - **Last updated:** 2026-09-22
-- **Blockers:** The runtime wrapper can launch Playwright, but the live
-  `temp-mail.org` page returns a Cloudflare block page. No bypass is permitted,
-  and live address/copy/mailbox evidence remains pending.
+- **Blockers:** No Android device run has been authorized or performed. The PC
+  runtime wrapper can launch Playwright, but the live `temp-mail.org` page
+  returns a Cloudflare block page. No bypass is permitted.
 
 ## Phase 0 — Baseline and repository setup
 
@@ -125,6 +124,8 @@ This tracker is mandatory for every agent working on this repository.
 ## Phase 3 — Android login and onboarding
 
 - [ ] Verify the intended ADB device before launching the app.
+  - Implementation is present in `AndroidAutomation.verify_device()` and the
+    stage gate, but no device query has been run in this session.
 - [ ] Launch Replit and wait for the expected initial screen.
 - [ ] Implement verified Continue and Continue with Email transitions.
 - [ ] Handle both keyboard-visible and keyboard-hidden email states.
@@ -141,9 +142,15 @@ This tracker is mandatory for every agent working on this repository.
 - [ ] Open and verify the logout confirmation dialog.
 - [ ] Confirm Log Out.
 - [ ] Force-stop Replit and verify it is no longer foreground.
-- [ ] Remove any fallback that reports success without a destination-state
+- [x] Remove any fallback that reports success without a destination-state
   check.
+  - Evidence: percentage taps are no longer used as tap fallbacks;
+    `_tap_and_wait()` requires source and destination UI states, and missing or
+    malformed nodes fail. Offline Android fixtures and the full 15-test suite
+    pass.
 - [ ] Save screenshot and UI XML evidence for every failed transition.
+  - Implementation is present in `save_failure_evidence()` and every named
+    transition failure path; live device failure evidence remains unverified.
 
 ## Phase 4 — Checkpoint and recovery
 
@@ -360,3 +367,24 @@ Add one entry after each meaningful session:
   live account/device execution requires explicit operator confirmation.
 - Next action: continue offline-safe Phase 2 work, or perform a permitted PC
   smoke test through `bash run_pc_automation.sh` only after confirmation.
+
+### 2026-09-22 — Android state-machine implementation
+- Completed: reviewed Android screenshots 7–24 and implemented semantic screen
+  classification, intended-device gating, verified UI-node taps, keyboard-safe
+  email/password transitions, one-time invalid-login retry, onboarding choices,
+  profile scrolling, logout confirmation, force-stop verification, and failure
+  screenshot/UI XML evidence.
+- Evidence: `python -m py_compile config.py temp_mail.py pc_flow.py
+  android_automation.py pc_automation.py main.py preflight.py
+  test_android_automation.py`, `python -m unittest -v test_temp_mail.py
+  test_pc_flow.py test_android_automation.py` (15 tests), `python
+  preflight.py`, `git diff --check`, and static fallback/secret scans passed.
+  No ADB query, app launch, account login, or device action was performed.
+- Still open: live verification of every Android transition, device failure
+  evidence, checkpoint/recovery, PC resume, GitHub import, and end-to-end
+  validation.
+- Blockers: the operator has not explicitly confirmed a real Android run, and
+  no device evidence exists to validate the target app's live UI hierarchy.
+- Next action: after explicit confirmation, run only the Android smoke test from
+  the home screen, verify the intended device, and stop on any unexpected UI
+  state with the saved evidence.
