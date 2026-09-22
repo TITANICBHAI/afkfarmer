@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import time
@@ -172,10 +173,11 @@ class PCAutomation:
         )
         launch_args = []
         if user_data_dir:
-            profile_directory = self._profile_directory()
+            profile_directory, profile_name = self._select_profile(user_data_dir)
             launch_args.append(f"--profile-directory={profile_directory}")
             self.log(
-                f"Using browser profile '{profile_directory}' from "
+                f"Using browser profile '{profile_name}' "
+                f"({profile_directory}) from "
                 f"{user_data_dir}.",
                 Fore.GREEN,
             )
@@ -218,11 +220,133 @@ class PCAutomation:
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.page.set_default_timeout(30_000)
 
-    def _profile_directory(self) -> str:
-        return (
-            os.environ.get("PLAYWRIGHT_PROFILE_DIRECTORY", "").strip()
-            or "Default"
+    def _profile_directory(self, user_data_dir: Optional[str] = None) -> str:
+        user_data_dir = user_data_dir or self._profile_user_data_dir()
+        directory, _display_name = self._select_profile(user_data_dir)
+        return directory
+
+    @staticmethod
+    def default_edge_user_data_dir() -> str:
+        """Return the standard Windows Edge user-data directory."""
+
+        local_app_data = os.environ.get(
+            "LOCALAPPDATA",
+            os.path.expanduser(r"~\AppData\Local"),
         )
+        return os.path.join(local_app_data, "Microsoft", "Edge", "User Data")
+
+    @classmethod
+    def discover_browser_profiles(cls, user_data_dir: Optional[str] = None) -> list[dict]:
+        """Read Edge/Chromium profile directory and display-name metadata."""
+
+        root = user_data_dir or cls.default_edge_user_data_dir()
+        local_state_path = os.path.join(root, "Local State")
+        profiles = []
+        last_used = None
+
+        try:
+            with open(local_state_path, "r", encoding="utf-8") as state_file:
+                local_state = json.load(state_file)
+            profile_state = local_state.get("profile", {})
+            info_cache = profile_state.get("info_cache", {})
+            last_used = profile_state.get("last_used")
+            if isinstance(info_cache, dict):
+                for directory, metadata in info_cache.items():
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    profiles.append(
+                        {
+                            "directory": str(directory),
+                            "name": str(metadata.get("name") or directory),
+                            "last_used": str(directory) == str(last_used),
+                        }
+                    )
+        except (OSError, ValueError, TypeError):
+            pass
+
+        # Local State is the authoritative source, but a partially initialized
+        # profile can exist before it is written there. Include those folders
+        # so profile selection still gives the operator a usable answer.
+        known_directories = {profile["directory"] for profile in profiles}
+        try:
+            directory_names = os.listdir(root)
+        except OSError:
+            directory_names = []
+        for directory in directory_names:
+            if directory in known_directories:
+                continue
+            if directory == "Default" or directory.startswith("Profile "):
+                if os.path.isdir(os.path.join(root, directory)):
+                    profiles.append(
+                        {
+                            "directory": directory,
+                            "name": directory,
+                            "last_used": directory == last_used,
+                        }
+                    )
+
+        return sorted(
+            profiles,
+            key=lambda profile: (
+                not profile["last_used"],
+                profile["directory"].casefold(),
+            ),
+        )
+
+    def _select_profile(self, user_data_dir: Optional[str]) -> tuple[str, str]:
+        """Resolve an explicit profile directory/name or Edge's last-used one."""
+
+        explicit_directory = os.environ.get(
+            "PLAYWRIGHT_PROFILE_DIRECTORY",
+            "",
+        ).strip()
+        explicit_name = os.environ.get("PLAYWRIGHT_PROFILE_NAME", "").strip()
+        profiles = self.discover_browser_profiles(user_data_dir)
+
+        if explicit_directory:
+            matched = next(
+                (
+                    profile
+                    for profile in profiles
+                    if profile["directory"].casefold()
+                    == explicit_directory.casefold()
+                ),
+                None,
+            )
+            return (
+                explicit_directory,
+                matched["name"] if matched else explicit_directory,
+            )
+
+        if explicit_name:
+            matched = next(
+                (
+                    profile
+                    for profile in profiles
+                    if profile["name"].casefold() == explicit_name.casefold()
+                    or profile["directory"].casefold() == explicit_name.casefold()
+                ),
+                None,
+            )
+            if matched is None:
+                available = ", ".join(
+                    f"{profile['name']} ({profile['directory']})"
+                    for profile in profiles
+                ) or "none found"
+                raise RuntimeError(
+                    f"Edge profile '{explicit_name}' was not found. "
+                    f"Available profiles: {available}"
+                )
+            return matched["directory"], matched["name"]
+
+        last_used = next(
+            (profile for profile in profiles if profile["last_used"]),
+            None,
+        )
+        if last_used:
+            return last_used["directory"], last_used["name"]
+
+        return "Default", "Default"
 
     def _profile_user_data_dir(
         self,

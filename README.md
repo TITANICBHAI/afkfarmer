@@ -35,7 +35,7 @@ The active Python files are present at the project root with canonical names:
 The state-driven offline implementation is verified, including atomic
 checkpoints, PC registration classification, Android UI-state transitions,
 session synchronization after Android completion, and safe GitHub-import
-failure handling. The combined offline test suite passes 41 tests.
+failure handling. The combined offline test suite passes 42 tests.
 
 Live mailbox, Replit registration, Android-device, PC-resume, GitHub-import,
 and complete end-to-end evidence remain open. The workspace browser previously
@@ -213,8 +213,21 @@ remote debugging after it has started.
 
 If CDP attachment is unavailable, the Windows fallback uses Edge's real user
 data directory instead of creating a private Playwright context. By default it
-uses the `Default` profile. To select another Edge profile, set its directory
-name:
+uses the profile Edge marked as last used. To see the profiles Edge has
+registered, run:
+
+```cmd
+python main.py --list-edge-profiles
+```
+
+The command prints each profile's friendly name, internal directory, and which
+one Edge marked as last used. To select a profile by its friendly name:
+
+```cmd
+set "PLAYWRIGHT_PROFILE_NAME=Work"
+```
+
+To select it by its internal directory instead:
 
 ```cmd
 set "PLAYWRIGHT_PROFILE_DIRECTORY=Profile 1"
@@ -225,6 +238,9 @@ Common profile directory names are `Default`, `Profile 1`, `Profile 2`, and
 similar. In Edge, open `edge://version` and use the final folder name from
 **Profile path**. For example, a path ending in
 `...\Microsoft\Edge\User Data\Profile 1` means the value is `Profile 1`.
+`PLAYWRIGHT_PROFILE_NAME` is usually easier because it uses the name shown by
+Edge. If both selectors are set, `PLAYWRIGHT_PROFILE_DIRECTORY` takes
+precedence.
 
 The profile must not be locked by a normal Edge process when the automation
 launches it. Either close that Edge window first or start Edge with remote

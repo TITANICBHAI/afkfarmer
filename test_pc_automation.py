@@ -1,4 +1,6 @@
 import os
+import json
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -201,6 +203,45 @@ class PcAutomationMockTests(unittest.TestCase):
                         "Edge",
                         "User Data",
                     ),
+                )
+
+    def test_edge_profiles_resolve_friendly_name_and_last_used_profile(self):
+        automation = PCAutomation("mail@example.test", "password")
+
+        with tempfile.TemporaryDirectory() as profile_root:
+            with open(
+                os.path.join(profile_root, "Local State"),
+                "w",
+                encoding="utf-8",
+            ) as state_file:
+                json.dump(
+                    {
+                        "profile": {
+                            "last_used": "Profile 2",
+                            "info_cache": {
+                                "Default": {"name": "Personal"},
+                                "Profile 2": {"name": "Work"},
+                            },
+                        }
+                    },
+                    state_file,
+                )
+
+            profiles = automation.discover_browser_profiles(profile_root)
+            self.assertEqual(profiles[0]["directory"], "Profile 2")
+            self.assertEqual(profiles[0]["name"], "Work")
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "PLAYWRIGHT_PROFILE_DIRECTORY": "",
+                    "PLAYWRIGHT_PROFILE_NAME": "Work",
+                },
+                clear=False,
+            ):
+                self.assertEqual(
+                    automation._select_profile(profile_root),
+                    ("Profile 2", "Work"),
                 )
 
     def test_import_requires_visible_control_and_observed_project_url(self):
