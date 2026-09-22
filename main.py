@@ -342,7 +342,7 @@ class ReplitAutomationOrchestrator:
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print(Fore.MAGENTA + "🚀 REPLIT COMPLETE AUTOMATION (PC Edge + Android ADB)" + Style.RESET_ALL)
+    print(Fore.MAGENTA + "🚀 REPLIT COMPLETE AUTOMATION (PC Browser + Android ADB)" + Style.RESET_ALL)
     print("=" * 60)
     orchestrator = ReplitAutomationOrchestrator()
     orchestrator.run()

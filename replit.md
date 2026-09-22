@@ -1,36 +1,38 @@
-# [Project name]
+# Onboarding Flow Automation
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Python Playwright and ADB automation for the operator-owned Replit web and Android onboarding flow.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `bash run_pc_automation.sh --check-runtime` — verify the Playwright runtime
+- `python preflight.py` — run the non-destructive readiness check
+- `python -m unittest -v` — run the offline test suite
+- `bash run_pc_automation.sh` — start the full operator flow
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python 3.8+, Playwright, requests, colorama
+- PC browser flow: Playwright with an optional CDP attachment
+- Android flow: ADB and UI hierarchy inspection
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `pc_automation.py` — browser setup, tab reuse, registration, verification, and import
+- `temp_mail.py` — visible temporary-mail tab flow
+- `android_automation.py` — Android UI transitions and evidence
+- `main.py` — checkpointed stage orchestration
+- `STEPS.md` and `attached_assets/` — supplied flow and visual references
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Attach to `PLAYWRIGHT_CDP_URL` first so an operator's existing browser and tabs can be reused.
+- Never close a browser attached over CDP; only managed browser instances are closed.
+- Registration submission is scoped to the modal/form and waits for an enabled primary button.
+- CAPTCHA and provider blocks remain manual failure/takeover states.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Runs the supplied one-account Replit web/Android onboarding sequence with checkpoints and failure evidence.
 
 ## User preferences
 
@@ -44,6 +46,9 @@ _Populate as you build — sharp edges, "always run X before Y" rules._
 
 - Run the PC browser flow with `bash run_pc_automation.sh`; the wrapper adds
   the Nix C++ library path required by Playwright's Python runtime.
+- Set `PLAYWRIGHT_CDP_URL` to a browser started with remote debugging to reuse
+  existing Replit and temp-mail tabs. Without CDP, Playwright cannot attach to
+  a normal already-running browser process.
 - The workspace has Chromium rather than Microsoft Edge, so browser setup
   explicitly falls back to Chromium. Temporary-mail provider Cloudflare
   blocks are reported and are not bypassed.

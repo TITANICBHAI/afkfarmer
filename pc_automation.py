@@ -1,7 +1,7 @@
 import os
-import shutil
 import time
 from typing import Optional
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from colorama import Fore, Style
@@ -50,6 +50,8 @@ class PCAutomation:
         self.page = None
         self.temp_mail = None
         self.state_file = "auth_state.json"
+        self._owns_browser = False
+        self._attached_to_browser = False
 
     def log(self, message, color=Fore.WHITE):
         print(f"{color}{message}{Style.RESET_ALL}")
@@ -58,11 +60,47 @@ class PCAutomation:
         self.log("\n🌐 Setting up the PC browser...", Fore.CYAN)
         self.playwright = sync_playwright().start()
 
-        # Load previous session state if it exists (skips login on future runs)
-        storage_state = self.state_file if os.path.exists(self.state_file) else None
+        # Prefer attaching to a browser the operator already opened. A normal
+        # browser process cannot be attached to after launch; it must have been
+        # started with a Chromium remote-debugging endpoint.
+        cdp_url = os.environ.get("PLAYWRIGHT_CDP_URL", "").strip()
+        if cdp_url:
+            try:
+                self.browser = self.playwright.chromium.connect_over_cdp(cdp_url)
+                contexts = self.browser.contexts
+                if not contexts:
+                    raise RuntimeError("The attached browser has no browser context.")
+                self.context = contexts[0]
+                self._attached_to_browser = True
+                self._owns_browser = False
+                self.page = self._find_page_for_host("replit.com")
+                if self.page is None:
+                    self.page = self._first_open_page()
+                if self.page is None:
+                    self.page = self.context.new_page()
+                self.page.set_default_timeout(30_000)
+                self.log(
+                    f"Attached to the existing browser at {cdp_url}; "
+                    f"reusing its open tabs.",
+                    Fore.GREEN,
+                )
+                return
+            except Exception as exc:
+                self.log(
+                    f"Could not attach to PLAYWRIGHT_CDP_URL ({exc}); "
+                    "starting a managed browser instead.",
+                    Fore.YELLOW,
+                )
+                self.browser = None
+                self.context = None
+                self._attached_to_browser = False
 
+        # Load previous session state if it exists (skips login on future runs).
+        # This is only used for a browser launched by this process.
+        storage_state = self.state_file if os.path.exists(self.state_file) else None
         requested_executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH", "").strip()
-        edge_available = any(shutil.which(binary) for binary in ("msedge", "microsoft-edge"))
+        browser_channel = os.environ.get("PLAYWRIGHT_BROWSER_CHANNEL", "").strip()
+
         if requested_executable:
             self.log(
                 f"Using configured browser executable: {requested_executable}",
@@ -72,30 +110,80 @@ class PCAutomation:
                 executable_path=requested_executable,
                 headless=False,
             )
-        elif edge_available:
-            self.log("Using Microsoft Edge.", Fore.CYAN)
+        elif browser_channel:
+            self.log(f"Using configured Chromium browser channel: {browser_channel}.", Fore.CYAN)
             self.browser = self.playwright.chromium.launch(
-                channel=os.environ.get("PLAYWRIGHT_BROWSER_CHANNEL", "msedge"),
+                channel=browser_channel,
                 headless=False,
             )
         else:
             chromium_path = "/repl/tools/bin/chromium"
             if not os.path.exists(chromium_path):
                 raise RuntimeError(
-                    "Microsoft Edge is unavailable and workspace Chromium was not found."
+                    "No browser was configured and workspace Chromium was not found. "
+                    "Set PLAYWRIGHT_CDP_URL, PLAYWRIGHT_EXECUTABLE_PATH, or "
+                    "PLAYWRIGHT_BROWSER_CHANNEL."
                 )
-            self.log(
-                "Microsoft Edge is unavailable; using workspace Chromium instead.",
-                Fore.YELLOW,
-            )
+            self.log("Using workspace Chromium.", Fore.CYAN)
             self.browser = self.playwright.chromium.launch(
                 executable_path=chromium_path,
                 headless=False,
                 args=["--no-sandbox"],
             )
+        self._owns_browser = True
         self.context = self.browser.new_context(storage_state=storage_state)
         self.page = self.context.new_page()
         self.page.set_default_timeout(30000)
+
+    def _open_pages(self):
+        """Return open pages from the attached/launched context."""
+
+        if self.context is None:
+            return []
+        try:
+            return [page for page in self.context.pages if not page.is_closed()]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _page_host(page) -> str:
+        try:
+            return (urlsplit(page.url).hostname or "").casefold()
+        except Exception:
+            return ""
+
+    def _find_page_for_host(self, host: str):
+        host = host.casefold()
+        for page in self._open_pages():
+            page_host = self._page_host(page)
+            if page_host == host or page_host.endswith(f".{host}"):
+                return page
+        return None
+
+    def _first_open_page(self):
+        pages = self._open_pages()
+        return pages[0] if pages else None
+
+    def _page_for_replit(self):
+        """Select an existing Replit tab, creating only a tab if needed."""
+
+        # Keep injected pages usable for offline tests and callers that provide
+        # an already-selected Playwright page without the owning context.
+        if self.context is None and self.page is not None:
+            return self.page
+
+        page = self._find_page_for_host("replit.com")
+        if page is not None:
+            self.page = page
+            self.page.set_default_timeout(30_000)
+            return page
+
+        if self.context is None:
+            raise RuntimeError("Browser context is not ready.")
+        page = self.context.new_page()
+        page.set_default_timeout(30_000)
+        self.page = page
+        return page
 
     def obtain_temp_email(self) -> str:
         """Open temp-mail.org and return an address whose Copy action passed."""
@@ -136,17 +224,36 @@ class PCAutomation:
         except Exception:
             pass
 
-    def _visible_control(self, selectors, timeout=1_500):
+    def _visible_control(self, selectors, timeout=1_500, require_enabled=False):
         for selector in selectors:
             locator = self.page.locator(selector)
             try:
                 for index in range(locator.count()):
                     candidate = locator.nth(index)
                     if candidate.is_visible(timeout=timeout):
+                        if require_enabled and hasattr(candidate, "is_enabled"):
+                            if not candidate.is_enabled(timeout=timeout):
+                                continue
                         return candidate
             except Exception:
                 continue
         return None
+
+    def _wait_for_control(self, selectors, timeout=10_000):
+        """Wait for a visible, enabled control without selecting a backdrop control."""
+
+        deadline = time.monotonic() + (timeout / 1_000)
+        while True:
+            control = self._visible_control(
+                selectors,
+                timeout=min(500, max(1, int((deadline - time.monotonic()) * 1_000))),
+                require_enabled=True,
+            )
+            if control is not None:
+                return control
+            if time.monotonic() >= deadline:
+                return None
+            self.page.wait_for_timeout(100)
 
     def _page_text(self) -> str:
         try:
@@ -307,6 +414,7 @@ class PCAutomation:
         
         try:
             self.log("\n[1] Navigating to Replit...", Fore.CYAN)
+            self._page_for_replit()
             self.page.goto(self.REPLIT_URL, wait_until="domcontentloaded")
             try:
                 self.page.wait_for_load_state("networkidle", timeout=10_000)
@@ -394,11 +502,16 @@ class PCAutomation:
                 return False
             
             self.log("[6] Submitting form...", Fore.CYAN)
-            submit_btn = self._visible_control(
+            submit_btn = self._wait_for_control(
                 (
-                    "button:has-text('Create Account')",
-                    "button:has-text('Create account')",
+                    "[role='dialog'] form button[type='submit']",
+                    "form button[type='submit']",
+                    "[role='dialog'] button[type='submit']",
                     "button[type='submit']",
+                    "[role='dialog'] button:has-text('Create Account')",
+                    "form button:has-text('Create Account')",
+                    "[role='dialog'] button:has-text('Create account')",
+                    "form button:has-text('Create account')",
                 ),
                 timeout=10_000,
             )
@@ -406,6 +519,9 @@ class PCAutomation:
                 self._save_failure("signup_submit_not_found")
                 self.log("❌ Registration submit control was not found.", Fore.RED)
                 return False
+            # The modal has a second, visually similar header button. Use the
+            # form submit control above and verify that the click is accepted.
+            submit_url = self.page.url
             submit_btn.click()
             self.log(
                 "⏳ Waiting up to 60 seconds for Replit to process signup "
@@ -415,14 +531,14 @@ class PCAutomation:
 
             try:
                 self.page.wait_for_function(
-                    """(signupUrl) => {
+                    """(initialUrl) => {
                         const text = document.body?.innerText || "";
                         return /captcha|recaptcha|not a robot|verify you are human/i.test(text) ||
                                /invalid email|email.*required|password.*required|already exists|something went wrong|please enter/i.test(text) ||
                                /check your (email|inbox)|verification email|verify your email|account created/i.test(text) ||
-                               location.href !== signupUrl;
+                               location.href !== initialUrl;
                     }""",
-                    arg=self.SIGNUP_URL,
+                    arg=submit_url,
                     timeout=self.SIGNUP_RESULT_WAIT_MS,
                 )
             except PlaywrightTimeoutError:
@@ -430,7 +546,11 @@ class PCAutomation:
                 self.log("❌ No registration processing/result state was observed.", Fore.RED)
                 return False
 
-            state = classify_signup_state(self.page.url, self._page_text(), self.SIGNUP_URL)
+            state = classify_signup_state(
+                self.page.url,
+                self._page_text(),
+                baseline_url=submit_url,
+            )
             if state == "captcha":
                 return self.handle_captcha()
             if state == "validation":
@@ -456,6 +576,7 @@ class PCAutomation:
         
         try:
             self.log("\n[1] Navigating to Replit home...", Fore.CYAN)
+            self._page_for_replit()
             self.page.goto("https://replit.com", wait_until="domcontentloaded")
             initial_state = self._wait_for_session_or_login()
             if initial_state == "authenticated":
@@ -512,6 +633,7 @@ class PCAutomation:
         
         try:
             self.log(f"\n[1] Importing: {repo_url}", Fore.CYAN)
+            self._page_for_replit()
             
             # Method 1: Try to find the AI chat input (Replit Agent / Create Repl)
             chat_input = self.page.locator('textarea[placeholder*="Start chatting"], textarea[placeholder*="describe a task"], input[placeholder*="Make an app"]').first
@@ -568,7 +690,7 @@ class PCAutomation:
         self.log("\n🛑 Closing browser...", Fore.CYAN)
         if self.context:
             self.save_state()
-        if self.browser:
+        if self.browser and self._owns_browser:
             self.browser.close()
         if self.playwright:
             self.playwright.stop()

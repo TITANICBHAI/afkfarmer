@@ -35,6 +35,14 @@ class PcFlowClassificationTests(unittest.TestCase):
         )
         self.assertEqual(
             classify_signup_state(
+                "https://replit.com/",
+                "Create your account",
+                baseline_url="https://replit.com/",
+            ),
+            "waiting",
+        )
+        self.assertEqual(
+            classify_signup_state(
                 "https://replit.com/signup",
                 "Check your inbox for the verification email",
             ),

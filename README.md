@@ -1,7 +1,7 @@
 # Onboarding Flow Automation
 
 Local workflow automation for the operator's own Replit onboarding flow across
-Microsoft Edge and an operator-owned Android device.
+a Chromium-family browser and an operator-owned Android device.
 
 The flow is intentionally manual at CAPTCHA or anti-bot checkpoints. It is
 not a bulk-account tool, a rate-limit bypass, or a credential-harvesting tool.
@@ -49,8 +49,8 @@ only after completing and verifying them.
 ## Intended runtime
 
 - Python 3.8+
-- Playwright controlling Microsoft Edge when available, otherwise workspace
-  Chromium
+- Playwright controlling the configured Chromium-family browser, otherwise
+  workspace Chromium
 - ADB in `PATH`
 - An operator-owned Android device with USB debugging enabled
 - `requests`
@@ -94,8 +94,8 @@ bash run_pc_automation.sh --check-runtime
 bash run_pc_automation.sh
 ```
 
-The wrapper uses Microsoft Edge when available and otherwise uses the
-workspace Chromium binary. Provider-side Cloudflare blocks are not bypassed.
+The wrapper uses the configured browser or workspace Chromium. Provider-side
+Cloudflare blocks are not bypassed.
 
 ## Windows 10 usage
 
@@ -127,10 +127,27 @@ Run this once:
 python -m pip install -r requirements.txt
 ```
 
-### 3. Configure Microsoft Edge
+### 3. Configure the browser
 
-The automation can use the installed Microsoft Edge executable. In Command
-Prompt, set the path for the current terminal window:
+The automation first tries to attach to an already-open Chromium-family browser
+when `PLAYWRIGHT_CDP_URL` is set. This reuses the existing browser context and
+tabs, and the automation will not close that browser when it finishes. A
+regular browser process cannot be attached to after launch, so start the
+browser with remote debugging enabled before running the script. For example,
+on Windows:
+
+```cmd
+start "" "C:\Program Files\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
+set "PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222"
+```
+
+The same approach works with Chrome, Chromium, or another Chromium-family
+browser; only the executable path changes. Keep the `temp-mail.org` and
+`replit.com` tabs open if you want those exact tabs reused.
+
+If `PLAYWRIGHT_CDP_URL` is not set or the endpoint is unavailable, the script
+starts a managed browser. It does not force Microsoft Edge: configure either a
+browser executable:
 
 ```cmd
 set "PLAYWRIGHT_EXECUTABLE_PATH=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -140,6 +157,13 @@ If Edge is installed under `C:\Program Files`, use:
 
 ```cmd
 set "PLAYWRIGHT_EXECUTABLE_PATH=C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+```
+
+Or configure a Playwright browser channel such as `chrome`, `msedge`, or
+`chromium`:
+
+```cmd
+set "PLAYWRIGHT_BROWSER_CHANNEL=chrome"
 ```
 
 Check the configured path:
@@ -222,7 +246,7 @@ operator's repository URL.
 ### 6. Run the safe preflight check
 
 This checks source syntax, configuration, Python dependencies, and ADB without
-opening Edge or launching the Android app:
+opening the browser or launching the Android app:
 
 ```cmd
 python preflight.py
@@ -230,7 +254,7 @@ python preflight.py
 
 ### 7. Start the automation
 
-Keep the Edge and ADB environment variables configured in the same terminal,
+Keep the browser and ADB environment variables configured in the same terminal,
 then run:
 
 ```cmd
@@ -242,7 +266,7 @@ Replit registration flow, pauses for manual CAPTCHA handling when necessary,
 verifies the mailbox message, controls the Replit Android app, resumes the PC
 session, and attempts the visible GitHub import flow.
 
-There is no separate desktop GUI. The user interface is the visible Edge
+There is no separate desktop GUI. The user interface is the visible browser
 window, the real Android app, and the interactive terminal prompts.
 
 ### 8. Recovery and terminal choices
@@ -278,7 +302,7 @@ Only do this intentionally; it removes the ability to resume the saved run.
 
 ### Windows safety and readiness
 
-Before a real run, confirm that Edge is ready, `adb devices` shows the
+Before a real run, confirm that the configured browser is ready, `adb devices` shows the
 operator-owned unlocked phone, and manual CAPTCHA handling is available. Do not
 run the Android or external-account flow without explicit operator approval.
 

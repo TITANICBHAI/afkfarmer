@@ -175,7 +175,36 @@ class TempMailOrgProvider(TempMailProvider):
         """Open the provider page in the shared browser context."""
 
         if self.page is None or self.page.is_closed():
-            self.page = self.context.new_page()
+            existing_pages = []
+            try:
+                existing_pages = [
+                    page for page in self.context.pages if not page.is_closed()
+                ]
+            except Exception:
+                pass
+
+            # Prefer the mailbox tab the operator already opened. If it is not
+            # present, reuse a blank tab before creating a new tab in the same
+            # browser context. This never launches another browser instance.
+            self.page = next(
+                (
+                    page
+                    for page in existing_pages
+                    if "temp-mail.org" in page.url.casefold()
+                ),
+                None,
+            )
+            if self.page is None:
+                self.page = next(
+                    (
+                        page
+                        for page in existing_pages
+                        if page.url in {"", "about:blank", "chrome://newtab/"}
+                    ),
+                    None,
+                )
+            if self.page is None:
+                self.page = self.context.new_page()
         try:
             self.context.grant_permissions(
                 ["clipboard-read", "clipboard-write"],

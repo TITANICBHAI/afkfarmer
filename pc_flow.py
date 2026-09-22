@@ -79,6 +79,7 @@ def classify_signup_state(
     current_url: Any,
     page_text: Any,
     signup_url: str = "https://replit.com/signup",
+    baseline_url: Any = None,
 ) -> str:
     """Classify a visible registration result as waiting, error, or submitted."""
 
@@ -88,7 +89,7 @@ def classify_signup_state(
         return "validation"
     if any(pattern.search(str(page_text or "")) for pattern in SUCCESS_PATTERNS):
         return "submitted"
-    if _url_changed(current_url, signup_url):
+    if _url_changed(current_url, baseline_url if baseline_url is not None else signup_url):
         return "submitted"
     return "waiting"
 
