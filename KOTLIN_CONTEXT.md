@@ -54,7 +54,9 @@ Read these in order:
 5. `KOTLIN_ARCHITECTURE.md` — proposed Kotlin design;
 6. `KOTLIN_PLAN.md` — migration milestones and gates;
 7. `KOTLIN_STEPS.md` — operational Android runbook;
-8. `VISUAL_FALLBACK.md` — deferred visual-evidence rules.
+8. `KOTLIN_AGENT_PROMPTS.md` — scoped prompts for future implementation and
+   validation sessions;
+9. `VISUAL_FALLBACK.md` — deferred visual-evidence rules.
 
 If an older attached note conflicts with these files, use the current
 `CORE_FLOW.md`, implementation contracts, and verified tracker state.

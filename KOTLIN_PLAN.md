@@ -344,6 +344,8 @@ The current planning and implementation-context documents are:
 - `KOTLIN_PLAN.md` — migration milestones, gates, and acceptance criteria;
 - `KOTLIN_STEPS.md` — operational Android runbook with preconditions,
   postconditions, failure behavior, and resume rules.
+- `KOTLIN_AGENT_PROMPTS.md` — scoped prompts for future implementation,
+  validation, and migration-review sessions.
 
 Do not add a setup guide or test matrix until the Kotlin project is scaffolded.
 At that point, create them only if they contain information that cannot be
