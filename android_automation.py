@@ -26,6 +26,58 @@ except ImportError:
 
 BOUNDS_PATTERN = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 EMAIL_LOGIN_TEXT = ("continue with email", "email or username")
+ANDROID_STATES = frozenset(
+    {
+        "HOME",
+        "APP_DRAWER",
+        "REPLIT_LOADING",
+        "REPLIT_READY",
+        "EMAIL_LOGIN",
+        "EMAIL_ENTRY",
+        "PASSWORD_ENTRY",
+        "LOGIN_PROCESSING",
+        "LOGIN_RETRY",
+        "WELCOME",
+        "ONBOARDING",
+        "PROFILE",
+        "LOGOUT_CONFIRMATION",
+        "LOGGED_OUT",
+        "ANDROID_HOME",
+        "COMPLETE",
+        "SECURITY_CHALLENGE",
+        "ERROR",
+    }
+)
+CANONICAL_STATE_NAMES = {
+    "initial_login": "REPLIT_READY",
+    "email_choice": "EMAIL_LOGIN",
+    "email_login": "EMAIL_ENTRY",
+    "password_login": "PASSWORD_ENTRY",
+    "login_processing": "LOGIN_PROCESSING",
+    "invalid_credentials": "LOGIN_RETRY",
+    "welcome_onboarding": "WELCOME",
+    "name": "ONBOARDING",
+    "username": "ONBOARDING",
+    "source": "ONBOARDING",
+    "role": "ONBOARDING",
+    "plan": "ONBOARDING",
+    "main": "REPLIT_READY",
+    "profile_menu": "PROFILE",
+    "logout_dialog": "LOGOUT_CONFIRMATION",
+    "logged_out": "LOGGED_OUT",
+    "post_close_home": "ANDROID_HOME",
+    "security_challenge": "SECURITY_CHALLENGE",
+    "unknown": "ERROR",
+}
+SECURITY_CHALLENGE_PATTERNS = (
+    re.compile(r"\bcaptcha\b", re.IGNORECASE),
+    re.compile(r"\brecaptcha\b", re.IGNORECASE),
+    re.compile(r"\bverify you are human\b", re.IGNORECASE),
+    re.compile(r"\bsuspicious(?:\s+login|\s+activity)?\b", re.IGNORECASE),
+    re.compile(r"\baccount\s+(?:restricted|locked|suspended)\b", re.IGNORECASE),
+    re.compile(r"\brate\s*limit(?:ed)?\b", re.IGNORECASE),
+    re.compile(r"\badditional\s+(?:identity|security)\s+verification\b", re.IGNORECASE),
+)
 SCREENSHOT_REFERENCES = {
     "email_login": (
         "attached_assets/7_1790062961791.jpg",
@@ -58,6 +110,12 @@ def screenshot_references_for_state(state: str) -> Tuple[str, ...]:
     """Return the supplied visual references for a classified Android state."""
 
     return tuple(SCREENSHOT_REFERENCES.get(state, ()))
+
+
+def canonical_android_state(state: str) -> str:
+    """Map detailed classifiers to the stable state-machine vocabulary."""
+
+    return CANONICAL_STATE_NAMES.get(state, "ERROR")
 
 
 def parse_bounds(value: Any) -> Optional[Tuple[int, int, int, int]]:
@@ -109,6 +167,8 @@ def classify_screen(root: Optional[ET.Element]) -> str:
     """Classify the visible Android state represented by a UI dump."""
 
     text = _node_text(root).casefold()
+    if any(pattern.search(text) for pattern in SECURITY_CHALLENGE_PATTERNS):
+        return "security_challenge"
     if "are you sure you want to log out" in text:
         return "logout_dialog"
     if "invalid username or password" in text:
@@ -189,6 +249,8 @@ class AndroidAutomation:
         self.screen_h: Optional[int] = None
         self.last_adb_ok = False
         self.last_adb_error = ""
+        self.last_observed_state = "unknown"
+        self.last_failure_reason = ""
         self.log("Android adapter initialized; device verification is pending.", Fore.CYAN)
 
     # ================= LOW-LEVEL ADB HELPERS =================
@@ -339,11 +401,17 @@ class AndroidAutomation:
 
     def force_stop_and_verify(self, package_name: str) -> bool:
         if not self.close_app(package_name):
+            self.last_failure_reason = "force_stop_command_failed"
             return False
         deadline = time.monotonic() + ELEMENT_WAIT_TIMEOUT
         while time.monotonic() < deadline:
             foreground = self.foreground_package()
             running = self.package_running(package_name)
+            self.last_observed_state = (
+                "post_close_home"
+                if foreground is not None and foreground != package_name and running is False
+                else "unknown"
+            )
             if (
                 foreground is not None
                 and foreground != package_name
@@ -459,18 +527,43 @@ class AndroidAutomation:
     ) -> Optional[ET.Element]:
         expected_states: Set[str] = set(expected)
         deadline = time.monotonic() + (timeout or ELEMENT_WAIT_TIMEOUT)
+        retry_count = 0
+        expected_label = ",".join(sorted(expected_states))
         while time.monotonic() < deadline:
             root = self.dump_ui()
             state = classify_screen(root)
+            self.last_observed_state = state
+            if state == "security_challenge":
+                self.last_failure_reason = "security_challenge"
+                self.log(
+                    f"state={canonical_android_state(state)} action={transition} "
+                    f"expected={expected_label} detected={state} retry={retry_count} "
+                    f"timeout={timeout or ELEMENT_WAIT_TIMEOUT} "
+                    "failure_reason=security_challenge",
+                    Fore.YELLOW,
+                )
+                self.save_failure_evidence(f"{transition}_security_challenge")
+                return None
             if root is not None and state in expected_states:
                 references = screenshot_references_for_state(state)
                 reference_note = f" ({len(references)} screenshot reference(s))" if references else ""
                 self.log(
-                    f"{transition}: observed Android state {state}{reference_note}.",
+                    f"state={canonical_android_state(state)} action={transition} "
+                    f"expected={expected_label} detected={state} retry={retry_count} "
+                    f"timeout={timeout or ELEMENT_WAIT_TIMEOUT}{reference_note}",
                     Fore.GREEN,
                 )
                 return root
+            retry_count += 1
             time.sleep(0.5)
+        self.last_failure_reason = "timeout"
+        self.log(
+            f"state={canonical_android_state(self.last_observed_state)} action={transition} "
+            f"expected={expected_label} detected={self.last_observed_state} "
+            f"retry={retry_count} timeout={timeout or ELEMENT_WAIT_TIMEOUT} "
+            "failure_reason=timeout",
+            Fore.RED,
+        )
         self.save_failure_evidence(transition)
         return None
 
@@ -490,6 +583,42 @@ class AndroidAutomation:
             return None
         return self.wait_for_state(destination_states, transition)
 
+    def _wait_for_email_entry(
+        self, timeout: Optional[float] = None
+    ) -> Optional[ET.Element]:
+        """Accept either email-login text or an actionable field on that screen.
+
+        Some Android builds keep the provider-choice copy visible after
+        ``Continue with Email`` is tapped. The field is still the authoritative
+        signal that email entry is ready, so do not require the keyboard or one
+        exact screen label.
+        """
+
+        deadline = time.monotonic() + (timeout or ELEMENT_WAIT_TIMEOUT)
+        retry_count = 0
+        while time.monotonic() < deadline:
+            root = self.dump_ui()
+            state = classify_screen(root)
+            self.last_observed_state = state
+            if state == "security_challenge":
+                self.last_failure_reason = "security_challenge"
+                self.save_failure_evidence("email_entry_security_challenge")
+                return None
+            field = self.find_element(root=root, cls="android.widget.EditText")
+            if root is not None and (state == "email_login" or field is not None):
+                self.log(
+                    f"state={canonical_android_state('email_login')} "
+                    f"action=email_entry expected=EMAIL_ENTRY detected={state} "
+                    f"retry={retry_count} timeout={timeout or ELEMENT_WAIT_TIMEOUT}",
+                    Fore.GREEN,
+                )
+                return root
+            retry_count += 1
+            time.sleep(0.5)
+        self.last_failure_reason = "timeout"
+        self.save_failure_evidence("email_entry_timeout")
+        return None
+
     def _type_into_field(self, root: Optional[ET.Element], value: str, transition: str) -> bool:
         node = self.find_element(root=root, cls="android.widget.EditText")
         if node is None or not self.tap_node(node) or not self.type_text(value):
@@ -498,6 +627,7 @@ class AndroidAutomation:
         return True
 
     def save_failure_evidence(self, tag: str = "error") -> None:
+        self.last_failure_reason = tag
         safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", tag)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         output_dir = Path("screenshots")
@@ -535,12 +665,12 @@ class AndroidAutomation:
                 "select_email",
                 {"email_choice"},
                 [{"text": "Continue with Email"}, {"text": "Email"}],
-                {"email_login"},
+                {"email_login", "email_choice"},
             )
             if root is None:
                 return False
 
-        root = self.wait_for_state({"email_login"}, "email_login_screen")
+        root = self._wait_for_email_entry()
         if root is None or not self._type_into_field(root, email, "email"):
             return False
         root = self._tap_and_wait(

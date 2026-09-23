@@ -17,7 +17,7 @@ from pc_flow import (
     classify_session_state,
     classify_signup_state,
     find_validation_errors,
-    has_captcha_text,
+    has_security_challenge_text,
 )
 from temp_mail import TempMailOrgProvider
 
@@ -480,9 +480,14 @@ class PCAutomation:
         return errors
 
     def _captcha_present(self) -> bool:
-        if has_captcha_text(self._page_text()):
+        if has_security_challenge_text(self._page_text()):
             return True
         return self._visible_control(self.CAPTCHA_SELECTORS, timeout=500) is not None
+
+    def _security_challenge_present(self) -> bool:
+        """Detect CAPTCHA and other challenges that require manual takeover."""
+
+        return self._captcha_present()
 
     def _wait_for_session_or_login(self, timeout=30_000) -> str:
         """Wait for an observable authenticated or login-required state."""
@@ -592,30 +597,34 @@ class PCAutomation:
             pass
 
     def handle_captcha(self):
-        """Pause for manual CAPTCHA handling and verify it is no longer visible."""
+        """Pause for manual security handling and verify it is resolved."""
 
-        if not self._captcha_present():
+        if not self._security_challenge_present():
             return True
-        self.log("\n⚠️ CAPTCHA or anti-bot challenge detected.", Fore.YELLOW)
+        self.log("\n⚠️ Security or anti-bot challenge detected.", Fore.YELLOW)
         self.log(
-            "🛑 PAUSING: Solve it manually in the workspace browser window; "
+            "🛑 PAUSING: Complete it manually in the browser window; "
             "automation will not solve or retry it.",
             Fore.YELLOW,
         )
         input("👉 Press ENTER here once it is solved...")
-        if self._captcha_present():
+        if self._security_challenge_present():
             self._save_failure("captcha_unresolved")
-            self.log("❌ CAPTCHA still appears unresolved.", Fore.RED)
+            self.log("❌ Security challenge still appears unresolved.", Fore.RED)
             return False
-        self.log("✅ CAPTCHA no longer visible. Resuming.", Fore.GREEN)
+        self.log("✅ Security challenge no longer visible. Resuming.", Fore.GREEN)
         return True
 
-    def create_account(self):
+    def create_account(self, email: Optional[str] = None, password: Optional[str] = None):
         self.log("\n" + "="*60, Fore.MAGENTA)
         self.log("💻 PC: Creating Replit Account", Fore.MAGENTA)
         self.log("="*60, Fore.MAGENTA)
         
         try:
+            if email is not None:
+                self.email = email
+            if password is not None:
+                self.password = password
             self.log("\n[1] Navigating to Replit...", Fore.CYAN)
             self._page_for_replit()
             self.page.goto(self.REPLIT_URL, wait_until="domcontentloaded")
@@ -754,7 +763,7 @@ class PCAutomation:
                 self._page_text(),
                 baseline_url=submit_url,
             )
-            if state == "captcha":
+            if state in {"captcha", "security_challenge"}:
                 return self.handle_captcha()
             if state == "validation":
                 self._save_failure("signup_validation_after_submit")

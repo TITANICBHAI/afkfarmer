@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import py_compile
 import shutil
 import subprocess
@@ -93,7 +94,31 @@ def check_dependencies() -> list[str]:
 
 
 def check_external_tools() -> list[str]:
-    return [] if shutil.which("adb") else ["missing external tool: adb"]
+    problems = [] if shutil.which("adb") else ["missing external tool: adb"]
+    configured_executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH", "").strip()
+    if configured_executable:
+        if not Path(configured_executable).expanduser().is_file():
+            problems.append(
+                "configured browser executable does not exist: "
+                f"{configured_executable}"
+            )
+    elif not os.environ.get("PLAYWRIGHT_CDP_URL", "").strip():
+        browser_commands = (
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+            "microsoft-edge",
+            "brave",
+        )
+        known_browser = any(shutil.which(command) for command in browser_commands)
+        known_browser = known_browser or Path("/repl/tools/bin/chromium").is_file()
+        if not known_browser:
+            problems.append(
+                "no Chromium-family browser executable found and "
+                "PLAYWRIGHT_CDP_URL is not configured"
+            )
+    return problems
 
 
 def check_adb_devices(require_device: bool = False) -> list[str]:

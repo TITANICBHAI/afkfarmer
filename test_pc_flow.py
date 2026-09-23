@@ -5,6 +5,7 @@ from pc_flow import (
     classify_signup_state,
     find_validation_errors,
     has_captcha_text,
+    has_security_challenge_text,
 )
 
 
@@ -13,6 +14,11 @@ class PcFlowClassificationTests(unittest.TestCase):
         self.assertTrue(has_captcha_text("Please verify you are human"))
         self.assertTrue(has_captcha_text("reCAPTCHA challenge"))
         self.assertFalse(has_captcha_text("Check your inbox"))
+        self.assertTrue(has_security_challenge_text("Suspicious login detected"))
+        self.assertTrue(
+            has_security_challenge_text("Additional identity verification required")
+        )
+        self.assertFalse(has_security_challenge_text("Check your inbox"))
 
     def test_validation_errors_are_extracted_and_deduplicated(self):
         body = """

@@ -14,6 +14,14 @@ CAPTCHA_PATTERNS = (
     re.compile(r"\bverify you are human\b", re.IGNORECASE),
 )
 
+SECURITY_CHALLENGE_PATTERNS = CAPTCHA_PATTERNS + (
+    re.compile(r"\bsuspicious(?:\s+login|\s+activity)?\b", re.IGNORECASE),
+    re.compile(r"\baccount\s+(?:restricted|locked|suspended)\b", re.IGNORECASE),
+    re.compile(r"\brate\s*limit(?:ed)?\b", re.IGNORECASE),
+    re.compile(r"\badditional\s+(?:identity|security)\s+verification\b", re.IGNORECASE),
+    re.compile(r"\bsecurity\s+verification\b", re.IGNORECASE),
+)
+
 VALIDATION_PATTERNS = (
     re.compile(r"\binvalid email\b", re.IGNORECASE),
     re.compile(r"\bemail(?: address)?\s+(?:is\s+)?required\b", re.IGNORECASE),
@@ -50,6 +58,13 @@ def has_captcha_text(value: Any) -> bool:
     return any(pattern.search(text) for pattern in CAPTCHA_PATTERNS)
 
 
+def has_security_challenge_text(value: Any) -> bool:
+    """Return whether visible text requires manual security intervention."""
+
+    text = _text(value)
+    return any(pattern.search(text) for pattern in SECURITY_CHALLENGE_PATTERNS)
+
+
 def find_validation_errors(value: Any) -> list[str]:
     """Return unique visible lines that look like registration errors."""
 
@@ -83,8 +98,8 @@ def classify_signup_state(
 ) -> str:
     """Classify a visible registration result as waiting, error, or submitted."""
 
-    if has_captcha_text(page_text):
-        return "captcha"
+    if has_security_challenge_text(page_text):
+        return "captcha" if has_captcha_text(page_text) else "security_challenge"
     if find_validation_errors(page_text):
         return "validation"
     if any(pattern.search(str(page_text or "")) for pattern in SUCCESS_PATTERNS):

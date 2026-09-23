@@ -1,7 +1,11 @@
 import unittest
 from unittest.mock import Mock
 
-from email_provider import EmailProvider, EmailProviderError
+from email_provider import (
+    EmailProvider,
+    EmailProviderError,
+    verification_success_observed,
+)
 from email_providers import (
     FallbackEmailProvider,
     ManualEmailProvider,
@@ -75,6 +79,10 @@ class EmailProviderTests(unittest.TestCase):
         provider = OneSecMailProvider(session=session)
         with self.assertRaises(EmailProviderError):
             provider.obtain_address()
+
+    def test_intermediate_verifying_message_is_not_final_success(self):
+        self.assertFalse(verification_success_observed("Verifying email"))
+        self.assertTrue(verification_success_observed("Email verification success"))
 
 
 if __name__ == "__main__":

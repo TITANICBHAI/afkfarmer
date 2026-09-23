@@ -15,7 +15,11 @@ from typing import Any, Optional
 
 import requests
 
-from email_provider import EmailProvider, EmailProviderError
+from email_provider import (
+    EmailProvider,
+    EmailProviderError,
+    verification_success_observed,
+)
 from temp_mail import (
     extract_verification_url,
     is_replit_verification_message,
@@ -310,25 +314,10 @@ class OneSecMailProvider(EmailProvider):
                 f"Verification did not return an acceptable HTTP status "
                 f"({response.status_code})."
             )
-        final_url = str(getattr(response, "url", "") or "").casefold()
         response_text = " ".join(
             str(getattr(response, "text", "") or "").casefold().split()
         )
-        if not any(
-            phrase in response_text
-            for phrase in (
-                "email verified",
-                "verification successful",
-                "verifying email",
-                "email verification success",
-                "success! this window will close automatically",
-            )
-        ) and not (
-            final_url
-            and "/action-code" not in final_url
-            and "replit.com" in final_url
-            and response_text
-        ):
+        if not verification_success_observed(response_text):
             raise EmailProviderError(
                 "Verification request completed without an observable success state."
             )

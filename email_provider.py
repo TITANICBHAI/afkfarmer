@@ -10,6 +10,28 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 
+def normalized_message_text(value: Any) -> str:
+    """Normalize mailbox or verification-page text for stable matching."""
+
+    return " ".join(str(value or "").casefold().split())
+
+
+VERIFICATION_SUCCESS_PHRASES = (
+    "email verified",
+    "verification successful",
+    "email verification success",
+    "success! this window will close automatically",
+    "your email has been verified",
+)
+
+
+def verification_success_observed(value: Any) -> bool:
+    """Return true only for an explicit completed-verification message."""
+
+    text = normalized_message_text(value)
+    return any(phrase in text for phrase in VERIFICATION_SUCCESS_PHRASES)
+
+
 class EmailProviderError(RuntimeError):
     """Raised when a mailbox state or verification result cannot be proven."""
 

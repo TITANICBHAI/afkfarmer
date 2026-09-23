@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
-from email_provider import EmailProvider, EmailProviderError
+from email_provider import (
+    EmailProvider,
+    EmailProviderError,
+    verification_success_observed,
+)
 
 
 EMAIL_PATTERN = re.compile(
@@ -393,11 +397,11 @@ class TempMailOrgProvider(EmailProvider):
         if self.page is None:
             self.open()
         try:
-                self.page.wait_for_function(
-                    r"""() => {
+            self.page.wait_for_function(
+                r"""() => {
                     const text = document.body?.innerText || "";
-                            return /verify@replit\.com/i.test(text) &&
-                                   /replit.*(verify|verification)|(verify|verification).*replit/i.test(text);
+                    return /verify@replit\.com/i.test(text) &&
+                           /replit.*(verify|verification)|(verify|verification).*replit/i.test(text);
                 }""",
                 timeout=self.timeout_ms,
             )
@@ -465,20 +469,12 @@ class TempMailOrgProvider(EmailProvider):
     def _verification_success_observed(self) -> bool:
         deadline = time.monotonic() + (self.timeout_ms / 1_000)
         while time.monotonic() < deadline:
+            self._select_verification_page()
             try:
                 if self.page.is_closed():
                     return True
                 text = " ".join(self.page.locator("body").inner_text().split()).casefold()
-                if any(
-                    phrase in text
-                    for phrase in (
-                        "email verified",
-                        "verification successful",
-                        "verifying email",
-                        "email verification success",
-                        "success! this window will close automatically",
-                    )
-                ):
+                if verification_success_observed(text):
                     return True
             except Exception:
                 try:
@@ -491,6 +487,35 @@ class TempMailOrgProvider(EmailProvider):
             except Exception:
                 time.sleep(0.25)
         return False
+
+    def _select_verification_page(self) -> None:
+        """Switch to a newly opened Replit verification tab when present."""
+
+        if self.context is None:
+            return
+        try:
+            pages = [page for page in self.context.pages if not page.is_closed()]
+        except Exception:
+            return
+        for page in pages:
+            if page is self.page:
+                continue
+            try:
+                page_url = page.url.casefold()
+            except Exception:
+                continue
+            if "replit.com" not in page_url:
+                continue
+            if "/action-code" in page_url:
+                self.page = page
+                return
+            try:
+                body_text = " ".join(page.locator("body").inner_text().split()).casefold()
+            except Exception:
+                body_text = ""
+            if "verifying email" in body_text or verification_success_observed(body_text):
+                self.page = page
+                return
 
     def verify_email(self) -> bool:
         """Follow direct Verify Now or legacy Verify Email controls."""
@@ -525,6 +550,7 @@ class TempMailOrgProvider(EmailProvider):
             # The verification page can close itself while navigation is still
             # being observed.
             pass
+        self._select_verification_page()
 
         # Some message layouts expose Verify Email first and Verify Now only
         # after the message content has rendered.
@@ -541,6 +567,7 @@ class TempMailOrgProvider(EmailProvider):
                 self.page.wait_for_load_state("domcontentloaded")
             except Exception:
                 pass
+            self._select_verification_page()
 
         if self._verification_success_observed():
             return True

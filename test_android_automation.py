@@ -6,6 +6,7 @@ from android_automation import (
     AndroidAutomation,
     SCREENSHOT_REFERENCES,
     classify_screen,
+    canonical_android_state,
     encode_adb_text,
     node_is_actionable,
     parse_adb_devices,
@@ -153,6 +154,12 @@ class AndroidScreenClassificationTests(unittest.TestCase):
         )
         self.assertEqual(classify_screen(invalid), "invalid_credentials")
         self.assertEqual(classify_screen(processing), "login_processing")
+        self.assertEqual(canonical_android_state("invalid_credentials"), "LOGIN_RETRY")
+
+    def test_security_challenges_are_terminal_manual_states(self):
+        root = ui_root(ui_node("Suspicious login detected"))
+        self.assertEqual(classify_screen(root), "security_challenge")
+        self.assertEqual(canonical_android_state("security_challenge"), "SECURITY_CHALLENGE")
 
     def test_onboarding_and_logout_states_match_reference_screens(self):
         fixtures = {
