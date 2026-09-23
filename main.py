@@ -14,6 +14,7 @@ from config import (
     GITHUB_REPO_URL,
     PRIMARY_EMAIL_API,
     REPLIT_PASSWORD,
+    RUN_POST_ANDROID_STAGES,
     TEMP_MAIL_PROVIDER,
     TEMP_MAIL_URL,
     USER_CUSTOM_EMAIL,
@@ -36,8 +37,9 @@ def fresh_state():
         "email_provider": None,
         "username": None,
         "password_ref": PASSWORD_REF,
-        "verification_link": None,
+        "verification_completed": False,
         "github_repo": GITHUB_REPO_URL,
+        "completion_status": "IN_PROGRESS",
         "decisions": [],
     }
 
@@ -67,7 +69,10 @@ class ReplitAutomationOrchestrator:
                     # Migrate old checkpoints without carrying the password
                     # into the persisted state or browser-resume metadata.
                     state.pop("password", None)
+                    state.pop("verification_link", None)
                     state["password_ref"] = PASSWORD_REF
+                    state.setdefault("verification_completed", False)
+                    state.setdefault("completion_status", "IN_PROGRESS")
                     if not isinstance(state.get("decisions"), list):
                         state["decisions"] = []
                     return state
@@ -82,6 +87,7 @@ class ReplitAutomationOrchestrator:
     def _state_payload(self):
         payload = dict(self.state)
         payload.pop("password", None)
+        payload.pop("verification_link", None)
         payload["password_ref"] = PASSWORD_REF
         return payload
 
@@ -126,6 +132,13 @@ class ReplitAutomationOrchestrator:
         return STAGES[index + 1]
 
     def _record_outcome(self, stage, outcome):
+        status_by_outcome = {
+            "manual_takeover": "MANUAL_COMPLETION",
+            "skip": "SKIPPED",
+            "quit": "FAILED",
+        }
+        if outcome in status_by_outcome:
+            self.state["completion_status"] = status_by_outcome[outcome]
         self._save_state(
             stage,
             in_progress=self.state.get("in_progress"),
@@ -196,7 +209,7 @@ class ReplitAutomationOrchestrator:
         self.pc.open_verification_message()
         verified = bool(self.pc.verify_email())
         if verified:
-            self.state["verification_link"] = self.pc.verification_url
+            self.state["verification_completed"] = True
         return verified
 
     def stage_android(self):
@@ -322,6 +335,15 @@ class ReplitAutomationOrchestrator:
                 self.reset_state()
                 start = "EMAIL"
 
+        if not RUN_POST_ANDROID_STAGES and start in {"PC_LOGIN", "GITHUB"}:
+            self.log(
+                "\nPost-Android stages are disabled; marking the core flow complete.",
+                Fore.YELLOW,
+            )
+            self.state["completion_status"] = "AUTOMATED_SUCCESS"
+            self._save_state("DONE")
+            return
+
         handlers = {
             "EMAIL": self.stage_email,
             "SIGNUP": self.stage_signup,
@@ -332,14 +354,28 @@ class ReplitAutomationOrchestrator:
         }
 
         try:
-            for name in STAGES[STAGES.index(start):STAGES.index("DONE")]:
+            last_stage = "GITHUB" if RUN_POST_ANDROID_STAGES else "ANDROID"
+            for name in STAGES[STAGES.index(start):STAGES.index(last_stage) + 1]:
                 if not self.run_stage(name, handlers[name]):
                     self.log("\n🛑 Automation aborted by user.", Fore.YELLOW)
                     return
 
+            decisions = self.state.get("decisions", [])
+            if any(decision.get("outcome") == "skip" for decision in decisions):
+                self.state["completion_status"] = "SKIPPED"
+            elif any(
+                decision.get("outcome") == "manual_takeover"
+                for decision in decisions
+            ):
+                self.state["completion_status"] = "MANUAL_COMPLETION"
+            else:
+                self.state["completion_status"] = "AUTOMATED_SUCCESS"
             self._save_state("DONE")
             self.log("\n" + "=" * 60, Fore.GREEN)
-            self.log("✅ AUTOMATION COMPLETE!", Fore.GREEN)
+            self.log(
+                f"✅ RUN COMPLETE: {self.state['completion_status']}",
+                Fore.GREEN,
+            )
             self.log("=" * 60, Fore.GREEN)
             self.log(f"📧 Account: {self.state['temp_email']}")
             self.log(f"👤 Username: {self.state['username']}")
@@ -350,8 +386,12 @@ class ReplitAutomationOrchestrator:
             time.sleep(30)
 
         except KeyboardInterrupt:
+            self.state["completion_status"] = "FAILED"
+            self._write_state_atomically()
             self.log("\n\n⚠️ Interrupted by user. Progress saved — rerun to resume.", Fore.YELLOW)
         except Exception as e:
+            self.state["completion_status"] = "FAILED"
+            self._write_state_atomically()
             self.log(f"\n\n❌ Critical error: {e}", Fore.RED)
             import traceback
             traceback.print_exc()

@@ -7,6 +7,7 @@ configured site when ``obtain_address`` is called by the orchestrator.
 from __future__ import annotations
 
 import re
+import time
 from html import unescape
 from pathlib import Path
 from typing import Any, Optional
@@ -171,6 +172,7 @@ class TempMailOrgProvider(EmailProvider):
         self.timeout_ms = timeout_ms
         self.page: Optional[Any] = None
         self.address: Optional[str] = None
+        self._verification_started = False
 
     def open(self) -> Any:
         """Open the provider page in the shared browser context."""
@@ -468,18 +470,21 @@ class TempMailOrgProvider(EmailProvider):
 
     def _verification_success_observed(self) -> bool:
         deadline = time.monotonic() + (self.timeout_ms / 1_000)
+        saw_verifying_state = False
         while time.monotonic() < deadline:
             self._select_verification_page()
             try:
                 if self.page.is_closed():
-                    return True
+                    return saw_verifying_state
                 text = " ".join(self.page.locator("body").inner_text().split()).casefold()
+                if "verifying email" in text:
+                    saw_verifying_state = True
                 if verification_success_observed(text):
                     return True
             except Exception:
                 try:
                     if self.page.is_closed():
-                        return True
+                        return saw_verifying_state
                 except Exception:
                     pass
             try:
@@ -539,6 +544,7 @@ class TempMailOrgProvider(EmailProvider):
             raise TempMailError("The visible verification destination was rejected.")
         if href:
             self.verification_url = href
+        self._verification_started = True
         try:
             control.click()
         except Exception as exc:
