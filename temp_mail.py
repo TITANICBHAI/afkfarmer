@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
+from email_providers import EmailProvider
+
 
 EMAIL_PATTERN = re.compile(
     r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
@@ -33,6 +35,8 @@ VERIFICATION_URL_PATTERN = re.compile(
 class TempMailError(RuntimeError):
     """Raised when a mailbox state cannot be proven."""
 
+
+EmailProviderError = TempMailError
 
 def normalize_email(value: Any) -> str:
     """Return a normalized candidate email address or an empty string."""
@@ -70,7 +74,9 @@ def is_replit_verification_message(sender: Any, subject: Any) -> bool:
     subject_text = " ".join(str(subject or "").split()).casefold()
     return (
         bool(re.search(r"\bverify@replit\.com\b", sender_text, flags=re.IGNORECASE))
-        and subject_text == "replit verify email"
+        and "replit" in subject_text
+        and "verify" in subject_text
+        and ("email" in subject_text or "mail" in subject_text)
     )
 
 
@@ -104,15 +110,10 @@ def is_expected_verification_url(value: Any) -> bool:
     )
 
 
-class TempMailProvider(ABC):
-    """Small interface used by the PC orchestrator."""
-
-    @abstractmethod
-    def obtain_address(self) -> str:
-        """Open the provider and return a verified mailbox address."""
+TempMailProvider = EmailProvider
 
 
-class TempMailOrgProvider(TempMailProvider):
+class TempMailOrgProvider(EmailProvider):
     """Read and verify the visible mailbox address from temp-mail.org."""
 
     URL = "https://temp-mail.org/"
@@ -399,8 +400,8 @@ class TempMailOrgProvider(TempMailProvider):
             self.page.wait_for_function(
                 """() => {
                     const text = document.body?.innerText || "";
-                    return text.includes("verify@replit.com") &&
-                           text.toLowerCase().includes("replit verify email");
+                            return /verify@replit\.com/i.test(text) &&
+                                   /replit.*(verify|verification)|(verify|verification).*replit/i.test(text);
                 }""",
                 timeout=self.timeout_ms,
             )
@@ -418,14 +419,17 @@ class TempMailOrgProvider(TempMailProvider):
             normalized_text = " ".join(text.split()).casefold()
             if (
                 "verify@replit.com" in normalized_text
-                and "replit verify email" in normalized_text
+                and is_replit_verification_message(
+                    "verify@replit.com",
+                    normalized_text,
+                )
             ):
                 try:
                     row.click()
                     self.page.wait_for_function(
                         """() => {
                             const text = document.body?.innerText || "";
-                            return text.toLowerCase().includes("verify email");
+                            return /verify\s+(email|now)|verification|action-code/i.test(text);
                         }""",
                         timeout=self.timeout_ms,
                     )
@@ -462,50 +466,83 @@ class TempMailOrgProvider(TempMailProvider):
             self._save_failure(f"{failure_tag}_click_failed")
             raise TempMailError(f"Mailbox control could not be clicked: {failure_tag}.") from exc
 
-    def verify_email(self) -> bool:
-        """Follow visible Verify Email/Verify Now controls and prove success."""
+    def _verification_success_observed(self) -> bool:
+        deadline = time.monotonic() + (self.timeout_ms / 1_000)
+        while time.monotonic() < deadline:
+            try:
+                if self.page.is_closed():
+                    return True
+                text = " ".join(self.page.locator("body").inner_text().split()).casefold()
+                if any(
+                    phrase in text
+                    for phrase in (
+                        "email verified",
+                        "verification successful",
+                        "verifying email",
+                        "email verification success",
+                    )
+                ):
+                    return True
+            except Exception:
+                try:
+                    if self.page.is_closed():
+                        return True
+                except Exception:
+                    pass
+            try:
+                self.page.wait_for_timeout(250)
+            except Exception:
+                time.sleep(0.25)
+        return False
 
-        self._follow_control(self.VERIFY_EMAIL_SELECTORS, "verify_email_not_found")
+    def verify_email(self) -> bool:
+        """Follow direct Verify Now or legacy Verify Email controls."""
+
+        control = self._visible_control(self.VERIFY_NOW_SELECTORS)
+        if control is None:
+            control = self._visible_control(self.VERIFY_EMAIL_SELECTORS)
+        if control is None:
+            self._save_failure("verification_control_not_found")
+            raise TempMailError(
+                "Neither Verify Now nor Verify Email was visible in the message."
+            )
+
+        href = None
         try:
-            self.page.wait_for_load_state("domcontentloaded")
+            href = control.get_attribute("href")
         except Exception:
             pass
+        if href and not is_expected_verification_url(href):
+            self._save_failure("verification_control_url_rejected")
+            raise TempMailError("The visible verification destination was rejected.")
+        try:
+            control.click()
+            self.page.wait_for_load_state("domcontentloaded")
+        except Exception as exc:
+            self._save_failure("verification_control_click_failed")
+            raise TempMailError("The verification control could not be clicked.") from exc
 
+        # Some message layouts expose Verify Email first and Verify Now only
+        # after the message content has rendered.
         verify_now = self._visible_control(self.VERIFY_NOW_SELECTORS)
-        if verify_now is not None:
-            href = None
-            try:
-                href = verify_now.get_attribute("href")
-            except Exception:
-                pass
+        if verify_now is not None and verify_now is not control:
+            href = verify_now.get_attribute("href")
             if href and not is_expected_verification_url(href):
                 self._save_failure("verify_now_url_rejected")
                 raise TempMailError("The Verify Now destination was rejected.")
+            verify_now.click()
             try:
-                verify_now.click()
                 self.page.wait_for_load_state("domcontentloaded")
-            except Exception as exc:
-                self._save_failure("verify_now_click_failed")
-                raise TempMailError("The Verify Now control could not be clicked.") from exc
+            except Exception:
+                pass
 
-        try:
-            self.page.wait_for_function(
-                """() => {
-                    const text = (document.body?.innerText || "").toLowerCase();
-                    return text.includes("email verified") ||
-                           text.includes("verification successful") ||
-                           text.includes("verifying email success") ||
-                           text.includes("email verification success");
-                }""",
-                timeout=self.timeout_ms,
-            )
+        if self._verification_success_observed():
             return True
-        except Exception as exc:
-            self._save_failure("verification_success_not_observed")
-            raise TempMailError(
-                "The mailbox flow completed a click, but no verification success "
-                "state was observed."
-            ) from exc
+        self._save_failure("verification_success_not_observed")
+        raise TempMailError(
+            "The mailbox flow completed a click, but no verification success "
+            "state or successful window close was observed."
+        )
 
     def _save_failure(self, tag: str) -> None:
         if self.page is None:

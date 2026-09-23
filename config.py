@@ -3,6 +3,11 @@
 # --- Replit Account Settings ---
 REPLIT_PASSWORD = "12345678"
 
+# --- Email Settings ---
+EMAIL_STRATEGY = "hybrid"  # hybrid, api, or temp-mail.org
+PRIMARY_EMAIL_API = "1secmail"
+USER_CUSTOM_EMAIL = ""
+
 # --- Android Settings ---
 REPLIT_PACKAGE_NAME = "com.replit.app"
 ANDROID_DEVICE_ID = None  # Leave as None to auto-detect
