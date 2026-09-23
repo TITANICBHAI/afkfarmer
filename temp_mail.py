@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import re
 from html import unescape
-from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
-from email_providers import EmailProvider
+from email_provider import EmailProvider, EmailProviderError
 
 
 EMAIL_PATTERN = re.compile(
@@ -32,11 +31,7 @@ VERIFICATION_URL_PATTERN = re.compile(
 )
 
 
-class TempMailError(RuntimeError):
-    """Raised when a mailbox state cannot be proven."""
-
-
-EmailProviderError = TempMailError
+TempMailError = EmailProviderError
 
 def normalize_email(value: Any) -> str:
     """Return a normalized candidate email address or an empty string."""
@@ -117,6 +112,7 @@ class TempMailOrgProvider(EmailProvider):
     """Read and verify the visible mailbox address from temp-mail.org."""
 
     URL = "https://temp-mail.org/"
+    provider_name = "temp-mail.org"
 
     ADDRESS_SELECTORS = (
         "input#mail",
@@ -397,8 +393,8 @@ class TempMailOrgProvider(EmailProvider):
         if self.page is None:
             self.open()
         try:
-            self.page.wait_for_function(
-                """() => {
+                self.page.wait_for_function(
+                    r"""() => {
                     const text = document.body?.innerText || "";
                             return /verify@replit\.com/i.test(text) &&
                                    /replit.*(verify|verification)|(verify|verification).*replit/i.test(text);
@@ -427,7 +423,7 @@ class TempMailOrgProvider(EmailProvider):
                 try:
                     row.click()
                     self.page.wait_for_function(
-                        """() => {
+                        r"""() => {
                             const text = document.body?.innerText || "";
                             return /verify\s+(email|now)|verification|action-code/i.test(text);
                         }""",
@@ -480,6 +476,7 @@ class TempMailOrgProvider(EmailProvider):
                         "verification successful",
                         "verifying email",
                         "email verification success",
+                        "success! this window will close automatically",
                     )
                 ):
                     return True
@@ -515,12 +512,19 @@ class TempMailOrgProvider(EmailProvider):
         if href and not is_expected_verification_url(href):
             self._save_failure("verification_control_url_rejected")
             raise TempMailError("The visible verification destination was rejected.")
+        if href:
+            self.verification_url = href
         try:
             control.click()
-            self.page.wait_for_load_state("domcontentloaded")
         except Exception as exc:
             self._save_failure("verification_control_click_failed")
             raise TempMailError("The verification control could not be clicked.") from exc
+        try:
+            self.page.wait_for_load_state("domcontentloaded")
+        except Exception:
+            # The verification page can close itself while navigation is still
+            # being observed.
+            pass
 
         # Some message layouts expose Verify Email first and Verify Now only
         # after the message content has rendered.
@@ -530,6 +534,8 @@ class TempMailOrgProvider(EmailProvider):
             if href and not is_expected_verification_url(href):
                 self._save_failure("verify_now_url_rejected")
                 raise TempMailError("The Verify Now destination was rejected.")
+            if href:
+                self.verification_url = href
             verify_now.click()
             try:
                 self.page.wait_for_load_state("domcontentloaded")

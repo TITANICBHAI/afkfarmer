@@ -11,6 +11,7 @@ import ast
 import importlib.util
 import py_compile
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SOURCE_FILES = (
     "config.py",
+    "email_provider.py",
+    "email_providers.py",
     "pc_flow.py",
     "temp_mail.py",
     "android_automation.py",
@@ -26,6 +29,9 @@ SOURCE_FILES = (
 )
 REQUIRED_CONFIG = (
     "REPLIT_PASSWORD",
+    "EMAIL_STRATEGY",
+    "PRIMARY_EMAIL_API",
+    "USER_CUSTOM_EMAIL",
     "REPLIT_PACKAGE_NAME",
     "ANDROID_DEVICE_ID",
     "EMAIL_CHECK_TIMEOUT",
@@ -34,10 +40,11 @@ REQUIRED_CONFIG = (
     "LOGIN_RETRY_DELAY",
     "ELEMENT_WAIT_TIMEOUT",
     "TEMP_MAIL_PROVIDER",
+    "TEMP_MAIL_URL",
     "GITHUB_REPO_URL",
     "DEBUG_MODE",
 )
-REQUIRED_MODULES = ("playwright", "requests", "colorama")
+REQUIRED_MODULES = ("patchright", "requests", "colorama")
 
 
 def check_source_files() -> list[str]:
@@ -89,12 +96,48 @@ def check_external_tools() -> list[str]:
     return [] if shutil.which("adb") else ["missing external tool: adb"]
 
 
+def check_adb_devices(require_device: bool = False) -> list[str]:
+    """Query device readiness without launching an app or changing the device."""
+
+    if not shutil.which("adb"):
+        return []
+    try:
+        result = subprocess.run(
+            ["adb", "devices"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [f"could not query adb devices: {exc}"]
+    if result.returncode != 0:
+        return [f"adb devices failed: {result.stderr.strip() or 'unknown error'}"]
+    authorized = [
+        line
+        for line in result.stdout.splitlines()
+        if line.strip() and not line.startswith("List of devices")
+        and line.split()[-1:] == ["device"]
+    ]
+    if require_device and len(authorized) != 1:
+        return [
+            "exactly one authorized Android device is required; "
+            f"found {len(authorized)}"
+        ]
+    return []
+
+
 def main() -> int:
+    require_device = "--require-device" in sys.argv[1:]
     checks = (
         ("source and syntax", check_source_files()),
         ("configuration contract", check_config_contract()),
         ("Python dependencies", check_dependencies()),
         ("external tools", check_external_tools()),
+        (
+            "Android device readiness",
+            check_adb_devices(require_device=require_device),
+        ),
     )
     failed = False
     for label, problems in checks:

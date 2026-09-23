@@ -1,18 +1,18 @@
 # Onboarding Flow Automation
 
-Python Playwright and ADB automation for the operator-owned Replit web and Android onboarding flow.
+Python Patchright and ADB automation for the operator-owned Replit web and Android onboarding flow.
 
 ## Run & Operate
 
-- `bash run_pc_automation.sh --check-runtime` — verify the Playwright runtime
+- `bash run_pc_automation.sh --check-runtime` — verify the Patchright runtime
 - `python preflight.py` — run the non-destructive readiness check
 - `python -m unittest -v` — run the offline test suite
 - `bash run_pc_automation.sh` — start the full operator flow
 
 ## Stack
 
-- Python 3.8+, Playwright, requests, colorama
-- PC browser flow: Playwright with an optional CDP attachment
+- Python 3.8+, Patchright, requests, colorama
+- PC browser flow: Patchright with an optional CDP attachment
 - Android flow: ADB and UI hierarchy inspection
 
 ## Where things live
@@ -45,14 +45,14 @@ _Populate as you build — explicit user instructions worth remembering across s
 _Populate as you build — sharp edges, "always run X before Y" rules._
 
 - Run the PC browser flow with `bash run_pc_automation.sh`; the wrapper adds
-  the Nix C++ library path required by Playwright's Python runtime.
+  the Nix C++ library path required by Patchright's Python runtime.
 - Start an existing Chromium-family browser with remote debugging to reuse its
   Replit and temp-mail tabs. `PLAYWRIGHT_CDP_URL` is supported explicitly, and
   local CDP ports 9222-9225 are discovered automatically when it is omitted.
-  Without CDP, Playwright cannot attach to a normal already-running browser
+  Without CDP, Patchright cannot attach to a normal already-running browser
   process.
 - Browser setup detects configured or installed Edge, Chrome, Brave, and
-  Chromium executables before trying a managed Playwright browser. Temporary-
+  Chromium executables before trying a managed Patchright browser. Temporary-
   mail provider Cloudflare blocks are reported and are not bypassed.
 
 ## GitHub workspace sync

@@ -14,12 +14,13 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Current status
 
-- **Current phase:** Phase 5 — PC resume and GitHub import
-  (session synchronization verified offline; live evidence remains)
+- **Current phase:** Phase 6 — offline validation
+  (provider selection and Android terminal handling verified offline; live evidence remains)
 - **Overall verdict:** Not ready for a real end-to-end run
-- **Next action:** Continue with browser-context resume/login and GitHub import
-  verification; live runs still require explicit operator authorization
-- **Last updated:** 2026-09-22
+- **Next action:** Run explicitly authorized PC and Android smoke tests in an
+  environment where the browser provider is not blocked; do not bypass provider
+  protections.
+- **Last updated:** 2026-09-23
 - **Blockers:** No Android device run has been authorized or performed. The PC
   runtime wrapper can launch Playwright, but the live `temp-mail.org` page
   returns a Cloudflare block page. No bypass is permitted.
@@ -46,7 +47,7 @@ This tracker is mandatory for every agent working on this repository.
     dependencies.
 - [x] Confirm required Python packages and external tools are available.
   - Evidence: `python preflight.py` passes source syntax, configuration,
-    `playwright`, `requests`, `colorama`, and `adb` checks. `adb version`
+    `patchright`, `requests`, `colorama`, and `adb` checks. `adb version`
     reports Android Debug Bridge 35.0.1.
 - [x] Add runtime artifacts to ignore/protection rules.
   - Targets: `state.json`, `auth_state.json`, logs, screenshots, and `ui.xml`.
@@ -220,7 +221,7 @@ This tracker is mandatory for every agent working on this repository.
 
 ## Architecture decisions
 
-- [x] Use Python + Playwright + ADB/UI Automator for the first implementation.
+- [x] Use Python + Patchright + ADB/UI Automator for the first implementation.
 - [x] Keep CAPTCHA and anti-bot handling manual.
 - [x] Use UI state as the source of truth.
 - [ ] Escalate to Appium/UiAutomator2 only if device evidence shows that ADB
@@ -530,3 +531,19 @@ Add one entry after each meaningful session:
   external-account run was started in this session.
 - Next action: use the Windows command-line procedure for an authorized PC
   smoke test; stop for manual CAPTCHA or unexpected UI states.
+
+### 2026-09-23 — Provider and terminal-flow completion
+- Completed: added the provider-neutral mailbox contract, user-email priority,
+  1secmail API support, hybrid address-acquisition fallback, Patchright imports,
+  stricter preflight dependency/device checks, safe ADB text encoding, and an
+  Android home/process terminal check after logout.
+- Evidence: the focused provider, PC, Android, checkpoint, and parsing suite
+  passes 41 tests; `python preflight.py` and
+  `bash run_pc_automation.sh --check-runtime` pass; source compilation and
+  `git diff --check` pass. No browser account flow or Android action was run.
+- Still open: live mailbox/registration/verification, live Android UI
+  transitions, PC resume/import, and complete end-to-end evidence.
+- Blockers: `temp-mail.org` remains blocked by Cloudflare in the workspace
+  browser, and no operator-owned Android run has been authorized.
+- Next action: perform only the separately authorized PC and Android smoke
+  tests in a permitted environment.

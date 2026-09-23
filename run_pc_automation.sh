@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Launch the PC automation with the Nix C++ runtime required by Playwright's
+# Launch the PC automation with the Nix C++ runtime required by Patchright's
 # Python greenlet extension. This does not bypass provider-side protections.
 
 set -Eeuo pipefail
@@ -19,7 +19,7 @@ if [[ "${1:-}" == "--check-runtime" ]]; then
   cd "$ROOT"
   python - <<'PY'
 import greenlet
-from playwright.sync_api import sync_playwright
+from patchright.sync_api import sync_playwright
 
 with sync_playwright() as playwright:
     browser = playwright.chromium.launch(

@@ -9,10 +9,14 @@ from colorama import Fore, Style, init
 from android_automation import AndroidAutomation
 from config import (
     ANDROID_DEVICE_ID,
+    EMAIL_CHECK_TIMEOUT,
+    EMAIL_STRATEGY,
     GITHUB_REPO_URL,
+    PRIMARY_EMAIL_API,
     REPLIT_PASSWORD,
     TEMP_MAIL_PROVIDER,
     TEMP_MAIL_URL,
+    USER_CUSTOM_EMAIL,
 )
 from pc_automation import PCAutomation
 
@@ -29,6 +33,7 @@ def fresh_state():
         "stage": "EMAIL",
         "in_progress": None,
         "temp_email": None,
+        "email_provider": None,
         "username": None,
         "password_ref": PASSWORD_REF,
         "verification_link": None,
@@ -136,11 +141,24 @@ class ReplitAutomationOrchestrator:
 
     def _ensure_browser(self):
         if self.pc is None:
+            saved_provider = self.state.get("email_provider")
+            strategy = EMAIL_STRATEGY
+            custom_email = USER_CUSTOM_EMAIL
+            if saved_provider == "temp-mail.org":
+                strategy = "temp-mail.org"
+            elif saved_provider == "1secmail":
+                strategy = "api"
+            elif saved_provider == "custom":
+                custom_email = self.state.get("temp_email") or USER_CUSTOM_EMAIL
             self.pc = PCAutomation(
                 self.state.get("temp_email"),
                 REPLIT_PASSWORD,
                 temp_mail_provider=TEMP_MAIL_PROVIDER,
                 temp_mail_url=TEMP_MAIL_URL,
+                email_strategy=strategy,
+                primary_email_api=PRIMARY_EMAIL_API,
+                user_custom_email=custom_email,
+                email_check_timeout=EMAIL_CHECK_TIMEOUT,
             )
             self.pc.setup_browser()
 
@@ -148,11 +166,12 @@ class ReplitAutomationOrchestrator:
 
     def stage_email(self):
         self.log("\n" + "=" * 60, Fore.MAGENTA)
-        self.log("📧 STAGE 1/6: Getting Temporary Email", Fore.MAGENTA)
+        self.log("📧 STAGE 1/6: Getting Email", Fore.MAGENTA)
         self.log("=" * 60, Fore.MAGENTA)
         try:
             self._ensure_browser()
             self.state["temp_email"] = self.pc.obtain_temp_email()
+            self.state["email_provider"] = self.pc.email_provider_name
             self.state["username"] = self.state["temp_email"].split("@")[0]
         except Exception as e:
             self.log(f"❌ Failed to get temp email: {e}", Fore.RED)
@@ -175,7 +194,10 @@ class ReplitAutomationOrchestrator:
         self._ensure_browser()
         self.log("\n⏳ Waiting for the Replit verification message in the mailbox...", Fore.CYAN)
         self.pc.open_verification_message()
-        return bool(self.pc.verify_email())
+        verified = bool(self.pc.verify_email())
+        if verified:
+            self.state["verification_link"] = self.pc.verification_url
+        return verified
 
     def stage_android(self):
         self.log("\n" + "=" * 60, Fore.MAGENTA)

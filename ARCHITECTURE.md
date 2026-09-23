@@ -15,7 +15,7 @@ PC. It controls:
           |                                     |
           v                                     v
  +-------------------+                 +-------------------+
- | Playwright / Edge |                 | ADB / UIAutomator|
+  | Patchright / Edge |                 | ADB / UIAutomator|
  | temp-mail + web   |                 | operator Android |
  +-------------------+                 +-------------------+
           |                                     |
@@ -52,7 +52,7 @@ provider, but it must not silently replace the requested flow.
 
 ### Web adapter
 
-Owns Playwright and Edge. It works with a single browser context so the
+Owns Patchright and Edge. It works with a single browser context so the
 temporary mailbox and Replit tabs share the operator's session. It uses
 locator waits, explicit postconditions, URL allowlists, and manual CAPTCHA
 pauses.

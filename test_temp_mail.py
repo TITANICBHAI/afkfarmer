@@ -29,7 +29,7 @@ class TempMailParsingTests(unittest.TestCase):
             ["first@example.com", "second@example.org"],
         )
 
-    def test_verification_message_requires_sender_and_exact_subject(self):
+    def test_verification_message_uses_tolerant_sender_and_subject_matching(self):
         self.assertTrue(
             is_replit_verification_message(
                 "Replit <verify@replit.com>",
@@ -42,10 +42,16 @@ class TempMailParsingTests(unittest.TestCase):
                 "Welcome",
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             is_replit_verification_message(
                 "Replit <verify@replit.com>",
-                "Replit verify email reminder",
+                "Replit: Verify Your Email reminder",
+            )
+        )
+        self.assertFalse(
+            is_replit_verification_message(
+                "Other Service <verify@replit.com>",
+                "Welcome",
             )
         )
 

@@ -32,10 +32,11 @@ The active Python files are present at the project root with canonical names:
 `config.py`, `temp_mail.py`, `android_automation.py`, `pc_automation.py`, and
 `main.py`.
 
-The state-driven offline implementation is verified, including atomic
-checkpoints, PC registration classification, Android UI-state transitions,
-session synchronization after Android completion, and safe GitHub-import
-failure handling. The combined offline test suite passes 42 tests.
+The state-driven offline implementation is verified, including provider
+selection and fallback, atomic checkpoints, PC registration classification,
+Android UI-state transitions, safe text input, session synchronization after
+Android completion, and safe GitHub-import failure handling. The combined
+offline test suite passes 48 tests.
 
 Live mailbox, Replit registration, Android-device, PC-resume, GitHub-import,
 and complete end-to-end evidence remain open. The workspace browser previously
@@ -49,12 +50,20 @@ only after completing and verifying them.
 ## Intended runtime
 
 - Python 3.8+
-- Playwright controlling the configured Chromium-family browser, otherwise
+- Patchright controlling the configured Chromium-family browser, otherwise
   workspace Chromium
 - ADB in `PATH`
 - An operator-owned Android device with USB debugging enabled
 - `requests`
 - `colorama`
+
+Email selection is configured in `config.py`:
+
+- `USER_CUSTOM_EMAIL` takes priority when non-empty.
+- `EMAIL_STRATEGY = "api"` uses `PRIMARY_EMAIL_API`.
+- `EMAIL_STRATEGY = "hybrid"` tries the API, then temp-mail.org if address
+  acquisition fails.
+- `EMAIL_STRATEGY = "temp-mail.org"` uses the browser mailbox directly.
 
 Install the supplied requirements only after reviewing them and the provider
 choice in `PLAN.md`.
@@ -87,7 +96,7 @@ python -m unittest -v test_temp_mail.py
 ```
 
 For the PC browser flow in this Replit workspace, use the runtime wrapper so
-Playwright can load the Nix C++ library:
+Patchright can load the Nix C++ library:
 
 ```bash
 bash run_pc_automation.sh --check-runtime
@@ -157,9 +166,9 @@ or set the complete endpoint with `PLAYWRIGHT_CDP_URL`.
 
 These settings have different purposes:
 
-- `PLAYWRIGHT_EXECUTABLE_PATH` tells Playwright which browser executable to
+- `PLAYWRIGHT_EXECUTABLE_PATH` tells Patchright which browser executable to
   launch. It does **not** attach to an already-running browser.
-- `PLAYWRIGHT_CDP_URL` tells Playwright to attach to the existing browser
+- `PLAYWRIGHT_CDP_URL` tells Patchright to attach to the existing browser
   process, preserving its context and open tabs.
 - When `PLAYWRIGHT_CDP_URL` is omitted, the script automatically probes local
   CDP ports `9222` through `9225`.
@@ -224,7 +233,7 @@ If Edge is installed under `C:\Program Files`, use:
 set "PLAYWRIGHT_EXECUTABLE_PATH=C:\Program Files\Microsoft\Edge\Application\msedge.exe"
 ```
 
-Or configure a Playwright browser channel such as `chrome`, `msedge`, or
+Or configure a Patchright browser channel such as `chrome`, `msedge`, or
 `chromium`:
 
 ```cmd
@@ -232,7 +241,7 @@ set "PLAYWRIGHT_BROWSER_CHANNEL=chrome"
 ```
 
 If no existing browser can be controlled and no installed executable can be
-launched, the script makes one final attempt to use Playwright's bundled
+launched, the script makes one final attempt to use Patchright's bundled
 Chromium.
 
 Check the configured path:

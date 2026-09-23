@@ -6,6 +6,7 @@ from android_automation import (
     AndroidAutomation,
     SCREENSHOT_REFERENCES,
     classify_screen,
+    encode_adb_text,
     node_is_actionable,
     parse_adb_devices,
     parse_bounds,
@@ -70,6 +71,39 @@ class AndroidParsingTests(unittest.TestCase):
             ["shell", "input", "keyevent", "66"],
             wait=0.1,
         )
+
+    def test_encode_adb_text_preserves_common_email_and_password_characters(self):
+        encoded = encode_adb_text("user+tag@example.com P@ss!<&>()")
+        self.assertEqual(
+            encoded,
+            r"user\+tag\@example.com%sP\@ss\!\<\&\>\(\)",
+        )
+
+    def test_type_text_uses_the_central_encoder(self):
+        automation = AndroidAutomation()
+        automation.last_adb_ok = True
+        with patch.object(automation, "run_adb") as run_adb:
+            self.assertTrue(automation.type_text("user@example.com"))
+        run_adb.assert_called_once_with(
+            ["shell", "input", "text", r"user\@example.com"],
+            wait=0.1,
+        )
+
+    def test_force_stop_requires_non_foreground_and_stopped_process(self):
+        automation = AndroidAutomation()
+        automation.last_adb_ok = True
+        with patch.object(automation, "close_app", return_value=True):
+            with patch.object(
+                automation,
+                "foreground_package",
+                side_effect=["com.replit.app", "com.android.launcher"],
+            ):
+                with patch.object(
+                    automation,
+                    "package_running",
+                    side_effect=[True, False],
+                ):
+                    self.assertTrue(automation.force_stop_and_verify("com.replit.app"))
 
 
 class AndroidScreenClassificationTests(unittest.TestCase):

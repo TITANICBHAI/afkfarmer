@@ -40,6 +40,7 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(saved["password_ref"], main.PASSWORD_REF)
         self.assertNotIn("password", saved)
         self.assertEqual(saved["temp_email"], "mail@example.test")
+        self.assertIsNone(saved["email_provider"])
         self.assertEqual(saved["username"], "mail")
         self.assertEqual(
             saved["verification_link"],

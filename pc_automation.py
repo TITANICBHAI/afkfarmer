@@ -5,9 +5,14 @@ from typing import Optional
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from patchright.sync_api import (
+    sync_playwright,
+    TimeoutError as PlaywrightTimeoutError,
+)
 from colorama import Fore, Style
 
+from email_provider import EmailProvider
+from email_providers import create_email_provider
 from pc_flow import (
     classify_session_state,
     classify_signup_state,
@@ -40,16 +45,25 @@ class PCAutomation:
         password: str,
         temp_mail_provider: str = "temp-mail.org",
         temp_mail_url: str = TempMailOrgProvider.URL,
+        email_strategy: str = "temp-mail.org",
+        primary_email_api: str = "1secmail",
+        user_custom_email: str = "",
+        email_check_timeout: float = 60,
     ):
         self.email = email
         self.password = password
         self.temp_mail_provider = temp_mail_provider
         self.temp_mail_url = temp_mail_url
+        self.email_strategy = email_strategy
+        self.primary_email_api = primary_email_api
+        self.user_custom_email = user_custom_email
+        self.email_check_timeout = email_check_timeout
         self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
         self.temp_mail = None
+        self.email_provider: Optional[EmailProvider] = None
         self.state_file = "auth_state.json"
         self._owns_browser = False
 
@@ -322,14 +336,10 @@ class PCAutomation:
         return page
 
     def obtain_temp_email(self) -> str:
-        """Open temp-mail.org and return an address whose Copy action passed."""
+        """Obtain the configured address through the provider abstraction."""
 
-        if self.temp_mail_provider != "temp-mail.org":
-            raise ValueError(
-                f"Unsupported temporary-mail provider: {self.temp_mail_provider}"
-            )
-        self._ensure_temp_mail()
-        self.email = self.temp_mail.obtain_address()
+        provider = self._ensure_email_provider()
+        self.email = provider.obtain_address()
         return self.email
 
     def _ensure_temp_mail(self) -> TempMailOrgProvider:
@@ -342,15 +352,49 @@ class PCAutomation:
             )
         return self.temp_mail
 
-    def open_verification_message(self):
-        """Open the Replit verification message in the shared mailbox tab."""
+    def _ensure_email_provider(self) -> EmailProvider:
+        if self.email_provider is not None:
+            return self.email_provider
+        if self.context is None:
+            self.setup_browser()
+        self.email_provider = create_email_provider(
+            context=self.context,
+            strategy=self.email_strategy,
+            primary_api=self.primary_email_api,
+            custom_email=self.user_custom_email,
+            timeout_seconds=self.email_check_timeout,
+            temp_mail_url=self.temp_mail_url,
+        )
+        if self.email:
+            self.email_provider.address = self.email
+            # A resumed hybrid run must continue with the provider that
+            # created the saved address rather than generating a new mailbox.
+            if hasattr(self.email_provider, "primary"):
+                self.email_provider.primary.address = self.email
+                self.email_provider.active = self.email_provider.primary
+        if isinstance(self.email_provider, TempMailOrgProvider):
+            self.temp_mail = self.email_provider
+        return self.email_provider
 
-        return self._ensure_temp_mail().open_verification_message()
+    def open_verification_message(self):
+        """Open the Replit verification message through the active provider."""
+
+        return self._ensure_email_provider().open_verification_message()
 
     def verify_email(self):
-        """Follow visible mailbox verification controls and prove success."""
+        """Complete verification and prove success through the active provider."""
 
-        return self._ensure_temp_mail().verify_email()
+        return self._ensure_email_provider().verify_email()
+
+    @property
+    def verification_url(self) -> Optional[str]:
+        provider = self.email_provider
+        return getattr(provider, "verification_url", None) if provider else None
+
+    @property
+    def email_provider_name(self) -> Optional[str]:
+        provider = self.email_provider
+        return getattr(provider, "provider_name", None) if provider else None
 
     def save_state(self):
         """Save cookies and session state for future runs"""

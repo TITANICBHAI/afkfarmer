@@ -56,7 +56,7 @@ The module does not contact the provider at import time.
 
 ### `pc_automation.py`
 
-`PCAutomation` owns one Playwright instance, browser context, and page set.
+`PCAutomation` owns one Patchright instance, browser context, and page set.
 Required operations:
 
 - `setup_browser()`;

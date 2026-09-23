@@ -157,6 +157,30 @@ def node_is_actionable(node: Optional[ET.Element]) -> bool:
     )
 
 
+def encode_adb_text(value: Any) -> str:
+    """Encode printable text for ``adb shell input text``.
+
+    ADB receives an argument list rather than a local shell command, but the
+    device-side input parser still treats spaces and shell punctuation
+    specially. Keep the transformation in one place so every field uses the
+    same rules.
+    """
+
+    encoded: List[str] = []
+    for char in str(value):
+        if char == " ":
+            encoded.append("%s")
+        elif char == "%":
+            encoded.append("%%")
+        elif char in r"\&<>()!+@'\";|*?$#`":
+            encoded.append("\\" + char)
+        elif ord(char) < 0x20 or char == "\x7f":
+            raise ValueError("ADB text input does not support control characters.")
+        else:
+            encoded.append(char)
+    return "".join(encoded)
+
+
 class AndroidAutomation:
     def __init__(self, device_id: Optional[str] = None):
         self.device_id = device_id
@@ -263,7 +287,7 @@ class AndroidAutomation:
         return self.last_adb_ok
 
     def type_text(self, text: str) -> bool:
-        safe_text = str(text).replace(" ", "%s")
+        safe_text = encode_adb_text(text)
         self.run_adb(["shell", "input", "text", safe_text], wait=0.1)
         return self.last_adb_ok
 
@@ -305,14 +329,31 @@ class AndroidAutomation:
                 return match.group(1)
         return None
 
+    def package_running(self, package_name: str) -> Optional[bool]:
+        """Return whether Android still reports a process for the package."""
+
+        output = self.run_adb(["shell", "pidof", package_name], wait=0.0)
+        if not self.last_adb_ok:
+            return None
+        return bool(output.strip())
+
     def force_stop_and_verify(self, package_name: str) -> bool:
         if not self.close_app(package_name):
             return False
         deadline = time.monotonic() + ELEMENT_WAIT_TIMEOUT
         while time.monotonic() < deadline:
             foreground = self.foreground_package()
-            if foreground is not None and foreground != package_name:
-                self.log("Replit is no longer the foreground package.", Fore.GREEN)
+            running = self.package_running(package_name)
+            if (
+                foreground is not None
+                and foreground != package_name
+                and running is False
+            ):
+                self.log(
+                    "Android home/device state observed; Replit is no longer "
+                    "foreground or running.",
+                    Fore.GREEN,
+                )
                 return True
             time.sleep(0.5)
         self.save_failure_evidence("force_stop_not_verified")
@@ -663,14 +704,15 @@ class AndroidAutomation:
             root = self.wait_for_state({"logout_dialog"}, "logout_dialog")
             if root is None:
                 return False
-            root = self._tap_and_wait(
-                "confirm_logout",
-                {"logout_dialog"},
-                [{"text": "LOG OUT"}],
-                {"logged_out", "initial_login", "email_choice"},
-            )
+            root = self.wait_for_state({"logout_dialog"}, "confirm_logout_source")
             if root is None:
                 return False
+            logout_confirm = self._find_first(root, [{"text": "LOG OUT"}])
+            if not self.tap_node(logout_confirm):
+                self.save_failure_evidence("confirm_logout_tap")
+                return False
+            # Logout is a device-terminal transition. Do not require another
+            # recognized Replit screen after the app has accepted the action.
             if not self.force_stop_and_verify(REPLIT_PACKAGE_NAME):
                 return False
 

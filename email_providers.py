@@ -10,40 +10,23 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from abc import ABC, abstractmethod
 from html import unescape
 from typing import Any, Optional
 
 import requests
 
+from email_provider import EmailProvider, EmailProviderError
 from temp_mail import (
-    EmailProviderError,
     extract_verification_url,
     is_replit_verification_message,
+    TempMailOrgProvider,
 )
-
-
-class EmailProvider(ABC):
-    """High-level mailbox contract used by the PC orchestrator."""
-
-    address: Optional[str] = None
-    verification_url: Optional[str] = None
-
-    @abstractmethod
-    def obtain_address(self) -> str:
-        """Return the mailbox address to use for account creation."""
-
-    @abstractmethod
-    def open_verification_message(self) -> Any:
-        """Wait for and load the Replit verification message."""
-
-    @abstractmethod
-    def verify_email(self) -> bool:
-        """Complete verification and return only after success is observed."""
 
 
 class ManualEmailProvider(EmailProvider):
     """Provider for a user-owned address whose mailbox is handled manually."""
+
+    provider_name = "custom"
 
     def __init__(self, address: str):
         self.address = address.strip()
@@ -65,10 +48,99 @@ class ManualEmailProvider(EmailProvider):
         )
 
 
+class FallbackEmailProvider(EmailProvider):
+    """Use a primary provider and create the fallback only when needed.
+
+    Fallback after a mailbox has been created would produce a different email
+    address and could never verify the account that was just registered. The
+    fallback is therefore limited to address acquisition.
+    """
+
+    def __init__(self, primary: EmailProvider, fallback_factory: Any):
+        self.primary = primary
+        self.fallback_factory = fallback_factory
+        self.active: Optional[EmailProvider] = None
+        self.address: Optional[str] = None
+        self.verification_url: Optional[str] = None
+
+    @property
+    def provider_name(self) -> str:
+        return self.active.provider_name if self.active is not None else "hybrid"
+
+    def obtain_address(self) -> str:
+        try:
+            address = self.primary.obtain_address()
+            self.active = self.primary
+        except EmailProviderError:
+            fallback = self.fallback_factory()
+            address = fallback.obtain_address()
+            self.active = fallback
+        self.address = address
+        return address
+
+    def _active_provider(self) -> EmailProvider:
+        if self.active is None:
+            self.obtain_address()
+        if self.active is None:
+            raise EmailProviderError("No email provider was selected.")
+        return self.active
+
+    def open_verification_message(self) -> Any:
+        message = self._active_provider().open_verification_message()
+        self.verification_url = self._active_provider().verification_url
+        return message
+
+    def verify_email(self) -> bool:
+        result = self._active_provider().verify_email()
+        self.verification_url = self._active_provider().verification_url
+        return result
+
+
+def create_email_provider(
+    *,
+    context: Any,
+    strategy: str,
+    primary_api: str,
+    custom_email: str,
+    timeout_seconds: float,
+    temp_mail_url: str,
+) -> EmailProvider:
+    """Build the configured provider chain without opening any mailbox yet."""
+
+    if custom_email.strip():
+        return ManualEmailProvider(custom_email)
+
+    selected = strategy.strip().casefold()
+    if selected not in {"hybrid", "api", "temp-mail.org"}:
+        raise ValueError(
+            "EMAIL_STRATEGY must be one of: hybrid, api, temp-mail.org."
+        )
+
+    def browser_provider() -> TempMailOrgProvider:
+        if context is None:
+            raise EmailProviderError("A browser context is required for temp-mail.org.")
+        return TempMailOrgProvider(context, url=temp_mail_url)
+
+    if selected == "temp-mail.org":
+        return browser_provider()
+
+    if primary_api.casefold() != "1secmail":
+        raise ValueError(
+            f"Unsupported PRIMARY_EMAIL_API: {primary_api}. "
+            "Only 1secmail is currently implemented."
+        )
+
+    primary = OneSecMailProvider(timeout_seconds=timeout_seconds)
+    if selected == "api":
+        return primary
+    return FallbackEmailProvider(primary, browser_provider)
+
+
 class OneSecMailProvider(EmailProvider):
     """One-time 1secmail mailbox with bounded polling and URL validation."""
 
     API_URL = "https://www.1secmail.com/api/v1/"
+    provider_name = "1secmail"
     _USERNAME_PATTERN = re.compile(r"^[a-z0-9._-]+$", re.IGNORECASE)
     _DOMAIN_PATTERN = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$", re.IGNORECASE)
 
@@ -238,17 +310,24 @@ class OneSecMailProvider(EmailProvider):
                 f"Verification did not return an acceptable HTTP status "
                 f"({response.status_code})."
             )
-        text = " ".join(
+        final_url = str(getattr(response, "url", "") or "").casefold()
+        response_text = " ".join(
             str(getattr(response, "text", "") or "").casefold().split()
         )
         if not any(
-            phrase in text
+            phrase in response_text
             for phrase in (
                 "email verified",
                 "verification successful",
                 "verifying email",
                 "email verification success",
+                "success! this window will close automatically",
             )
+        ) and not (
+            final_url
+            and "/action-code" not in final_url
+            and "replit.com" in final_url
+            and response_text
         ):
             raise EmailProviderError(
                 "Verification request completed without an observable success state."
