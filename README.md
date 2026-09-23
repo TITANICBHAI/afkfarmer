@@ -36,7 +36,8 @@ The state-driven offline implementation is verified, including provider
 selection and fallback, atomic checkpoints, PC registration classification,
 Android UI-state transitions, safe text input, session synchronization after
 Android completion, and safe GitHub-import failure handling. The combined
-offline test suite passes 48 tests.
+offline test suite passes 50 tests when run with the required Patchright
+runtime library path.
 
 Live mailbox, Replit registration, Android-device, PC-resume, GitHub-import,
 and complete end-to-end evidence remain open. The workspace browser previously
@@ -54,8 +55,20 @@ only after completing and verifying them.
   workspace Chromium
 - ADB in `PATH`
 - An operator-owned Android device with USB debugging enabled
+- `patchright>=1.40.0`
 - `requests`
-- `colorama`
+- `colorama>=0.4.6`
+
+Install the declared Python dependencies with:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+On Replit/Linux, Patchright may need the GCC-provided `libstdc++.so.6`
+directory in `LD_LIBRARY_PATH`. Use `run_pc_automation.sh` for the browser
+runtime and full automation commands below. On Windows, use the Python
+commands in the Windows section.
 
 Email selection is configured in `config.py`:
 
@@ -73,7 +86,9 @@ choice in `PLAN.md`.
 Initial static check:
 
 ```bash
-python -m py_compile config.py android_automation.py pc_automation.py main.py
+python -m py_compile \
+  config.py email_provider.py email_providers.py pc_flow.py temp_mail.py \
+  android_automation.py pc_automation.py main.py preflight.py
 adb devices
 ```
 
@@ -86,8 +101,18 @@ For a non-destructive local readiness check, run:
 python preflight.py
 ```
 
-This checks source syntax, configuration keys, Python dependencies, and `adb`.
-It does not open a browser, contact the mailbox, or launch the Android app.
+This checks source syntax, configuration keys, Python dependencies, browser
+availability/configuration, and that ADB can be queried. It does not open a
+browser, contact the mailbox, or launch the Android app. By default it does
+not require a connected device, so use the stricter check before a real run:
+
+```bash
+python preflight.py --require-device
+```
+
+The strict check requires exactly one authorized Android device. If multiple
+devices are connected, set `ANDROID_DEVICE_ID` in `config.py` to the serial
+returned by `adb devices`.
 
 The provider parsing checks can be run locally with:
 
@@ -95,16 +120,38 @@ The provider parsing checks can be run locally with:
 python -m unittest -v test_temp_mail.py
 ```
 
+To run the complete offline suite in Replit/Linux, use the same C++ runtime
+library setup required by Patchright:
+
+```bash
+LIBSTDCPP="$(gcc -print-file-name=libstdc++.so.6)"
+export LD_LIBRARY_PATH="$(dirname "$LIBSTDCPP")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+python -m unittest -v
+```
+
+The full suite currently contains 50 tests. A direct `python -m unittest -v`
+without that library path may fail before tests start with a
+`libstdc++.so.6` import error; that is a runtime setup issue, not a test
+assertion failure.
+
 For the PC browser flow in this Replit workspace, use the runtime wrapper so
 Patchright can load the Nix C++ library:
 
 ```bash
 bash run_pc_automation.sh --check-runtime
+```
+
+The first command starts a headless browser smoke check and does not start the
+automation flow. After it passes, start the complete operator flow with:
+
+```bash
 bash run_pc_automation.sh
 ```
 
-The wrapper uses the configured browser or workspace Chromium. Provider-side
-Cloudflare blocks are not bypassed.
+The wrapper uses the configured browser or workspace Chromium. It does not
+attach to an ordinary already-running browser unless that browser was started
+with a Chromium remote-debugging endpoint. Provider-side Cloudflare blocks,
+CAPTCHA, rate limits, and other security challenges are not bypassed.
 
 ## Windows 10 usage
 
@@ -310,13 +357,28 @@ Open `config.py` and review:
 
 ```python
 REPLIT_PASSWORD = "12345678"
+EMAIL_STRATEGY = "hybrid"
+PRIMARY_EMAIL_API = "1secmail"
+USER_CUSTOM_EMAIL = ""
+TEMP_MAIL_PROVIDER = "temp-mail.org"
+TEMP_MAIL_URL = "https://temp-mail.org/"
 ANDROID_DEVICE_ID = None
 GITHUB_REPO_URL = ""
 ```
 
-Change the sample password before a real run. Leave
+Change the sample password before a real run and keep `config.py` local. Leave
 `ANDROID_DEVICE_ID = None` when one Android device is connected. If multiple
 devices are connected, set it to the serial returned by `adb devices`.
+
+Email selection works as follows:
+
+- A non-empty `USER_CUSTOM_EMAIL` is used directly; no API or temp-mail
+  mailbox is created.
+- With a blank `USER_CUSTOM_EMAIL` and `EMAIL_STRATEGY = "hybrid"`, the
+  1secmail API is tried first and temp-mail.org is used only if address
+  acquisition fails.
+- `EMAIL_STRATEGY = "api"` uses only the configured API.
+- `EMAIL_STRATEGY = "temp-mail.org"` uses the browser mailbox directly.
 
 Leave `GITHUB_REPO_URL` empty to be prompted during the run, or set it to the
 operator's repository URL.
@@ -328,6 +390,12 @@ opening the browser or launching the Android app:
 
 ```cmd
 python preflight.py
+```
+
+For a real Android run, require exactly one authorized device:
+
+```cmd
+python preflight.py --require-device
 ```
 
 ### 7. Start the automation
@@ -360,6 +428,12 @@ When a stage fails, the terminal offers:
 - `s` records an intentional skip and advances; use sparingly.
 - `q` stops without advancing the failed stage.
 
+Use `r` only for a known transient failure such as delayed mailbox delivery or
+normal page loading. Do not repeatedly retry a CAPTCHA, rate limit, provider
+block, account restriction, or other security challenge. Stop with `q`, save
+the evidence, and resolve the issue manually before deciding whether to
+resume.
+
 Press `Ctrl+C` to stop while preserving the checkpoint. Rerun:
 
 ```cmd
@@ -378,6 +452,10 @@ del auth_state.json 2>nul
 
 Only do this intentionally; it removes the ability to resume the saved run.
 
+Manual takeover and skipped stages are recorded in the checkpoint, but they do
+not provide the same evidence as an automated successful transition. Review
+the browser, device, and saved evidence before treating a run as complete.
+
 ### Windows safety and readiness
 
 Before a real run, confirm that the configured browser is ready, `adb devices` shows the
@@ -385,10 +463,11 @@ operator-owned unlocked phone, and manual CAPTCHA handling is available. Do not
 run the Android or external-account flow without explicit operator approval.
 
 The current code is ready for local setup and offline checks, but the complete
-live flow is not yet proven. Provider-side Cloudflare blocks, UI changes, login
-errors, device-specific UI hierarchy differences, and delayed verification
-mail remain possible failure points. The automation must stop and record
-evidence instead of bypassing those protections.
+live flow is not yet proven in this workspace. The ADB daemon is available, but
+no Android device is currently connected. Provider-side Cloudflare blocks, UI
+changes, login errors, device-specific UI hierarchy differences, and delayed
+verification mail remain possible failure points. The automation must stop and
+record evidence instead of bypassing those protections.
 
 ## Runtime artifacts
 
