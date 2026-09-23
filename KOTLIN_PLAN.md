@@ -334,12 +334,16 @@ These should be answered before implementation begins:
 6. Whether the Android app should support only the installed Replit app or
    multiple explicitly configured package variants.
 
-## Additional documentation
+## Kotlin documentation set
 
-Two documents are sufficient for the planning stage:
+The current planning and implementation-context documents are:
 
-- `KOTLIN_ARCHITECTURE.md` — system design and boundaries;
-- `KOTLIN_PLAN.md` — milestones, gates, and acceptance criteria.
+- `KOTLIN_CONTEXT.md` — quick-start context, boundaries, authoritative files,
+  and session-start checklist;
+- `KOTLIN_ARCHITECTURE.md` — system design and component responsibilities;
+- `KOTLIN_PLAN.md` — migration milestones, gates, and acceptance criteria;
+- `KOTLIN_STEPS.md` — operational Android runbook with preconditions,
+  postconditions, failure behavior, and resume rules.
 
 Do not add a setup guide or test matrix until the Kotlin project is scaffolded.
 At that point, create them only if they contain information that cannot be
