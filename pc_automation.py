@@ -1,4 +1,3 @@
-import json
 import os
 import shutil
 import time
@@ -53,9 +52,6 @@ class PCAutomation:
         self.temp_mail = None
         self.state_file = "auth_state.json"
         self._owns_browser = False
-        self._owns_context = False
-        self._attached_to_browser = False
-        self._persistent_context = False
 
     def log(self, message, color=Fore.WHITE):
         print(f"{color}{message}{Style.RESET_ALL}")
@@ -81,7 +77,6 @@ class PCAutomation:
                 )
                 self.browser = None
                 self.context = None
-                self._attached_to_browser = False
 
         # Load previous session state if it exists (skips login on future runs).
         # This is only used for a browser launched by this process.
@@ -89,15 +84,11 @@ class PCAutomation:
         browser_channel = os.environ.get("PLAYWRIGHT_BROWSER_CHANNEL", "").strip()
 
         launch_errors = []
-        profile_mode_attempted = False
         if browser_channel:
             try:
                 self.log(
                     f"Using configured Chromium browser channel: {browser_channel}.",
                     Fore.CYAN,
-                )
-                profile_mode_attempted = bool(
-                    self._profile_user_data_dir(channel=browser_channel)
                 )
                 self._launch_managed_context(
                     channel=browser_channel,
@@ -118,9 +109,6 @@ class PCAutomation:
                         f"Using detected browser executable: {executable_path}",
                         Fore.CYAN,
                     )
-                    profile_mode_attempted = profile_mode_attempted or bool(
-                        self._profile_user_data_dir(executable_path=executable_path)
-                    )
                     self._launch_managed_context(
                         executable_path=executable_path,
                         storage_state=storage_state,
@@ -128,15 +116,6 @@ class PCAutomation:
                     break
                 except Exception as exc:
                     launch_errors.append(f"{executable_path}: {exc}")
-
-        if self.context is None and profile_mode_attempted:
-            details = "; ".join(launch_errors)
-            raise RuntimeError(
-                "A browser profile was detected, but it could not be opened. "
-                "Close the normal Edge/Chrome window using that profile, or "
-                "start it with remote debugging and set PLAYWRIGHT_CDP_URL. "
-                f"Attempts: {details}"
-            )
 
         if self.context is None:
             try:
@@ -165,234 +144,26 @@ class PCAutomation:
         channel: Optional[str] = None,
         storage_state: Optional[str] = None,
     ) -> None:
-        """Launch a browser using the operator profile when one is available."""
+        """Launch an isolated managed browser and regular Playwright context."""
 
-        user_data_dir = self._profile_user_data_dir(
-            executable_path=executable_path,
-            channel=channel,
-        )
-        launch_args = []
-        if user_data_dir:
-            profile_directory, profile_name = self._select_profile(user_data_dir)
-            launch_args.append(f"--profile-directory={profile_directory}")
-            self.log(
-                f"Using browser profile '{profile_name}' "
-                f"({profile_directory}) from "
-                f"{user_data_dir}.",
-                Fore.GREEN,
-            )
+        launch_args = ["--no-sandbox"] if os.name != "nt" else None
+        launch_kwargs = {
+            "headless": False,
+        }
+        if launch_args is not None:
+            launch_kwargs["args"] = launch_args
+        if executable_path:
+            launch_kwargs["executable_path"] = executable_path
+        if channel:
+            launch_kwargs["channel"] = channel
 
-            launch_kwargs = {
-                "headless": False,
-                "args": launch_args,
-            }
-            if executable_path:
-                launch_kwargs["executable_path"] = executable_path
-            if channel:
-                launch_kwargs["channel"] = channel
-            context = self.playwright.chromium.launch_persistent_context(
-                user_data_dir,
-                **launch_kwargs,
-            )
-            self.context = context
-            self.browser = context.browser
-            self._persistent_context = True
-            self._owns_context = True
-            self._owns_browser = False
-        else:
-            launch_args = ["--no-sandbox"] if os.name != "nt" else None
-            launch_kwargs = {
-                "headless": False,
-            }
-            if launch_args is not None:
-                launch_kwargs["args"] = launch_args
-            if executable_path:
-                launch_kwargs["executable_path"] = executable_path
-            if channel:
-                launch_kwargs["channel"] = channel
-            browser = self.playwright.chromium.launch(**launch_kwargs)
-            self.browser = browser
-            self.context = browser.new_context(storage_state=storage_state)
-            self._persistent_context = False
-            self._owns_context = True
-            self._owns_browser = True
+        browser = self.playwright.chromium.launch(**launch_kwargs)
+        self.browser = browser
+        self.context = browser.new_context(storage_state=storage_state)
+        self._owns_browser = True
 
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.page.set_default_timeout(30_000)
-
-    def _profile_directory(self, user_data_dir: Optional[str] = None) -> str:
-        user_data_dir = user_data_dir or self._profile_user_data_dir()
-        directory, _display_name = self._select_profile(user_data_dir)
-        return directory
-
-    @staticmethod
-    def default_edge_user_data_dir() -> str:
-        """Return the standard Windows Edge user-data directory."""
-
-        local_app_data = os.environ.get(
-            "LOCALAPPDATA",
-            os.path.expanduser(r"~\AppData\Local"),
-        )
-        return os.path.join(local_app_data, "Microsoft", "Edge", "User Data")
-
-    @classmethod
-    def discover_browser_profiles(cls, user_data_dir: Optional[str] = None) -> list[dict]:
-        """Read Edge/Chromium profile directory and display-name metadata."""
-
-        root = user_data_dir or cls.default_edge_user_data_dir()
-        local_state_path = os.path.join(root, "Local State")
-        profiles = []
-        last_used = None
-
-        try:
-            with open(local_state_path, "r", encoding="utf-8") as state_file:
-                local_state = json.load(state_file)
-            profile_state = local_state.get("profile", {})
-            info_cache = profile_state.get("info_cache", {})
-            last_used = profile_state.get("last_used")
-            if isinstance(info_cache, dict):
-                for directory, metadata in info_cache.items():
-                    if not isinstance(metadata, dict):
-                        metadata = {}
-                    profiles.append(
-                        {
-                            "directory": str(directory),
-                            "name": str(metadata.get("name") or directory),
-                            "last_used": str(directory) == str(last_used),
-                        }
-                    )
-        except (OSError, ValueError, TypeError):
-            pass
-
-        # Local State is the authoritative source, but a partially initialized
-        # profile can exist before it is written there. Include those folders
-        # so profile selection still gives the operator a usable answer.
-        known_directories = {profile["directory"] for profile in profiles}
-        try:
-            directory_names = os.listdir(root)
-        except OSError:
-            directory_names = []
-        for directory in directory_names:
-            if directory in known_directories:
-                continue
-            if directory == "Default" or directory.startswith("Profile "):
-                if os.path.isdir(os.path.join(root, directory)):
-                    profiles.append(
-                        {
-                            "directory": directory,
-                            "name": directory,
-                            "last_used": directory == last_used,
-                        }
-                    )
-
-        return sorted(
-            profiles,
-            key=lambda profile: (
-                not profile["last_used"],
-                profile["directory"].casefold(),
-            ),
-        )
-
-    def _select_profile(self, user_data_dir: Optional[str]) -> tuple[str, str]:
-        """Resolve an explicit profile directory/name or Edge's last-used one."""
-
-        explicit_directory = os.environ.get(
-            "PLAYWRIGHT_PROFILE_DIRECTORY",
-            "",
-        ).strip()
-        explicit_name = os.environ.get("PLAYWRIGHT_PROFILE_NAME", "").strip()
-        profiles = self.discover_browser_profiles(user_data_dir)
-
-        if explicit_directory:
-            matched = next(
-                (
-                    profile
-                    for profile in profiles
-                    if profile["directory"].casefold()
-                    == explicit_directory.casefold()
-                ),
-                None,
-            )
-            return (
-                explicit_directory,
-                matched["name"] if matched else explicit_directory,
-            )
-
-        if explicit_name:
-            matched = next(
-                (
-                    profile
-                    for profile in profiles
-                    if profile["name"].casefold() == explicit_name.casefold()
-                    or profile["directory"].casefold() == explicit_name.casefold()
-                ),
-                None,
-            )
-            if matched is None:
-                available = ", ".join(
-                    f"{profile['name']} ({profile['directory']})"
-                    for profile in profiles
-                ) or "none found"
-                raise RuntimeError(
-                    f"Edge profile '{explicit_name}' was not found. "
-                    f"Available profiles: {available}"
-                )
-            return matched["directory"], matched["name"]
-
-        last_used = next(
-            (profile for profile in profiles if profile["last_used"]),
-            None,
-        )
-        if last_used:
-            return last_used["directory"], last_used["name"]
-
-        return "Default", "Default"
-
-    def _profile_user_data_dir(
-        self,
-        *,
-        executable_path: Optional[str] = None,
-        channel: Optional[str] = None,
-    ) -> Optional[str]:
-        """Return the browser's real profile root, if it can be identified."""
-
-        configured = os.environ.get("PLAYWRIGHT_USER_DATA_DIR", "").strip()
-        if configured:
-            return os.path.abspath(os.path.expandvars(os.path.expanduser(configured)))
-
-        if os.name != "nt":
-            return None
-
-        browser_name = (executable_path or channel or "").casefold()
-        local_app_data = os.environ.get(
-            "LOCALAPPDATA",
-            os.path.expanduser(r"~\AppData\Local"),
-        )
-        app_data = os.environ.get(
-            "APPDATA",
-            os.path.expanduser(r"~\AppData\Roaming"),
-        )
-
-        if "edge" in browser_name or browser_name == "msedge":
-            return os.path.join(local_app_data, "Microsoft", "Edge", "User Data")
-        if "brave" in browser_name:
-            return os.path.join(
-                local_app_data,
-                "BraveSoftware",
-                "Brave-Browser",
-                "User Data",
-            )
-        if "chrome" in browser_name:
-            return os.path.join(local_app_data, "Google", "Chrome", "User Data")
-        if "chromium" in browser_name:
-            return os.path.join(local_app_data, "Chromium", "User Data")
-
-        # The workspace Chromium is intentionally left on the existing
-        # isolated-context path unless the operator explicitly supplies a
-        # profile root.
-        if os.environ.get("PLAYWRIGHT_PROFILE_DIRECTORY"):
-            return os.path.join(app_data, "Chromium", "User Data")
-        return None
 
     def _candidate_cdp_urls(self) -> list[str]:
         """Return explicit and discoverable local Chromium CDP endpoints."""

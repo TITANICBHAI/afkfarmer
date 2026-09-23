@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -342,26 +341,6 @@ class ReplitAutomationOrchestrator:
 
 
 if __name__ == "__main__":
-    if "--list-edge-profiles" in sys.argv:
-        profile_root = os.environ.get(
-            "PLAYWRIGHT_USER_DATA_DIR",
-            PCAutomation.default_edge_user_data_dir(),
-        )
-        profiles = PCAutomation.discover_browser_profiles(profile_root)
-        print(f"Edge profile data: {profile_root}")
-        if not profiles:
-            print("No Edge profiles were found.")
-        else:
-            for profile in profiles:
-                marker = " (last used)" if profile["last_used"] else ""
-                print(
-                    f"- {profile['name']} | directory: "
-                    f"{profile['directory']}{marker}"
-                )
-            print("\nSelect one with:")
-            print('set "PLAYWRIGHT_PROFILE_NAME=<profile name>"')
-        raise SystemExit(0)
-
     print("\n" + "=" * 60)
     print(Fore.MAGENTA + "🚀 REPLIT COMPLETE AUTOMATION (PC Browser + Android ADB)" + Style.RESET_ALL)
     print("=" * 60)

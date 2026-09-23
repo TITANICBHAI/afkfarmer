@@ -1,6 +1,4 @@
 import os
-import json
-import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -174,75 +172,29 @@ class PcAutomationMockTests(unittest.TestCase):
 
         urlopen.assert_not_called()
 
-    def test_edge_profile_directory_uses_selected_user_data_root(self):
+    def test_managed_browser_uses_regular_context_and_storage_state(self):
         automation = PCAutomation("mail@example.test", "password")
+        playwright = Mock()
+        browser = Mock()
+        context = Mock()
+        page = Mock()
+        context.pages = []
+        context.new_page.return_value = page
+        browser.new_context.return_value = context
+        playwright.chromium.launch.return_value = browser
+        automation.playwright = playwright
 
-        with patch("pc_automation.os.name", "nt"):
-            with patch.dict(
-                "os.environ",
-                {
-                    "LOCALAPPDATA": r"C:\Users\DELL\AppData\Local",
-                    "PLAYWRIGHT_PROFILE_DIRECTORY": "Profile 2",
-                },
-                clear=False,
-            ):
-                self.assertEqual(
-                    automation._profile_directory(),
-                    "Profile 2",
-                )
-                self.assertEqual(
-                    automation._profile_user_data_dir(
-                        executable_path=(
-                            r"C:\Program Files (x86)\Microsoft\Edge"
-                            r"\Application\msedge.exe"
-                        )
-                    ),
-                    os.path.join(
-                        r"C:\Users\DELL\AppData\Local",
-                        "Microsoft",
-                        "Edge",
-                        "User Data",
-                    ),
-                )
+        automation._launch_managed_context(storage_state="auth_state.json")
 
-    def test_edge_profiles_resolve_friendly_name_and_last_used_profile(self):
-        automation = PCAutomation("mail@example.test", "password")
-
-        with tempfile.TemporaryDirectory() as profile_root:
-            with open(
-                os.path.join(profile_root, "Local State"),
-                "w",
-                encoding="utf-8",
-            ) as state_file:
-                json.dump(
-                    {
-                        "profile": {
-                            "last_used": "Profile 2",
-                            "info_cache": {
-                                "Default": {"name": "Personal"},
-                                "Profile 2": {"name": "Work"},
-                            },
-                        }
-                    },
-                    state_file,
-                )
-
-            profiles = automation.discover_browser_profiles(profile_root)
-            self.assertEqual(profiles[0]["directory"], "Profile 2")
-            self.assertEqual(profiles[0]["name"], "Work")
-
-            with patch.dict(
-                "os.environ",
-                {
-                    "PLAYWRIGHT_PROFILE_DIRECTORY": "",
-                    "PLAYWRIGHT_PROFILE_NAME": "Work",
-                },
-                clear=False,
-            ):
-                self.assertEqual(
-                    automation._select_profile(profile_root),
-                    ("Profile 2", "Work"),
-                )
+        playwright.chromium.launch.assert_called_once()
+        browser.new_context.assert_called_once_with(
+            storage_state="auth_state.json",
+        )
+        playwright.chromium.assert_not_called()
+        self.assertIs(automation.browser, browser)
+        self.assertIs(automation.context, context)
+        self.assertIs(automation.page, page)
+        self.assertTrue(automation._owns_browser)
 
     def test_import_requires_visible_control_and_observed_project_url(self):
         page = FakePage(chat_visible=True)
@@ -366,7 +318,6 @@ class PcAutomationMockTests(unittest.TestCase):
         playwright = Mock()
         automation.browser = browser
         automation.playwright = playwright
-        automation._attached_to_browser = True
         automation._owns_browser = False
 
         with patch.object(automation, "save_state"):
