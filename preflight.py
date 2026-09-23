@@ -1,8 +1,10 @@
-"""Non-destructive readiness check for the local automation repository.
+"""Non-destructive readiness checks for the local automation repository.
 
-This script never opens a browser, contacts a mailbox, starts ADB actions, or
-launches the Android app. It only checks local files, syntax, dependencies, and
-tool availability.
+The default mode is offline development readiness: it checks source files,
+configuration, and Python dependencies without requiring a browser, ADB, or an
+Android device. ``--integration`` adds the external-tool checks required for a
+real run. ``--require-device`` implies integration mode and additionally
+requires exactly one authorized Android device.
 """
 
 from __future__ import annotations
@@ -153,17 +155,22 @@ def check_adb_devices(require_device: bool = False) -> list[str]:
 
 
 def main() -> int:
-    require_device = "--require-device" in sys.argv[1:]
+    arguments = set(sys.argv[1:])
+    integration = "--integration" in arguments or "--require-device" in arguments
+    require_device = "--require-device" in arguments or "--integration" in arguments
     checks = (
         ("source and syntax", check_source_files()),
         ("configuration contract", check_config_contract()),
         ("Python dependencies", check_dependencies()),
-        ("external tools", check_external_tools()),
-        (
-            "Android device readiness",
-            check_adb_devices(require_device=require_device),
-        ),
     )
+    if integration:
+        checks += (
+            ("external tools", check_external_tools()),
+            (
+                "Android device readiness",
+                check_adb_devices(require_device=require_device),
+            ),
+        )
     failed = False
     for label, problems in checks:
         if problems:
@@ -174,10 +181,21 @@ def main() -> int:
         else:
             print(f"[PASS] {label}")
 
+    if not integration:
+        print(
+            "[SKIP] external tools (offline mode; use --integration for a real-run check)"
+        )
+        print(
+            "[SKIP] Android device readiness (offline mode; use --require-device)"
+        )
+
     if failed:
         print("\nRepository is not ready for a real automation run.")
         return 1
-    print("\nRepository preflight passed. No browser or Android flow was started.")
+    if integration:
+        print("\nIntegration preflight passed. No browser or Android flow was started.")
+    else:
+        print("\nOffline preflight passed. No browser or Android flow was started.")
     return 0
 
 

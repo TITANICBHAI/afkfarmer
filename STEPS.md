@@ -62,7 +62,7 @@
 3. Once the inbox is visible, look for the Replit verification email:
 
    * **Sender:** `Replit <verify@replit.com>`
-   * **Subject:** `Replit verify email`
+   * **Subject:** `Replit: Verify Your Email`
 4. Click the Replit verification email.
 
 ### 4.2 — Open the Verification Email
@@ -70,8 +70,12 @@
 1. The email content may show a **loading** state.
 2. Wait until the email content has loaded.
 3. Scroll down a little.
-4. Locate the **Verify Email** option.
-5. Click **Verify Email**.
+4. Locate the visible **Verify Now** option.
+5. Click **Verify Now**.
+
+   Some mailbox layouts expose a legacy **Verify Email** control first. If
+   that control is present, open it and then continue with **Verify Now**. Do
+   not require the legacy control when **Verify Now** is already visible.
 
 ### 4.3 — Verify Now
 
@@ -81,8 +85,8 @@
 
 ### 4.4 — Verifying Email
 
-1. A new page opens automatically.
-2. The page says **“Verifying email.”**
+1. A new page may open automatically.
+2. The page may say **“Verifying email.”**
 3. Wait while the verification process takes place.
 
 ### 4.5 — Verification Complete
@@ -102,15 +106,24 @@
 
 ## Android Step 2 — Open the App Drawer
 
-1. Open the **app drawer** using a swipe-up gesture.
-2. This can be done using **accessibility or a similar method**.
-3. Scroll through the app drawer toward the **Replit** app.
-4. Replit may appear at the very top, and it can be clicked there.
-5. The **preferred way**, however, is to scroll up until reaching Replit at the bottom, or use a similar interaction.
+The documented manual procedure is to open the app drawer with a swipe and
+select Replit. The current automation intentionally uses the Android launcher
+intent for the configured package instead:
+
+```text
+adb shell monkey -p com.replit.app -c android.intent.category.LAUNCHER 1
+```
+
+This is an implementation shortcut, not a claim that the drawer gesture was
+executed. The automation still waits for the observed Replit UI state before
+continuing. Use manual takeover if the direct package launch does not expose
+the expected screen on a target device.
 
 ## Android Step 3 — Open Replit
 
-1. Click the **Replit** app.
+1. In a manual run, click the **Replit** app from the drawer.
+2. In the current automated run, the direct package launch above performs this
+   step.
 
 ## Android Step 4 — Wait for Replit
 

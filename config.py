@@ -25,6 +25,7 @@ TEMP_MAIL_URL = "https://temp-mail.org/"
 
 # --- GitHub Import ---
 GITHUB_REPO_URL = ""  # Optional: pre-fill a repo URL to skip the manual prompt
+RUN_POST_ANDROID_STAGES = True  # Also run PC resume and optional GitHub import
 
 # --- Logging ---
 DEBUG_MODE = True
