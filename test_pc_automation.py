@@ -190,7 +190,6 @@ class PcAutomationMockTests(unittest.TestCase):
         browser.new_context.assert_called_once_with(
             storage_state="auth_state.json",
         )
-        playwright.chromium.assert_not_called()
         self.assertIs(automation.browser, browser)
         self.assertIs(automation.context, context)
         self.assertIs(automation.page, page)

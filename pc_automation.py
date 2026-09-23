@@ -206,7 +206,6 @@ class PCAutomation:
         if not contexts:
             raise RuntimeError("The attached browser has no browser context.")
         self.context = contexts[0]
-        self._attached_to_browser = True
         self._owns_browser = False
         self.page = self._find_page_for_host("replit.com")
         if self.page is None:
@@ -850,15 +849,7 @@ class PCAutomation:
         self.log("\n🛑 Closing browser...", Fore.CYAN)
         if self.context:
             self.save_state()
-        if self.context and self._persistent_context and self._owns_context:
-            try:
-                self.context.close()
-            except Exception as exc:
-                self.log(
-                    f"ℹ️ Browser profile was already unavailable during shutdown ({exc}).",
-                    Fore.YELLOW,
-                )
-        elif self.browser and self._owns_browser:
+        if self.browser and self._owns_browser:
             try:
                 is_connected = getattr(self.browser, "is_connected", None)
                 if callable(is_connected) and not is_connected():
@@ -889,6 +880,3 @@ class PCAutomation:
         self.browser = None
         self.playwright = None
         self._owns_browser = False
-        self._owns_context = False
-        self._persistent_context = False
-        self._attached_to_browser = False
