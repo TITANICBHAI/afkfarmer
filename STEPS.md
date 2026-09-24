@@ -250,3 +250,38 @@ the expected screen on a target device.
 # End of Complete Flow
 
 The process is complete after the Replit app has been closed completely.
+
+## Automation-specific operator notes
+
+Before a live run, use the offline check first:
+
+```bash
+python preflight.py
+```
+
+To check the browser and ADB installation without starting the flow, use:
+
+```bash
+python preflight.py --integration
+```
+
+For a real Android run, require exactly one authorized device:
+
+```bash
+python preflight.py --require-device
+```
+
+CAPTCHA, reCAPTCHA, suspicious-login messages, rate limits, account
+restrictions, and device-integrity challenges remain manual. Use the terminal
+recovery menu for retry, manual takeover, skip, or quit; do not bypass or
+evade the challenge.
+
+The Android automation launches the configured package directly with the
+launcher intent documented above. It does not claim to perform the app-drawer
+swipe. If the expected screen is not observed, stop for manual takeover.
+
+By default, the automation continues with PC resume and optional GitHub import
+after Android. Set `RUN_POST_ANDROID_STAGES = False` in `config.py` when the
+Android stage should be the end of the automated flow. The saved completion
+status distinguishes automated success from manual completion, skipped stages,
+and failure.

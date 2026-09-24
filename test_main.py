@@ -163,6 +163,28 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(called, main.STAGES[main.STAGES.index("ANDROID"):-1])
         self.assertNotIn("EMAIL", called)
 
+    def test_post_android_stages_can_be_disabled_explicitly(self):
+        orchestrator = self.make_orchestrator()
+        orchestrator.state["stage"] = "ANDROID"
+        called = []
+
+        def fake_run_stage(name, _handler):
+            called.append(name)
+            return True
+
+        with patch("main.RUN_POST_ANDROID_STAGES", False), \
+            patch("builtins.input", return_value="y"), \
+            patch.object(orchestrator, "run_stage", side_effect=fake_run_stage), \
+            patch("main.time.sleep"):
+            orchestrator.run()
+
+        self.assertEqual(called, ["ANDROID"])
+        self.assertEqual(orchestrator.state["stage"], "DONE")
+        self.assertEqual(
+            orchestrator.state["completion_status"],
+            "AUTOMATED_SUCCESS",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

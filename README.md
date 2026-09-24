@@ -36,7 +36,7 @@ The state-driven offline implementation is verified, including provider
 selection and fallback, atomic checkpoints, PC registration classification,
 Android UI-state transitions, safe text input, session synchronization after
 Android completion, and safe GitHub-import failure handling. The combined
-offline test suite passes 50 tests when run with the required Patchright
+offline test suite passes 56 tests when run with the required Patchright
 runtime library path.
 
 Live mailbox, Replit registration, Android-device, PC-resume, GitHub-import,
@@ -135,7 +135,7 @@ export LD_LIBRARY_PATH="$(dirname "$LIBSTDCPP")${LD_LIBRARY_PATH:+:$LD_LIBRARY_P
 python -m unittest -v
 ```
 
-The full suite currently contains 50 tests. A direct `python -m unittest -v`
+The full suite currently contains 56 tests. A direct `python -m unittest -v`
 without that library path may fail before tests start with a
 `libstdc++.so.6` import error; that is a runtime setup issue, not a test
 assertion failure.
@@ -370,6 +370,7 @@ TEMP_MAIL_PROVIDER = "temp-mail.org"
 TEMP_MAIL_URL = "https://temp-mail.org/"
 ANDROID_DEVICE_ID = None
 GITHUB_REPO_URL = ""
+RUN_POST_ANDROID_STAGES = True
 ```
 
 Change the sample password before a real run and keep `config.py` local. Leave
@@ -387,7 +388,9 @@ Email selection works as follows:
 - `EMAIL_STRATEGY = "temp-mail.org"` uses the browser mailbox directly.
 
 Leave `GITHUB_REPO_URL` empty to be prompted during the run, or set it to the
-operator's repository URL.
+operator's repository URL. Keep `RUN_POST_ANDROID_STAGES = True` to resume the
+PC session and attempt the optional GitHub import after Android. Set it to
+`False` when the Android stage is the intended end of the automated flow.
 
 ### 6. Run the safe preflight check
 
@@ -421,8 +424,9 @@ python main.py
 
 The process opens a visible browser, obtains the mailbox address, opens the
 Replit registration flow, pauses for manual CAPTCHA handling when necessary,
-verifies the mailbox message, controls the Replit Android app, resumes the PC
-session, and attempts the visible GitHub import flow.
+verifies the mailbox message, and controls the Replit Android app. With
+`RUN_POST_ANDROID_STAGES = True`, it then resumes the PC session and attempts
+the visible GitHub import flow.
 
 There is no separate desktop GUI. The user interface is the visible browser
 window, the real Android app, and the interactive terminal prompts.
@@ -468,6 +472,17 @@ Manual takeover and skipped stages are recorded in the checkpoint, but they do
 not provide the same evidence as an automated successful transition. Review
 the browser, device, and saved evidence before treating a run as complete.
 
+The final checkpoint records one of these completion statuses:
+
+- `AUTOMATED_SUCCESS` — every enabled stage completed automatically.
+- `MANUAL_COMPLETION` — at least one failed stage was completed through manual
+  takeover.
+- `SKIPPED` — at least one stage was explicitly skipped.
+- `FAILED` — the run was interrupted or stopped before completion.
+
+For safety, `state.json` stores a password reference and a boolean verification
+indicator, not the password or the complete verification URL.
+
 ### Windows safety and readiness
 
 Before a real run, confirm that the configured browser is ready, `adb devices` shows the
@@ -483,7 +498,7 @@ record evidence instead of bypassing those protections.
 
 ## Runtime artifacts
 
-The eventual implementation may produce:
+The implementation may produce:
 
 - `state.json`
 - `auth_state.json`
@@ -492,4 +507,5 @@ The eventual implementation may produce:
 - screenshots under `screenshots/`
 
 These may contain account or session data and should remain local and out of
-source control.
+source control. `state.json` also contains checkpoint and completion metadata;
+it intentionally excludes the password and complete verification URL.
