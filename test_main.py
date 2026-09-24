@@ -42,10 +42,7 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(saved["temp_email"], "mail@example.test")
         self.assertIsNone(saved["email_provider"])
         self.assertEqual(saved["username"], "mail")
-        self.assertEqual(
-            saved["verification_link"],
-            "https://replit.com/action-code/redacted",
-        )
+        self.assertNotIn("verification_link", saved)
         self.assertEqual(
             saved["github_repo"],
             "https://github.com/example/example",
@@ -89,6 +86,7 @@ class CheckpointTests(unittest.TestCase):
             [entry["outcome"] for entry in orchestrator.state["decisions"]],
             ["retry", "quit"],
         )
+        self.assertEqual(orchestrator.state["completion_status"], "FAILED")
         self.assertEqual(orchestrator.state["stage"], "EMAIL")
         self.assertEqual(orchestrator.state["in_progress"]["status"], "failed")
 
@@ -99,6 +97,10 @@ class CheckpointTests(unittest.TestCase):
             self.assertTrue(orchestrator.run_stage("EMAIL", lambda: False))
 
         self.assertEqual(orchestrator.state["decisions"][-1]["outcome"], "manual_takeover")
+        self.assertEqual(
+            orchestrator.state["completion_status"],
+            "MANUAL_COMPLETION",
+        )
         self.assertEqual(orchestrator.state["stage"], "SIGNUP")
         self.assertIsNone(orchestrator.state["in_progress"])
 
@@ -109,6 +111,7 @@ class CheckpointTests(unittest.TestCase):
             self.assertTrue(orchestrator.run_stage("EMAIL", lambda: False))
 
         self.assertEqual(orchestrator.state["decisions"][-1]["outcome"], "skip")
+        self.assertEqual(orchestrator.state["completion_status"], "SKIPPED")
         self.assertEqual(orchestrator.state["stage"], "SIGNUP")
         self.assertIsNone(orchestrator.state["in_progress"])
 

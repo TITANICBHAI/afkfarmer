@@ -157,7 +157,7 @@ def check_adb_devices(require_device: bool = False) -> list[str]:
 def main() -> int:
     arguments = set(sys.argv[1:])
     integration = "--integration" in arguments or "--require-device" in arguments
-    require_device = "--require-device" in arguments or "--integration" in arguments
+    require_device = "--require-device" in arguments
     checks = (
         ("source and syntax", check_source_files()),
         ("configuration contract", check_config_contract()),

@@ -101,10 +101,16 @@ For a non-destructive local readiness check, run:
 python preflight.py
 ```
 
-This checks source syntax, configuration keys, Python dependencies, browser
-availability/configuration, and that ADB can be queried. It does not open a
-browser, contact the mailbox, or launch the Android app. By default it does
-not require a connected device, so use the stricter check before a real run:
+This is the offline readiness check. It checks source syntax, configuration
+keys, and Python dependencies without requiring a browser, ADB, or a connected
+Android device. It does not open a browser, contact the mailbox, or launch the
+Android app. For local browser and ADB readiness, use integration mode:
+
+```bash
+python preflight.py --integration
+```
+
+Before a real run, use the stricter device check:
 
 ```bash
 python preflight.py --require-device
@@ -385,11 +391,17 @@ operator's repository URL.
 
 ### 6. Run the safe preflight check
 
-This checks source syntax, configuration, Python dependencies, and ADB without
+This checks source syntax, configuration, and Python dependencies without
 opening the browser or launching the Android app:
 
 ```cmd
 python preflight.py
+```
+
+To also check the configured browser and ADB installation:
+
+```cmd
+python preflight.py --integration
 ```
 
 For a real Android run, require exactly one authorized device:

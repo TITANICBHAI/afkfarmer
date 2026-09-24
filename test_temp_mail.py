@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import Mock, patch
 
 from temp_mail import (
+    TempMailOrgProvider,
     extract_email_candidates,
     extract_verification_url,
     is_expected_verification_url,
@@ -84,6 +86,25 @@ class TempMailParsingTests(unittest.TestCase):
             "provider_blocked",
         )
         self.assertIsNone(provider_block_reason("Mailbox: first@example.com"))
+
+    def test_closed_verification_page_is_not_success_without_observed_state(self):
+        provider = TempMailOrgProvider(Mock(), timeout_ms=1)
+        provider.page = Mock()
+        provider.page.is_closed.return_value = True
+
+        with patch("temp_mail.time.monotonic", return_value=0):
+            self.assertFalse(provider._verification_success_observed())
+
+    def test_verification_success_requires_explicit_success_text(self):
+        provider = TempMailOrgProvider(Mock(), timeout_ms=1)
+        provider.page = Mock()
+        provider.page.is_closed.return_value = False
+        body = Mock()
+        body.inner_text.return_value = "Email verified successfully"
+        provider.page.locator.return_value = body
+
+        with patch("temp_mail.time.monotonic", side_effect=[0, 0]):
+            self.assertTrue(provider._verification_success_observed())
 
 
 if __name__ == "__main__":

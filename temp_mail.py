@@ -172,7 +172,6 @@ class TempMailOrgProvider(EmailProvider):
         self.timeout_ms = timeout_ms
         self.page: Optional[Any] = None
         self.address: Optional[str] = None
-        self._verification_started = False
 
     def open(self) -> Any:
         """Open the provider page in the shared browser context."""
@@ -544,7 +543,6 @@ class TempMailOrgProvider(EmailProvider):
             raise TempMailError("The visible verification destination was rejected.")
         if href:
             self.verification_url = href
-        self._verification_started = True
         try:
             control.click()
         except Exception as exc:
