@@ -1,0 +1,697 @@
+I checked the new `afkfarmer (1).zip` directly. This version is **substantially closer** to the architecture we discussed. It also has real state classification, provider abstraction, screenshot references, recovery handling, and tests.
+
+There are still several concrete issues to fix before calling it ready.
+
+## What is already good
+
+### Email architecture is in place
+
+The project now has:
+
+```text
+EmailProvider
+├── ManualEmailProvider
+├── OneSecMailProvider
+├── TempMailOrgProvider
+└── FallbackEmailProvider
+```
+
+And the priority is correctly modeled as:
+
+```text
+USER_CUSTOM_EMAIL
+        ↓
+primary API
+        ↓
+temp-mail.org
+```
+
+The hybrid fallback is also correctly limited to **address acquisition**. That's important: once an API mailbox has actually been created and used for registration, randomly switching to another mailbox would make verification impossible.
+
+### Android state detection is much better
+
+The code now recognizes:
+
+```text
+email_login
+password_login
+login_processing
+invalid_credentials
+welcome_onboarding
+name
+username
+source
+role
+plan
+main
+profile_menu
+logout_dialog
+post_close_home
+```
+
+And the screenshots `10–24` actually confirm that the implementation's intermediate states are real.
+
+For example, the supplied screenshots show:
+
+```text
+14 → Welcome
+15 → What's your name?
+16 → Create username
+17 → Google search
+18 → Developer
+19 → Plan / Skip
+20 → Main
+21–22 → Profile
+23 → Logout confirmation
+24 → Android home
+```
+
+So the current Android state model is substantially aligned with the visual evidence.
+
+### Logout was fixed correctly
+
+This part is now conceptually right:
+
+```text
+LOG OUT
+   ↓
+force-stop Replit
+   ↓
+verify Replit is not foreground/running
+   ↓
+Android home
+   ↓
+complete
+```
+
+It no longer expects another Replit screen after logout.
+
+---
+
+# The problems I would fix now
+
+## 1. `STEPS.md` is stale
+
+This is currently the biggest documentation/code inconsistency.
+
+`STEPS.md` still says:
+
+```text
+Subject: Replit verify email
+```
+
+and:
+
+```text
+Verify Email
+    ↓
+Verify Now
+```
+
+But the screenshot evidence we already established is:
+
+```text
+Subject: Replit: Verify Your Email
+```
+
+and the relevant message directly exposes:
+
+```text
+Verify Now
+```
+
+The **implementation is actually better than the document here**:
+
+```python
+verify_now = self._visible_control(...)
+if verify_now is None:
+    verify_email = ...
+```
+
+So the code has moved forward, but `STEPS.md` hasn't.
+
+That needs to be corrected so the agent doesn't later "fix" working code back toward an outdated specification.
+
+---
+
+## 2. `requirements.txt` contains duplicate dependencies
+
+Currently:
+
+```text
+patchright>=1.40.0
+requests>=2.31.0
+colorama>=0.4.6
+colorama>=0.4.6
+patchright>=1.40.0
+requests>=2.31.0
+```
+
+This is harmless but sloppy and should be cleaned.
+
+It should have one declaration per dependency.
+
+---
+
+## 3. Preflight is wrong for the offline-development model
+
+This is important given what you told me about the agent.
+
+`preflight.py` currently treats:
+
+```text
+adb missing
+browser missing
+```
+
+as failures.
+
+So an agent with **no Android phone and no browser** gets:
+
+```text
+[FAIL] external tools
+  - missing external tool: adb
+```
+
+even though we explicitly designed the testing system so the agent can work without those resources.
+
+The correct model is:
+
+```text
+preflight
+├── source/syntax       REQUIRED
+├── Python dependencies REQUIRED
+├── mock/unit tests     REQUIRED
+├── browser runtime     OPTIONAL / integration
+└── Android/ADB         OPTIONAL / integration
+```
+
+Then perhaps:
+
+```bash
+python preflight.py
+```
+
+means local/offline readiness.
+
+And:
+
+```bash
+python preflight.py --integration
+```
+
+means "is this machine actually capable of a real run?"
+
+That distinction should be implemented.
+
+---
+
+## 4. The current test suite cannot even collect here
+
+I ran:
+
+```bash
+python -m pytest -q
+```
+
+and collection fails because this environment does not have:
+
+```text
+patchright
+colorama
+```
+
+The code itself compiles successfully, but the test suite can't run until the Python dependencies are installed.
+
+That isn't a browser/ADB problem; those are simply Python package prerequisites.
+
+So the report should distinguish:
+
+```text
+Python dependency unavailable
+```
+
+from:
+
+```text
+Browser unavailable
+Android unavailable
+ADB unavailable
+```
+
+Those are different classes of limitation.
+
+---
+
+## 5. The main workflow still has extra stages after Android
+
+Your documented Android flow ends:
+
+```text
+logout
+→ close Replit
+→ done
+```
+
+But `main.py` currently does:
+
+```text
+EMAIL
+SIGNUP
+VERIFY
+ANDROID
+PC_LOGIN
+GITHUB
+DONE
+```
+
+So after the Android portion completes, it continues to:
+
+```text
+PC_LOGIN
+→ GITHUB
+```
+
+That's an architectural scope mismatch.
+
+Maybe those stages belong to the larger original project, and that's fine. But then they should be explicitly separated from the flow you've now defined.
+
+For example:
+
+```text
+CORE ACCOUNT FLOW
+EMAIL → SIGNUP → VERIFY → ANDROID → DONE
+```
+
+and optionally:
+
+```text
+POST-FLOW TASKS
+PC_LOGIN
+GITHUB
+```
+
+or configurable:
+
+```python
+RUN_POST_ANDROID_STAGES = False
+```
+
+Otherwise the agent can correctly finish Android and then immediately proceed into something you considered finished.
+
+---
+
+## 6. Custom email currently means manual mailbox verification
+
+This implementation:
+
+```python
+ManualEmailProvider
+```
+
+does exactly what its name suggests.
+
+It can provide:
+
+```text
+USER_CUSTOM_EMAIL
+```
+
+but then:
+
+```python
+open_verification_message()
+```
+
+raises a manual-takeover error.
+
+That's reasonable **unless your intended meaning of "user-provided email" was that the automation should also automatically read that mailbox**.
+
+If you eventually want automatic custom-email verification, that's a separate integration problem: Gmail API, IMAP, Microsoft Graph, etc.
+
+For now the semantics should be documented clearly:
+
+```text
+custom email = use address automatically
+verification mailbox = manual unless another mailbox connector exists
+```
+
+---
+
+## 7. The 1secmail verification implementation is too optimistic
+
+This part deserves another pass.
+
+The provider:
+
+```text
+get message
+→ extract Replit URL
+→ requests.get(verification_url)
+→ inspect response text
+→ require a success phrase
+```
+
+That assumes the HTTP response body itself will contain a recognizable success message.
+
+A verification endpoint may instead:
+
+```text
+redirect
+render client-side content
+return a generic HTML page
+close a session
+```
+
+So:
+
+```python
+status_code == 200
+```
+
+is not necessarily equivalent to:
+
+```text
+Replit account is verified
+```
+
+And requiring:
+
+```text
+"email verified"
+```
+
+in the raw response body may produce a false failure even when the verification actually succeeded.
+
+This provider needs a more carefully defined verification contract.
+
+---
+
+## 8. The verification URL is persisted in `state.json`
+
+`main.py` does:
+
+```python
+self.state["verification_link"] = self.pc.verification_url
+```
+
+That URL may contain a one-time verification token.
+
+You already correctly say in your implementation docs that verification links are sensitive.
+
+So there is an inconsistency:
+
+```text
+docs:
+verification URL = sensitive
+
+code:
+persist verification URL in checkpoint state
+```
+
+I'd change the checkpoint to record something like:
+
+```json
+{
+  "verification_completed": true
+}
+```
+
+and avoid storing the full URL unless there is a demonstrated need.
+
+---
+
+## 9. Manual takeover currently has too much power
+
+This part is potentially dangerous from a state-machine perspective:
+
+```text
+[m]anual takeover then continue
+[s]kip stage
+```
+
+Both eventually advance the checkpoint.
+
+That means:
+
+```text
+stage failed
+→ user presses m
+→ system marks stage complete
+```
+
+without verifying the actual postcondition.
+
+Same with `skip`.
+
+That's okay as an explicitly operator-controlled escape hatch, but it should **not pretend that the stage succeeded**.
+
+Better:
+
+```text
+AUTOMATION_SUCCESS
+MANUAL_COMPLETION
+SKIPPED
+```
+
+as three different outcomes.
+
+Then later stages know the difference.
+
+---
+
+# 10. Android Step 1–3 still don't match the documented interaction path
+
+`STEPS.md` says:
+
+```text
+Home
+→ swipe up
+→ app drawer
+→ scroll
+→ Replit
+→ click Replit
+```
+
+But `complete_onboarding()` currently does:
+
+```python
+self.open_app(REPLIT_PACKAGE_NAME)
+```
+
+which launches the package directly via `monkey`.
+
+That is functionally reasonable, but it is **not the procedure you documented**.
+
+This is worth deciding deliberately:
+
+### Option A
+
+The app-launching mechanism is an implementation detail.
+
+Then document:
+
+```text
+"Open Replit from Android"
+```
+
+and allow direct package launch.
+
+### Option B
+
+The exact UI path is part of the required workflow.
+
+Then implement:
+
+```text
+home
+→ swipe up
+→ app drawer
+→ locate Replit
+→ click Replit
+```
+
+Right now the documentation says B while the implementation does A.
+
+---
+
+# 11. The polling sleeps are not a major problem
+
+I noticed:
+
+```python
+time.sleep(0.5)
+```
+
+inside state polling loops.
+
+I would **keep this**.
+
+That is not the same thing as:
+
+```text
+sleep(3)
+click button
+sleep(3)
+click button
+```
+
+A 0.5-second polling interval is just a CPU/API-friendly observation cadence.
+
+Your current Android model is:
+
+```text
+dump UI
+→ classify
+→ if not expected, poll again
+```
+
+which is the right architecture.
+
+---
+
+# 12. One thing the new screenshots actually clarified
+
+The Android flow is more detailed than the compressed verbal description suggested.
+
+The screenshots prove these are real states:
+
+```text
+Welcome
+→ Name
+→ Username
+→ Source
+→ Role
+→ Plan/Skip
+→ Main
+```
+
+So the current code's:
+
+```python
+first_name
+username
+Google search
+Developer
+Skip
+```
+
+is not unnecessary complexity. It corresponds to the actual screenshot sequence.
+
+That part is good.
+
+---
+
+# My current verdict
+
+The architecture is now roughly:
+
+```text
+             GOOD FOUNDATION
+                    │
+      ┌─────────────┼─────────────┐
+      ▼             ▼             ▼
+ Email providers   PC states   Android states
+      │             │             │
+      └─────────────┴─────────────┘
+                    │
+              diagnostics
+```
+
+But I would **not give the agent another giant implementation prompt yet**.
+
+The next task should be a **focused cleanup + validation pass**:
+
+```text
+1. Sync STEPS.md with actual screenshots/code
+2. Deduplicate requirements.txt
+3. Separate offline preflight from real-environment preflight
+4. Make tests runnable without browser/ADB
+5. Decide whether PC_LOGIN/GITHUB are part of this flow
+6. Clarify custom-email verification semantics
+7. Harden 1secmail verification semantics
+8. Stop persisting verification tokens
+9. Distinguish manual completion from automated success
+10. Decide whether Android app launch must follow the exact drawer path
+```
+
+### Prompt I'd give the agent next
+
+```text
+Review the current repository after the latest refactor.
+
+Do NOT add new features yet.
+
+Read:
+- STEPS.md
+- ARCHITECTURE.md
+- IMPLEMENTATION.md
+- PROGRESS_TRACKER.md
+- all relevant screenshots under attached_assets/
+- current source code
+- current tests
+
+Perform a consistency and validation pass only.
+
+Fix the following:
+
+1. Synchronize STEPS.md with the actual current screenshots and implementation.
+   In particular, update the Replit verification subject/flow so it reflects:
+   "Replit: Verify Your Email" → open message → Verify Now → Verifying email → success/automatic close.
+   Do not reintroduce a mandatory "Verify Email" action unless the screenshot actually requires it.
+
+2. Deduplicate requirements.txt.
+
+3. Separate offline readiness from live integration readiness.
+   `python preflight.py` must be useful on a machine with no browser and no Android/ADB.
+   Add a separate integration/runtime mode for browser/ADB checks rather than making absent hardware a fatal offline-development error.
+
+4. Make unit/mock/state-machine tests independently runnable without a browser, Android device, or ADB.
+   Do not fake successful live integration results.
+
+5. Review the main stage machine.
+   Determine whether PC_LOGIN and GITHUB belong to the current documented flow.
+   If they are optional post-Android stages, isolate them explicitly instead of automatically continuing after Android completion.
+
+6. Review USER_CUSTOM_EMAIL semantics.
+   It must remain the highest-priority email source.
+   Document that mailbox verification is manual unless a mailbox connector exists.
+   Do not silently switch to another mailbox after an account has already been registered.
+
+7. Review OneSecMail verification.
+   Do not equate HTTP 200 alone with successful Replit verification.
+   Define a reliable verification-result contract and add mocked tests for success, redirect, malformed response, timeout, and ambiguous result.
+
+8. Remove or minimize persistence of complete verification URLs/tokens in state.json.
+   Prefer storing verification_completed=true and provider metadata rather than sensitive token-bearing URLs.
+
+9. Review manual takeover and skip behavior.
+   Do not record manual completion or skipped stages as ordinary automated success.
+   Distinguish:
+     AUTOMATED_SUCCESS
+     MANUAL_COMPLETION
+     SKIPPED
+     FAILED
+
+10. Review Android launch.
+    Compare the documented Home → App Drawer → Replit path against the current direct package launch.
+    Do not change it automatically; first document whether direct launch is intentionally an implementation shortcut or whether the exact UI path is required.
+
+11. Do not modify the anti-bot/security policy.
+    Keep CAPTCHA/security challenges manual and terminal until resolved.
+
+After changes:
+- run compile/syntax checks
+- run all offline tests that are actually executable
+- report tests blocked by missing Python packages separately
+- do not claim browser/ADB/Replit integration passed without those resources
+- update PROGRESS_TRACKER only with evidence-backed results
+
+Return a concise report:
+IMPLEMENTED
+TESTED
+BLOCKED
+REMAINING DISCREPANCIES
+```
+
+That is the pass I would do **before adding anything else**. The foundation in this archive is much better; now the priority is getting the documentation, state machine, tests, and runtime boundaries to agree exactly.

@@ -1,0 +1,554 @@
+import json
+import os
+import tempfile
+import time
+from datetime import datetime, timezone
+
+from colorama import Fore, Style, init
+
+import operator_alert
+from android_automation import AndroidAutomation
+from config import (
+    ANDROID_DEVICE_ID,
+    AUTO_DETECT_STAGE,
+    DELETE_TEMP_MAIL,
+    EMAIL_CHECK_TIMEOUT,
+    EMAIL_STRATEGY,
+    GITHUB_REPO_URL,
+    PRIMARY_EMAIL_API,
+    REPLIT_PASSWORD,
+    RUN_POST_ANDROID_STAGES,
+    TEMP_MAIL_PROVIDER,
+    TEMP_MAIL_URL,
+    USER_CUSTOM_EMAIL,
+)
+from pc_automation import PCAutomation
+from stage_detect import PHONE_PAST_LOGIN, Position, infer_position
+
+init(autoreset=True)
+
+STATE_FILE = "state.json"
+STAGES = ["EMAIL", "SIGNUP", "VERIFY", "ANDROID", "PC_LOGIN", "GITHUB", "DONE"]
+PASSWORD_REF = "config.REPLIT_PASSWORD"
+
+
+def fresh_state():
+    """Return a new redacted state record for one run."""
+    return {
+        "stage": "EMAIL",
+        "in_progress": None,
+        "temp_email": None,
+        "email_provider": None,
+        "username": None,
+        "password_ref": PASSWORD_REF,
+        "verification_completed": False,
+        "mailbox_deleted": False,
+        "github_repo": GITHUB_REPO_URL,
+        "completion_status": "IN_PROGRESS",
+        "decisions": [],
+    }
+
+
+FRESH_STATE = fresh_state()
+
+
+class ReplitAutomationOrchestrator:
+    def __init__(self):
+        self.state = self._load_state()
+        self.android = AndroidAutomation(device_id=ANDROID_DEVICE_ID)
+        self.pc = None
+        # Which stage the previous process was inside when it stopped, and how
+        # many times each stage was attempted in this one: both tell a resumed
+        # sign-up apart from a fresh one.
+        self._resumed_stage = (self.state.get("in_progress") or {}).get("stage")
+        self._stage_attempts = {}
+
+    # ---------------- logging & state ----------------
+
+    def log(self, message, color=Fore.WHITE):
+        print(f"{color}{message}{Style.RESET_ALL}")
+
+    def _load_state(self):
+        if os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, "r") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict) and loaded.get("stage") in STAGES:
+                    state = fresh_state()
+                    state.update(loaded)
+                    # Migrate old checkpoints without carrying the password
+                    # into the persisted state or browser-resume metadata.
+                    state.pop("password", None)
+                    state.pop("verification_link", None)
+                    state["password_ref"] = PASSWORD_REF
+                    state.setdefault("verification_completed", False)
+                    state.setdefault("completion_status", "IN_PROGRESS")
+                    if not isinstance(state.get("decisions"), list):
+                        state["decisions"] = []
+                    return state
+            except Exception:
+                pass
+        return fresh_state()
+
+    @staticmethod
+    def _timestamp():
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def _state_payload(self):
+        payload = dict(self.state)
+        payload.pop("password", None)
+        payload.pop("verification_link", None)
+        payload["password_ref"] = PASSWORD_REF
+        return payload
+
+    def _write_state_atomically(self):
+        state_path = os.path.abspath(STATE_FILE)
+        state_dir = os.path.dirname(state_path) or "."
+        fd, temp_path = tempfile.mkstemp(
+            prefix=".state.",
+            suffix=".tmp",
+            dir=state_dir,
+            text=True,
+        )
+        try:
+            os.chmod(temp_path, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(self._state_payload(), f, indent=2)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, state_path)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def _save_state(self, stage, *, in_progress=None, outcome=None):
+        self.state["stage"] = stage
+        self.state["in_progress"] = in_progress
+        if outcome:
+            self.state.setdefault("decisions", []).append(
+                {
+                    "stage": outcome["stage"],
+                    "outcome": outcome["outcome"],
+                    "at": outcome.get("at", self._timestamp()),
+                }
+            )
+        self._write_state_atomically()
+        status = " in progress" if in_progress else ""
+        self.log(f"Checkpoint: next stage = {stage}{status}", Fore.GREEN)
+
+    def _next_stage(self, stage):
+        index = STAGES.index(stage)
+        return STAGES[index + 1]
+
+    def _record_outcome(self, stage, outcome):
+        status_by_outcome = {
+            "manual_takeover": "MANUAL_COMPLETION",
+            "skip": "SKIPPED",
+            "quit": "FAILED",
+        }
+        if outcome in status_by_outcome:
+            self.state["completion_status"] = status_by_outcome[outcome]
+        self._save_state(
+            stage,
+            in_progress=self.state.get("in_progress"),
+            outcome={"stage": stage, "outcome": outcome},
+        )
+
+    def reset_state(self):
+        self.state = fresh_state()
+        if os.path.exists(STATE_FILE):
+            os.remove(STATE_FILE)
+
+    # ---------------- browser helper ----------------
+
+    def _ensure_browser(self):
+        if self.pc is not None and self.pc.context is None:
+            self.pc.setup_browser()  # created for a look at the page, not yet attached
+        if self.pc is None:
+            saved_provider = self.state.get("email_provider")
+            strategy = EMAIL_STRATEGY
+            custom_email = USER_CUSTOM_EMAIL
+            if saved_provider == "temp-mail.org":
+                strategy = "temp-mail.org"
+            elif saved_provider == "1secmail":
+                strategy = "api"
+            elif saved_provider == "custom":
+                custom_email = self.state.get("temp_email") or USER_CUSTOM_EMAIL
+            self.pc = PCAutomation(
+                self.state.get("temp_email"),
+                REPLIT_PASSWORD,
+                temp_mail_provider=TEMP_MAIL_PROVIDER,
+                temp_mail_url=TEMP_MAIL_URL,
+                email_strategy=strategy,
+                primary_email_api=PRIMARY_EMAIL_API,
+                user_custom_email=custom_email,
+                email_check_timeout=EMAIL_CHECK_TIMEOUT,
+            )
+            self.pc.setup_browser()
+
+    # ---------------- step detection ----------------
+
+    def detect_position(self, saved_stage=None):
+        """Find the step (and the point inside it) from what is on screen.
+
+        The checkpoint is a hint: the browser tab and the phone are looked at
+        without changing anything, and visible progress can move the run
+        forward. Nothing is started to look: an unreachable phone or a browser
+        that is not open simply contributes no evidence.
+        """
+
+        saved = saved_stage or self.state.get("stage", "EMAIL")
+        if not AUTO_DETECT_STAGE or saved in {"EMAIL", "DONE"} and not self.state.get("temp_email"):
+            return Position(saved, "checkpoint", "detection off or nothing to continue from")
+
+        phone_state = None
+        try:
+            phone_state = self.android.observe_screen()
+        except Exception:
+            pass
+
+        web_kind = None
+        try:
+            if self.pc is None:
+                self.pc = PCAutomation(
+                    self.state.get("temp_email"),
+                    REPLIT_PASSWORD,
+                    temp_mail_provider=TEMP_MAIL_PROVIDER,
+                    temp_mail_url=TEMP_MAIL_URL,
+                    email_strategy=self._strategy_for_saved_provider()[0],
+                    primary_email_api=PRIMARY_EMAIL_API,
+                    user_custom_email=self._strategy_for_saved_provider()[1],
+                    email_check_timeout=EMAIL_CHECK_TIMEOUT,
+                )
+            if self.pc.attach_existing_only():
+                web_kind = self.pc.observe_replit_page()
+        except Exception:
+            web_kind = None
+
+        return infer_position(saved, self.state, web_kind=web_kind, phone_state=phone_state)
+
+    def _strategy_for_saved_provider(self):
+        saved_provider = self.state.get("email_provider")
+        strategy = EMAIL_STRATEGY
+        custom_email = USER_CUSTOM_EMAIL
+        if saved_provider == "temp-mail.org":
+            strategy = "temp-mail.org"
+        elif saved_provider == "1secmail":
+            strategy = "api"
+        elif saved_provider == "custom":
+            custom_email = self.state.get("temp_email") or USER_CUSTOM_EMAIL
+        return strategy, custom_email
+
+    # ---------------- stages (return True/False) ----------------
+
+    def stage_email(self):
+        self.log("\n" + "=" * 60, Fore.MAGENTA)
+        self.log("📧 STAGE 1/6: Getting Email", Fore.MAGENTA)
+        self.log("=" * 60, Fore.MAGENTA)
+        try:
+            self._ensure_browser()
+            self.state["temp_email"] = self.pc.obtain_temp_email()
+            self.state["email_provider"] = self.pc.email_provider_name
+            self.state["username"] = self.state["temp_email"].split("@")[0]
+        except Exception as e:
+            self.log(f"❌ Failed to get temp email: {e}", Fore.RED)
+            return False
+        self.log(f"✅ Email: {self.state['temp_email']}", Fore.GREEN)
+        self.log(f"👤 Username: {self.state['username']}", Fore.GREEN)
+        return True
+
+    def stage_signup(self):
+        self.log("\n" + "=" * 60, Fore.MAGENTA)
+        self.log("💻 STAGE 2/6: PC Account Creation (browser)", Fore.MAGENTA)
+        self.log("=" * 60, Fore.MAGENTA)
+        self._ensure_browser()
+        self.pc.signup_resumed = (
+            self._resumed_stage == "SIGNUP" or self._stage_attempts.get("SIGNUP", 0) > 1
+        )
+        return bool(self.pc.create_account())
+
+    def stage_verify(self):
+        self.log("\n" + "=" * 60, Fore.MAGENTA)
+        self.log("📧 STAGE 3/6: Email Verification", Fore.MAGENTA)
+        self.log("=" * 60, Fore.MAGENTA)
+        if self.state.get("verification_completed"):
+            self.log("✅ Verification was already completed; nothing to do.", Fore.GREEN)
+            return True
+        self._ensure_browser()
+        self.log("\n⏳ Waiting for the Replit verification message in the mailbox...", Fore.CYAN)
+        self.pc.open_verification_message()
+        verified = bool(self.pc.verify_email())
+        if verified:
+            self.state["verification_completed"] = True
+            self._discard_mailbox_if_due("after_verify")
+        return verified
+
+    def _discard_mailbox_if_due(self, moment):
+        """Delete the temp mailbox at the configured moment; never fails the run."""
+
+        wanted = str(DELETE_TEMP_MAIL).strip().lower()
+        if wanted != moment or self.state.get("mailbox_deleted"):
+            return
+        if not self.state.get("temp_email") or self.state.get("email_provider") == "custom":
+            return  # an address the operator brought is theirs, not a throw-away one
+        try:
+            self._ensure_browser()
+            deleted = bool(self.pc.discard_mailbox())
+        except Exception as exc:
+            self.log(f"ℹ️ Could not delete the temporary mailbox ({exc}).", Fore.YELLOW)
+            return
+        if deleted:
+            self.state["mailbox_deleted"] = True
+            self._write_state_atomically()
+            self.log("🗑️ Temporary mailbox deleted (a new address is now shown).", Fore.GREEN)
+        else:
+            self.log(
+                "ℹ️ The temporary mailbox was not deleted (not open, not ours, or "
+                "not confirmed). It is disposable; this does not affect the run.",
+                Fore.YELLOW,
+            )
+
+    def stage_android(self):
+        self.log("\n" + "=" * 60, Fore.MAGENTA)
+        self.log("📱 STAGE 4/6: Android Onboarding (ADB)", Fore.MAGENTA)
+        self.log("=" * 60, Fore.MAGENTA)
+        if not self.android.verify_device():
+            self.log("❌ Intended Android device was not verified.", Fore.RED)
+            self.log("Connect the operator-owned phone and verify its configured ID.", Fore.YELLOW)
+            return False
+        return bool(
+            self.android.complete_onboarding(
+                self.state["temp_email"],
+                REPLIT_PASSWORD,
+                self.state["username"],
+            )
+        )
+
+    def stage_pc_login(self):
+        self.log("\n" + "=" * 60, Fore.MAGENTA)
+        self.log("💻 STAGE 5/6: PC Login After Mobile Onboarding", Fore.MAGENTA)
+        self.log("=" * 60, Fore.MAGENTA)
+        self._ensure_browser()
+        self.log("\n⏳ Waiting for Android session synchronization...", Fore.CYAN)
+        session_state = self.pc.wait_for_session_sync()
+        if session_state == "unknown":
+            self.log(
+                "❌ Browser did not expose an authenticated or login-required state "
+                "after synchronization probes.",
+                Fore.RED,
+            )
+            return False
+        return bool(self.pc.login_after_mobile())
+
+    def stage_github(self):
+        self.log("\n" + "=" * 60, Fore.MAGENTA)
+        self.log("📥 STAGE 6/6: GitHub Repository Import", Fore.MAGENTA)
+        self.log("=" * 60, Fore.MAGENTA)
+        self._ensure_browser()
+        repo = self.state.get("github_repo") or ""
+        if not repo:
+            repo = input("\n📥 Enter GitHub repository URL (Enter to skip): ").strip()
+            self.state["github_repo"] = repo
+        if not repo:
+            self.log("ℹ️ Skipping GitHub import.", Fore.YELLOW)
+            return True
+        return bool(self.pc.import_github_repo(repo))
+
+    # ---------------- stage runner with recovery menu ----------------
+
+    def run_stage(self, name, fn):
+        while True:
+            self._stage_attempts[name] = self._stage_attempts.get(name, 0) + 1
+            self._save_state(
+                name,
+                in_progress={
+                    "stage": name,
+                    "status": "running",
+                    "started_at": self._timestamp(),
+                },
+            )
+            try:
+                ok = bool(fn())
+            except Exception as e:
+                self.log(f"❌ Stage {name} raised: {e}", Fore.RED)
+                ok = False
+
+            if ok:
+                self._save_state(self._next_stage(name))
+                return True
+
+            self._save_state(
+                name,
+                in_progress={
+                    "stage": name,
+                    "status": "failed",
+                    "observed_at": self._timestamp(),
+                },
+            )
+            self.log(f"\n⚠️ Stage [{name}] did not complete.", Fore.YELLOW)
+            operator_alert.beep()  # the run is waiting for a decision
+            choice = input(
+                "Choose: [r]etry / [m]anual takeover then continue / "
+                "[s]kip stage / [q]uit: "
+            ).strip().lower()
+
+            if choice == "r":
+                self._record_outcome(name, "retry")
+                continue
+            if choice == "m":
+                input("🖐️ Finish this step by hand (browser/phone). Press ENTER when done...")
+                self._record_outcome(name, "manual_takeover")
+                self._save_state(self._continue_after_manual(name))
+                return True
+            if choice == "s":
+                self.log(f"⏭️ Skipping stage {name}.", Fore.YELLOW)
+                self._record_outcome(name, "skip")
+                self._save_state(self._next_stage(name))
+                return True
+            self._record_outcome(name, "quit")
+            return False
+
+    def _continue_after_manual(self, name):
+        """The stage to run after the operator finished ``name`` by hand.
+
+        Normally the next one. When the screens show the person already got
+        further (for example the phone is past login), that later stage is used.
+        """
+
+        natural = self._next_stage(name)
+        try:
+            position = self.detect_position(natural)
+        except Exception:
+            return natural
+        if position.moved and STAGES.index(position.stage) > STAGES.index(natural):
+            self.log(f"🔎 Detected: {position.describe()}", Fore.CYAN)
+            return position.stage
+        return natural
+
+    # ---------------- main runner ----------------
+
+    def run(self):
+        start = self.state.get("stage", "EMAIL")
+
+        if start == "DONE":
+            again = input(
+                "\n🔄 A previous COMPLETED run exists. Start a NEW run? [y/N]: "
+            ).strip().lower()
+            if again != "y":
+                self.log("👋 Exiting.", Fore.GREEN)
+                return
+            self.reset_state()
+            start = "EMAIL"
+        elif start not in STAGES:
+            start = "EMAIL"
+        elif start != "EMAIL":
+            position = self.detect_position(start)
+            self.log(f"\n🔎 Detected: {position.describe()}", Fore.CYAN)
+            if position.stage != start:
+                self.log(
+                    f"   The checkpoint said '{start}'; the evidence says '{position.stage}'.",
+                    Fore.CYAN,
+                )
+                if position.moved and STAGES.index(position.stage) > STAGES.index(start):
+                    self.state.setdefault("decisions", []).append(
+                        {
+                            "stage": start,
+                            "outcome": f"autodetected:{position.stage}",
+                            "at": self._timestamp(),
+                        }
+                    )
+                start = position.stage
+                self._save_state(start)
+            self.log(f"\n♻️ Checkpoint found: resuming at stage '{start}'.", Fore.CYAN)
+            answer = input(
+                "Resume from checkpoint? (y/n — n starts a fresh account): "
+            ).strip().lower()
+            if answer != "y":
+                self.reset_state()
+                start = "EMAIL"
+
+        if not RUN_POST_ANDROID_STAGES and start in {"PC_LOGIN", "GITHUB"}:
+            self.log(
+                "\nPost-Android stages are disabled; marking the core flow complete.",
+                Fore.YELLOW,
+            )
+            self.state["completion_status"] = "AUTOMATED_SUCCESS"
+            self._save_state("DONE")
+            return
+
+        handlers = {
+            "EMAIL": self.stage_email,
+            "SIGNUP": self.stage_signup,
+            "VERIFY": self.stage_verify,
+            "ANDROID": self.stage_android,
+            "PC_LOGIN": self.stage_pc_login,
+            "GITHUB": self.stage_github,
+        }
+
+        try:
+            last_stage = "GITHUB" if RUN_POST_ANDROID_STAGES else "ANDROID"
+            name = start
+            while STAGES.index(name) <= STAGES.index(last_stage):
+                if not self.run_stage(name, handlers[name]):
+                    self.log("\n🛑 Automation aborted by user.", Fore.YELLOW)
+                    return
+                # run_stage saved the next stage; detection after a manual takeover
+                # may have jumped further. Never go back, never stand still.
+                saved = self.state.get("stage", name)
+                natural = self._next_stage(name)
+                name = saved if saved in STAGES and STAGES.index(saved) > STAGES.index(name) else natural
+
+            self._discard_mailbox_if_due("after_android")
+
+            decisions = self.state.get("decisions", [])
+            if any(decision.get("outcome") == "skip" for decision in decisions):
+                self.state["completion_status"] = "SKIPPED"
+            elif any(
+                decision.get("outcome") == "manual_takeover"
+                for decision in decisions
+            ):
+                self.state["completion_status"] = "MANUAL_COMPLETION"
+            else:
+                self.state["completion_status"] = "AUTOMATED_SUCCESS"
+            self._save_state("DONE")
+            self.log("\n" + "=" * 60, Fore.GREEN)
+            self.log(
+                f"✅ RUN COMPLETE: {self.state['completion_status']}",
+                Fore.GREEN,
+            )
+            self.log("=" * 60, Fore.GREEN)
+            self.log(f"📧 Account: {self.state['temp_email']}")
+            self.log(f"👤 Username: {self.state['username']}")
+            if self.state.get("github_repo"):
+                self.log(f"📥 GitHub: {self.state['github_repo']}")
+            self.log("\n💡 For a FRESH account next run, delete state.json and auth_state.json", Fore.CYAN)
+            if self.pc is not None and self.pc.keeps_browser_open:
+                self.log("🪟 The browser window stays open; its login is kept.", Fore.CYAN)
+            else:
+                self.log("⏳ Browser stays open 30s for review...")
+                time.sleep(30)
+
+        except KeyboardInterrupt:
+            self.state["completion_status"] = "FAILED"
+            self._write_state_atomically()
+            self.log("\n\n⚠️ Interrupted by user. Progress saved — rerun to resume.", Fore.YELLOW)
+        except Exception as e:
+            self.state["completion_status"] = "FAILED"
+            self._write_state_atomically()
+            self.log(f"\n\n❌ Critical error: {e}", Fore.RED)
+            import traceback
+            traceback.print_exc()
+            self.log("💾 Progress saved. Rerun `python main.py` to resume.", Fore.CYAN)
+        finally:
+            if self.pc:
+                self.pc.close_browser()
+            self.log("\n👋 Automation session ended.\n", Fore.GREEN)
+
+
+if __name__ == "__main__":
+    print("\n" + "=" * 60)
+    print(Fore.MAGENTA + "🚀 REPLIT COMPLETE AUTOMATION (PC Browser + Android ADB)" + Style.RESET_ALL)
+    print("=" * 60)
+    orchestrator = ReplitAutomationOrchestrator()
+    orchestrator.run()

@@ -1,0 +1,851 @@
+# TESTING TASK — Validate the Automation Without Assuming Real Hardware or Services
+
+You are testing an existing PC + Android automation repository.
+
+## CRITICAL ENVIRONMENT CONSTRAINT
+
+You do NOT have guaranteed access to:
+
+* a physical Android device
+* ADB
+* Replit
+* a real browser session
+* a live temp-mail.org inbox
+* a live 1secmail mailbox
+* a live PC UI environment
+* the user's actual execution environment
+
+Therefore:
+
+**Do not claim an integration test passed unless you actually had the required external resource.**
+
+Do not fabricate successful browser, Android, ADB, Replit, or email-provider results.
+
+Instead, build a layered test suite that can run completely offline.
+
+---
+
+# 1. FIRST INSPECT THE PROJECT
+
+Before writing tests:
+
+1. Read the repository structure.
+2. Read `steps.md`.
+3. Inspect the relevant screenshots in `attached_assets/`.
+4. Read the existing implementation.
+5. Read existing tests.
+6. Identify which components are:
+
+   * pure logic
+   * external-service dependent
+   * browser dependent
+   * ADB/device dependent
+
+Document the result before making assumptions.
+
+---
+
+# 2. TESTING LAYERS
+
+Organize testing into four layers:
+
+```text
+LAYER A
+Pure offline unit tests
+
+LAYER B
+Mocked provider/browser/ADB tests
+
+LAYER C
+Simulation/state-machine tests
+
+LAYER D
+Real-environment integration tests
+```
+
+Only Layers A–C are expected to run in the current environment.
+
+Layer D should be clearly marked:
+
+```text
+NOT RUN — required external environment unavailable
+```
+
+---
+
+# 3. LAYER A — PURE UNIT TESTS
+
+Test all logic that does not require external services.
+
+At minimum cover:
+
+## Configuration
+
+* default values
+* `EMAIL_STRATEGY`
+* `PRIMARY_EMAIL_API`
+* `USER_CUSTOM_EMAIL`
+* timeout values
+* Android settings
+
+## Email strategy selection
+
+Test:
+
+```text
+custom email provided
+→ custom email wins
+```
+
+```text
+custom email blank + hybrid
+→ API selected first
+```
+
+```text
+custom email blank + API strategy
+→ API only
+```
+
+```text
+custom email blank + temp-mail strategy
+→ temp-mail
+```
+
+```text
+API fails + hybrid
+→ temp-mail fallback
+```
+
+```text
+API fails + api-only
+→ explicit failure
+```
+
+## Email normalization
+
+Test:
+
+* case normalization where appropriate
+* whitespace
+* sender extraction
+* subject normalization
+* malformed input
+
+## Verification URL extraction
+
+Test:
+
+* valid verification URLs
+* URLs embedded in HTML
+* text-only message bodies
+* missing URL
+* malformed message
+
+## State transitions
+
+Given:
+
+```text
+current_state
++
+observed_state
++
+action_result
+```
+
+verify the expected next state.
+
+---
+
+# 4. LAYER B — MOCKED EMAIL PROVIDER TESTS
+
+Do NOT contact live email APIs.
+
+Mock `requests`.
+
+Simulate:
+
+### 1secmail success
+
+```text
+getMessages
+→ Replit message
+→ readMessage
+→ verification URL
+→ successful verification
+```
+
+Assert the provider returns success.
+
+### Empty inbox
+
+Simulate repeated empty inbox responses.
+
+Assert bounded polling and final timeout.
+
+### API failure
+
+Simulate:
+
+* connection error
+* timeout
+* HTTP failure
+* malformed JSON
+
+Assert correct exception/recovery behavior.
+
+### Replit email matching
+
+Provide fixtures such as:
+
+```text
+sender:
+verify@replit.com
+
+subject:
+Replit: Verify Your Email
+```
+
+Also test harmless formatting/casing variations.
+
+Do not require one exact subject string.
+
+---
+
+# 5. LAYER B — MOCKED TEMP-MAIL TESTS
+
+Mock the browser/provider layer.
+
+Simulate:
+
+```text
+temporary address loading
+→ address appears
+```
+
+and:
+
+```text
+inbox loading
+→ inbox available
+→ Replit email appears
+```
+
+and:
+
+```text
+email opened
+→ content loading
+→ Verify Now available
+```
+
+and:
+
+```text
+verification page
+→ Verifying email
+→ Success
+```
+
+and:
+
+```text
+verification window closes
+→ successful terminal state
+```
+
+Assert that the provider handles all expected states.
+
+---
+
+# 6. LAYER B — MOCKED BROWSER TESTS
+
+Do NOT launch a real browser.
+
+Create mocks/fakes for the Patchright interfaces used by the project.
+
+Test:
+
+## Popup handling
+
+Simulate:
+
+```text
+Google sign-in popup present
+```
+
+Assert:
+
+```text
+popup close action
+```
+
+Also test:
+
+```text
+popup absent
+```
+
+The flow should continue normally.
+
+## Account creation
+
+Simulate:
+
+```text
+Create Account
+→ loading
+→ next state
+```
+
+Verify that the workflow waits for the state instead of assuming instant navigation.
+
+## Verification
+
+Simulate exactly:
+
+```text
+message open
+→ Verify Now
+→ verifying
+→ success
+```
+
+Also simulate:
+
+```text
+message open
+→ Verify Now
+→ window closes
+```
+
+Both should result in successful verification.
+
+---
+
+# 7. LAYER B — MOCKED ADB TESTS
+
+Do NOT call real ADB.
+
+Mock the ADB command executor.
+
+Every Android action should be verifiable as a command/action request.
+
+Test:
+
+## App flow
+
+```text
+HOME
+→ APP_DRAWER
+→ REPLIT
+→ loading
+→ ready
+```
+
+## Keyboard-present login
+
+Simulate:
+
+```text
+email field active
+keyboard visible
+```
+
+Assert that no unnecessary keyboard-opening action occurs.
+
+## Keyboard-absent login
+
+Simulate:
+
+```text
+keyboard absent
+Continue with Email visible
+```
+
+Assert:
+
+```text
+Continue with Email
+→ tap outside if necessary
+→ email field becomes active
+```
+
+## Login retry
+
+Simulate:
+
+```text
+password submitted
+→ invalid username/password
+→ Login
+→ success
+```
+
+Assert bounded retry behavior.
+
+## Logout
+
+Simulate:
+
+```text
+Logout
+→ confirmation dialog
+→ LOG OUT
+→ app closed
+→ Android home
+```
+
+Verify that the final state is recognized as successful.
+
+The workflow must NOT require another Replit UI after logout.
+
+---
+
+# 8. SAFE ADB TEXT INPUT TESTS
+
+Test the centralized text-input helper with representative strings:
+
+```text
+user@example.com
+abc+test@example.com
+abc_test@example.com
+test.value@example.com
+password123
+```
+
+Verify that the generated ADB argument is safe and deterministic.
+
+Do not call real ADB.
+
+Test shell/escaping behavior at the unit-test level.
+
+---
+
+# 9. LAYER C — FULL STATE-MACHINE SIMULATION
+
+This is one of the most important tests.
+
+Create a deterministic fake environment that feeds state observations into the workflow.
+
+## PC happy path
+
+Simulate:
+
+```text
+EMAIL_READY
+→ REPLIT_ACCOUNT_PAGE
+→ EMAIL_FORM
+→ PASSWORD_FORM
+→ ACCOUNT_SUBMITTING
+→ VERIFICATION_INBOX
+→ VERIFICATION_MESSAGE
+→ VERIFY_NOW
+→ VERIFYING
+→ VERIFICATION_SUCCESS
+```
+
+Assert final result:
+
+```text
+PC_FLOW_COMPLETE
+```
+
+## PC verification-close path
+
+Simulate:
+
+```text
+VERIFY_NOW
+→ VERIFYING
+→ WINDOW_CLOSED_AFTER_SUCCESS
+```
+
+Assert successful completion.
+
+## PC timeout path
+
+Simulate:
+
+```text
+VERIFICATION_INBOX
+→ no email
+→ timeout
+```
+
+Assert:
+
+```text
+EMAIL_TIMEOUT
+```
+
+and ensure there is no infinite loop.
+
+---
+
+# 10. ANDROID HAPPY PATH SIMULATION
+
+Simulate:
+
+```text
+HOME
+→ APP_DRAWER
+→ REPLIT_LOADING
+→ REPLIT_READY
+→ EMAIL_OPTION
+→ EMAIL_ENTRY
+→ PASSWORD_ENTRY
+→ LOGIN_PROCESSING
+→ WELCOME
+→ ONBOARDING
+→ GOOGLE_SEARCH
+→ DEVELOPER
+→ SKIP
+→ PROFILE
+→ LOGOUT_CONFIRMATION
+→ LOGGED_OUT
+→ ANDROID_HOME
+→ COMPLETE
+```
+
+Assert final state:
+
+```text
+COMPLETE
+```
+
+---
+
+# 11. ANDROID EDGE-CASE SIMULATIONS
+
+At minimum simulate:
+
+### Keyboard already visible
+
+```text
+EMAIL_ENTRY
+keyboard = visible
+```
+
+### Keyboard absent
+
+```text
+EMAIL_OPTION
+keyboard = absent
+```
+
+### Login retry
+
+```text
+LOGIN_PROCESSING
+→ INVALID_CREDENTIAL_MESSAGE
+→ LOGIN_RETRY
+→ successful login
+```
+
+### Loading
+
+Inject arbitrary delays between state observations.
+
+The workflow should remain correct without relying on exact sleep duration.
+
+### Unknown state
+
+Return an unknown UI state.
+
+Assert:
+
+```text
+screenshot requested
+diagnostic emitted
+workflow stops safely
+```
+
+---
+
+# 12. SECURITY-CHALLENGE TESTS
+
+Do not bypass challenges.
+
+Simulate:
+
+```text
+CAPTCHA
+reCAPTCHA
+suspicious login
+rate limit
+account restriction
+device-integrity challenge
+```
+
+Assert:
+
+```text
+STOP
+→ diagnostic event
+→ screenshot request if available
+→ explicit failure state
+```
+
+The test must verify that the workflow does NOT continue blindly.
+
+---
+
+# 13. RETRY / TIMEOUT TESTING
+
+Every retry loop must have a test proving that it terminates.
+
+Test:
+
+```text
+email polling never succeeds
+```
+
+```text
+page never reaches expected state
+```
+
+```text
+Android login keeps returning an error
+```
+
+```text
+browser action repeatedly fails
+```
+
+Assert that each ends in a bounded failure state.
+
+There must be no infinite loops.
+
+---
+
+# 14. EVENT LOGGING TESTS
+
+Verify every major transition produces structured event data containing at least:
+
+```text
+timestamp
+current_state
+action
+next_state
+attempt
+result
+```
+
+A failed run should be diagnosable from the log.
+
+---
+
+# 15. REFERENCE STEP TESTS
+
+Use `steps.md` and the screenshots in `attached_assets/` as reference material.
+
+For every documented step that has a screenshot:
+
+1. Identify expected UI elements.
+2. Map the screenshot to the corresponding state.
+3. Verify that the code has a corresponding state/action.
+4. Flag missing or contradictory states.
+
+Do not attempt to claim visual UI execution without an actual browser/device.
+
+This is a structural/reference validation only.
+
+---
+
+# 16. STATIC / STRUCTURAL CHECKS
+
+Run all possible local checks:
+
+```text
+Python syntax compilation
+import checks
+unit tests
+mock integration tests
+state-machine simulations
+lint/type checks if configured
+test discovery
+requirements consistency
+```
+
+Also check for:
+
+* unused imports
+* stale Playwright imports after Patchright migration
+* provider-specific logic leaking into core workflow
+* duplicate configuration
+* dead retry paths
+* unreachable states
+* infinite loops
+* inconsistent state names
+* missing exception handling
+* incorrect test fixtures
+
+---
+
+# 17. DEPENDENCY VALIDATION
+
+If the environment has internet/package installation available, verify that required packages can be installed.
+
+If package installation is unavailable:
+
+```text
+do not pretend installation succeeded
+```
+
+Instead report:
+
+```text
+INSTALLATION NOT TESTED — package installation unavailable
+```
+
+The same rule applies to:
+
+```text
+Patchright
+ADB
+Android
+Replit
+temp-mail.org
+1secmail
+```
+
+---
+
+# 18. NO FAKE INTEGRATION RESULTS
+
+Never write:
+
+```text
+Android test passed
+```
+
+unless an actual Android device was available.
+
+Never write:
+
+```text
+Replit login passed
+```
+
+unless Replit was actually accessed.
+
+Never write:
+
+```text
+temp-mail integration passed
+```
+
+unless the actual provider was contacted.
+
+Use explicit result categories:
+
+```text
+PASS — actually executed
+PASS — mocked/simulated
+NOT RUN — external environment unavailable
+FAIL — executed and failed
+BLOCKED — prerequisite unavailable
+```
+
+---
+
+# 19. TEST REPORT
+
+Create a machine-readable and human-readable test report.
+
+For example:
+
+```text
+TEST_REPORT.md
+```
+
+with:
+
+```text
+## Environment
+
+Python:
+OS:
+ADB:
+Android:
+Browser:
+Patchright:
+Network:
+
+## Unit Tests
+
+PASS: X
+FAIL: Y
+
+## Mocked Tests
+
+PASS: X
+FAIL: Y
+
+## State Simulations
+
+PASS: X
+FAIL: Y
+
+## Real Integration Tests
+
+NOT RUN:
+- Android device unavailable
+- ADB unavailable
+- Live Replit unavailable
+- Live email provider unavailable
+
+## Known Issues
+
+...
+
+## Recommended Next Test
+
+...
+```
+
+Do not hide unavailable integration tests inside the pass count.
+
+---
+
+# 20. FINAL TEST COMMAND
+
+Create one reproducible command for all offline tests, for example:
+
+```bash
+python -m pytest
+```
+
+or the project's appropriate equivalent.
+
+If additional commands are required:
+
+```bash
+python -m compileall .
+python -m pytest tests/
+```
+
+Use whatever is actually appropriate after inspecting the repository.
+
+The goal is that a developer without a phone, ADB, or browser can still validate the majority of the system locally.
+
+---
+
+# 21. FINAL ACCEPTANCE CRITERIA
+
+The testing task is complete when:
+
+1. Offline unit tests exist for all pure logic.
+2. Email providers have mocked tests.
+3. Browser operations have mocked tests.
+4. ADB operations have mocked tests.
+5. Full PC flow has a deterministic simulation.
+6. Full Android flow has a deterministic simulation.
+7. Retry/timeout paths are tested.
+8. Security-challenge paths are tested.
+9. Reference screenshots and `steps.md` are used for structural verification.
+10. No fake real-device/browser results are reported.
+11. All unavailable external tests are explicitly marked.
+12. A final `TEST_REPORT.md` is produced.

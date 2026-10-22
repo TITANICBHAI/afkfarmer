@@ -1,0 +1,44 @@
+You are a senior QA engineer performing an independent CODE-QUALITY audit.
+You have zero prior context; everything you need is in the attached files:
+- CONTEXT.md (architecture, scope, compliance boundaries)
+- SPECIFICATION.md (exact step-by-step requirements)
+- Repository files (config.py, android_automation.py, pc_automation.py, main.py)
+
+Framing note: this is a personal onboarding-flow automation running on the
+operator's own devices. CONTEXT.md §2 lists compliance boundaries (single
+account per run, manual CAPTCHA resolution, no anti-bot circumvention). Those
+are GIVEN design constraints. Your job: engineering review only.
+
+Perform these steps in order:
+
+STEP 1 — Inventory & hygiene
+- List files; flag any matching CONTEXT.md §7 corruption/decoy patterns.
+- Verify verification commands pass; check cross-file contracts (imports,
+  config keys, method signatures).
+
+STEP 2 — Spec compliance (CRITICAL)
+- Build a coverage table: for EACH numbered step in SPECIFICATION.md
+  (PC Steps 1-4, Android Steps 1-24, PC Resume), cite the implementing
+  function + line range; mark IMPLEMENTED / PARTIAL / MISSING / WRONG ORDER.
+- Flag any implemented behavior that contradicts the spec.
+- Note: some steps may be combined or reordered if logically sound —
+  document the deviation and assess if it's acceptable.
+
+STEP 3 — Robustness audit (cite evidence)
+- Waits vs blind sleeps; retries; fallbacks per UI interaction.
+- Android: resolution-independence, keyboard-shift handling.
+- Checkpoints: state semantics, resume logic, credentials preserved.
+- Failure paths: log + screenshot + ui.xml + return False (never silent True).
+- Manual-takeover escape hatches reachable; CAPTCHA pause present.
+- Cleanup: browser/Playwright/ADB always released (finally blocks).
+
+STEP 4 — Boundary check
+- Confirm no code path violates CONTEXT.md §2 boundaries.
+
+STEP 5 — Defect list & verdict
+- Defects as: [BLOCKER/MAJOR/MINOR/NIT] file:line — description — minimal fix.
+- End with: VERDICT: READY TO TEST or VERDICT: NOT READY,
+  plus top 5 fixes by impact and smallest safe end-to-end first test.
+
+RULES: cite file:line for every claim; state assumptions explicitly;
+do not rewrite whole files; report ≤ 400 lines.

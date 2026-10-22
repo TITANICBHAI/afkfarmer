@@ -1,0 +1,569 @@
+# Onboarding Flow Automation
+
+Local workflow automation for the operator's own Replit onboarding flow across
+a Chromium-family browser and an operator-owned Android device.
+
+The flow is intentionally manual at CAPTCHA or anti-bot checkpoints. It is
+not a bulk-account tool, a rate-limit bypass, or a credential-harvesting tool.
+
+## Source of truth
+
+- [`CORE_FLOW.md`](CORE_FLOW.md) — exact supplied PC and Android flow.
+- [`PLAN.md`](PLAN.md) — staged implementation plan and open decisions.
+- [`IMPLEMENTATION.md`](IMPLEMENTATION.md) — module contracts, state
+  transitions, screenshot mapping, and acceptance criteria.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — system design and Kotlin decision.
+- [`AUTOMATION_PROMPT.md`](AUTOMATION_PROMPT.md) — implementation handoff
+  prompt for a future coding pass.
+- [`AGENT_START_PROMPT.md`](AGENT_START_PROMPT.md) — zero-context startup
+  prompt for any new agent.
+- [`PROGRESS_TRACKER.md`](PROGRESS_TRACKER.md) — mandatory checklist and
+  session handoff record.
+
+The visual references are stored in `attached_assets/`. The numbered Android
+screenshots are especially important for the email-login, invalid-credentials,
+onboarding, profile, logout, and app-close states. `VISUAL_FALLBACK.md` records
+a deferred OCR/computer-vision/pixel evidence fallback; UI Automator remains
+the current source of truth.
+
+## Current state
+
+The active Python files are present at the project root with canonical names:
+`config.py`, `temp_mail.py`, `android_automation.py`, `pc_automation.py`, and
+`main.py`.
+
+The state-driven offline implementation is verified, including provider
+selection and fallback, atomic checkpoints, PC registration classification,
+Android UI-state transitions, safe text input, session synchronization after
+Android completion, and safe GitHub-import failure handling. The combined
+offline test suite is 295 tests and passes. Part of it runs the PC flow in a
+real headless Chromium against local imitations of replit.com and
+temp-mail.org (`site_simulator.py`, `test_site_simulation.py`); those pages are
+built from the screenshots, so they prove the logic and the order of actions,
+not how the live sites behave. See [`FIXES.md`](FIXES.md) for what was fixed,
+what each test tool is and is not, and what still needs a live run.
+
+Live mailbox, Replit registration, Android-device, PC-resume, GitHub-import,
+and complete end-to-end evidence remain open. The workspace browser previously
+reached `temp-mail.org`, but the provider returned a Cloudflare block page
+before an address was available. The automation does not bypass provider,
+CAPTCHA, or anti-bot protections.
+
+Every new agent must read `PROGRESS_TRACKER.md` before editing and tick items
+only after completing and verifying them.
+
+## Intended runtime
+
+- Python 3.8+
+- Patchright controlling the configured Chromium-family browser, otherwise
+  workspace Chromium
+- ADB in `PATH`
+- An operator-owned Android device with USB debugging enabled
+- `patchright>=1.40.0`
+- `requests`
+- `colorama>=0.4.6`
+
+Install the declared Python dependencies with:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+On Replit/Linux, Patchright may need the GCC-provided `libstdc++.so.6`
+directory in `LD_LIBRARY_PATH`. Use `run_pc_automation.sh` for the browser
+runtime and full automation commands below. On Windows, use the Python
+commands in the Windows section.
+
+Email selection is configured in `config.py`:
+
+- `USER_CUSTOM_EMAIL` takes priority when non-empty.
+- `EMAIL_STRATEGY = "api"` uses `PRIMARY_EMAIL_API`.
+- `EMAIL_STRATEGY = "hybrid"` tries the API, then temp-mail.org if address
+  acquisition fails.
+- `EMAIL_STRATEGY = "temp-mail.org"` uses the browser mailbox directly.
+
+Install the supplied requirements only after reviewing them and the provider
+choice in `PLAN.md`.
+
+## Verification
+
+Initial static check:
+
+```bash
+python -m py_compile \
+  browser_verification.py config.py email_provider.py email_providers.py \
+  pc_flow.py temp_mail.py \
+  android_automation.py pc_automation.py main.py preflight.py
+adb devices
+```
+
+Do not run a real end-to-end flow until the operator confirms the connected
+device, the browser session, and the manual-intervention points.
+
+For a non-destructive local readiness check, run:
+
+```bash
+python preflight.py
+```
+
+This is the offline readiness check. It checks source syntax, configuration
+keys, and Python dependencies without requiring a browser, ADB, or a connected
+Android device. It does not open a browser, contact the mailbox, or launch the
+Android app. For local browser and ADB readiness, use integration mode:
+
+```bash
+python preflight.py --integration
+```
+
+Before a real run, use the stricter device check:
+
+```bash
+python preflight.py --require-device
+```
+
+The strict check requires exactly one authorized Android device. If multiple
+devices are connected, set `ANDROID_DEVICE_ID` in `config.py` to the serial
+returned by `adb devices`.
+
+The provider parsing checks can be run locally with:
+
+```bash
+python -m unittest -v test_temp_mail.py
+```
+
+To run the complete offline suite in Replit/Linux, use the same C++ runtime
+library setup required by Patchright:
+
+```bash
+LIBSTDCPP="$(gcc -print-file-name=libstdc++.so.6)"
+export LD_LIBRARY_PATH="$(dirname "$LIBSTDCPP")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+python -m unittest -v
+```
+
+The full suite currently contains 295 tests. A direct `python -m unittest -v`
+without that library path may fail before tests start with a
+`libstdc++.so.6` import error; that is a runtime setup issue, not a test
+assertion failure.
+
+Thirteen of those tests drive a real headless Chromium (the simulated sites and the
+browser-lifecycle test). Some run by default; more run with `AFK_SIM_FULL=1`. They skip
+themselves, with a reason, when patchright or a Chromium-family browser is
+missing, and `AFK_SKIP_BROWSER_TESTS=1` skips them on purpose. The browser is
+chosen the way the tool chooses it; set `PLAYWRIGHT_EXECUTABLE_PATH` to pick one:
+
+```bash
+python -m unittest -v                       # everything that can run on this machine
+AFK_SKIP_BROWSER_TESTS=1 python -m unittest # the tests that need no browser
+AFK_SIM_FULL=1 python -m unittest -v test_site_simulation   # the full browser matrix
+```
+
+All traffic of those tests stays on the machine: the simulator answers requests
+for replit.com and temp-mail.org itself and blocks every other web request.
+CAPTCHA behaviour is only imitated, and the tests never solve it: they clear the
+imitated challenge first and then press ENTER, as a person would.
+
+For the PC browser flow in this Replit workspace, use the runtime wrapper so
+Patchright can load the Nix C++ library:
+
+```bash
+bash run_pc_automation.sh --check-runtime
+```
+
+The first command starts a headless browser smoke check and does not start the
+automation flow. After it passes, start the complete operator flow with:
+
+```bash
+bash run_pc_automation.sh
+```
+
+The wrapper uses the configured browser or workspace Chromium. It does not
+attach to an ordinary already-running browser unless that browser was started
+with a Chromium remote-debugging endpoint. Provider-side Cloudflare blocks,
+CAPTCHA, rate limits, and other security challenges are not bypassed.
+
+## Windows 10 usage
+
+The Python automation can be run from Windows 10, but the Linux shell wrappers
+are not Windows commands:
+
+- `run_pc_automation.sh` is for the Replit/Linux environment.
+- `github_push.sh` requires Git Bash or WSL on Windows and is separate from the
+  main onboarding flow.
+
+Use **Command Prompt** or PowerShell from the project directory. The commands
+below use Command Prompt syntax.
+
+### 1. Check Python
+
+Use Python 3.9 or newer; Python 3.11 is recommended:
+
+```cmd
+python --version
+```
+
+If `python` is not available, use `py` in the commands below instead.
+
+### 2. Install Python dependencies
+
+Run this once:
+
+```cmd
+python -m pip install -r requirements.txt
+```
+
+### 3. Configure the browser
+
+**Default (`BROWSER_MODE = "persistent"`).** The run opens its own Chrome / Edge
+window with a saved profile folder (`browser_profile/` next to the scripts) and
+attaches to it. The window is a normal program: it stays open when the script
+ends or is stopped, keeps the Replit login, and the next run attaches to the
+same window and tabs. It cannot be your everyday profile: since Chrome 136 the
+remote-debugging switch is ignored for the default Chrome profile, so a separate
+profile folder is required (Edge was not verified). Settings (also as
+`AFK_BROWSER_MODE`, `AFK_BROWSER_PROFILE_DIR`, `AFK_BROWSER_DEBUG_PORT`,
+`AFK_BROWSER_EXTRA_ARGS`): `BROWSER_MODE`, `BROWSER_PROFILE_DIR`,
+`BROWSER_DEBUG_PORT`. `BROWSER_MODE = "managed"` gives the old throw-away window.
+If the profile folder is already open in another browser the launch fails with
+a message saying so; close that browser or pick another folder. Log in to
+nothing personal in this window: it is the automation's.
+
+**Attaching to a browser you started yourself** still works and is tried first:
+
+The automation first tries to attach to an already-open Chromium-family
+browser. It uses `PLAYWRIGHT_CDP_URL` when set; otherwise it checks common local
+CDP ports (`9222` through `9225`) automatically. This reuses the existing
+browser context and tabs, and the automation will not close that browser when
+it finishes. A regular browser process cannot be attached to after launch, so
+the browser must have been started with remote debugging enabled. For example,
+on Windows:
+
+```cmd
+start "" "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
+set "PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222"
+```
+
+The same approach works with Chrome, Chromium, or another Chromium-family
+browser. Keep the `temp-mail.org` and `replit.com` tabs open if you want those
+exact tabs reused. If the browser uses another debugging port, either set it
+explicitly:
+
+```cmd
+set "PLAYWRIGHT_CDP_PORTS=9333"
+```
+
+or set the complete endpoint with `PLAYWRIGHT_CDP_URL`.
+
+#### Executable path versus existing-browser attachment
+
+These settings have different purposes:
+
+- `PLAYWRIGHT_EXECUTABLE_PATH` tells Patchright which browser executable to
+  launch. It does **not** attach to an already-running browser.
+- `PLAYWRIGHT_CDP_URL` tells Patchright to attach to the existing browser
+  process, preserving its context and open tabs.
+- When `PLAYWRIGHT_CDP_URL` is omitted, the script automatically probes local
+  CDP ports `9222` through `9225`.
+
+If the log only says:
+
+```text
+Using detected browser executable: C:\...\msedge.exe
+```
+
+or:
+
+```text
+Using configured browser executable: C:\...\msedge.exe
+```
+
+the script is launching its own isolated browser context. A successful
+existing-browser attachment must show:
+
+```text
+Detected a browser remote-debugging endpoint at http://127.0.0.1:9222.
+Attached to the existing browser at http://127.0.0.1:9222; reusing its open tabs.
+```
+
+To check whether a Windows browser is exposing CDP, use one of these commands
+from the same machine:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:9222/json/version
+```
+
+```cmd
+curl http://127.0.0.1:9222/json/version
+```
+
+If the check cannot connect, the existing browser was probably started without
+remote debugging. Close the normal browser process once, start it with
+debugging enabled, and then run the automation:
+
+```cmd
+start "" "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
+set "PLAYWRIGHT_CDP_URL=http://127.0.0.1:9222"
+python main.py
+```
+
+Opening the Replit and `temp-mail.org` tabs in that browser lets the script
+reuse those exact tabs. A normal browser process cannot be retrofitted with
+remote debugging after it has started.
+
+If `PLAYWRIGHT_CDP_URL` is not set or the endpoint is unavailable, the script
+automatically looks for installed Edge, Chrome, Brave, and Chromium
+executables. It does not force Microsoft Edge. You can still prioritize a
+specific executable:
+
+```cmd
+set "PLAYWRIGHT_EXECUTABLE_PATH=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
+
+If Edge is installed under `C:\Program Files`, use:
+
+```cmd
+set "PLAYWRIGHT_EXECUTABLE_PATH=C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+```
+
+Or configure a Patchright browser channel such as `chrome`, `msedge`, or
+`chromium`:
+
+```cmd
+set "PLAYWRIGHT_BROWSER_CHANNEL=chrome"
+```
+
+If no existing browser can be controlled and no installed executable can be
+launched, the script makes one final attempt to use Patchright's bundled
+Chromium.
+
+Check the configured path:
+
+```cmd
+if exist "%PLAYWRIGHT_EXECUTABLE_PATH%" (echo Edge found) else (echo Edge NOT found)
+```
+
+The `set` command applies only to the current Command Prompt window. To save
+the value for future terminals:
+
+```cmd
+setx PLAYWRIGHT_EXECUTABLE_PATH "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
+
+After using `setx`, close and reopen Command Prompt.
+
+PowerShell uses different syntax. If you are in PowerShell, use:
+
+```powershell
+$env:PLAYWRIGHT_EXECUTABLE_PATH = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
+
+Do not use the `$env:` form in Command Prompt. A prompt such as
+`C:\Users\YourName\project>` indicates Command Prompt.
+
+### 4. Add ADB to PATH
+
+Android Platform Tools must be installed and the folder containing `adb.exe`
+must be on PATH. A typical Android SDK path is:
+
+```text
+C:\Users\<your-user>\Documents\Android\SDK\platform-tools
+```
+
+For the current Command Prompt window:
+
+```cmd
+set "PATH=C:\Users\<your-user>\Documents\Android\SDK\platform-tools;%PATH%"
+```
+
+Replace `<your-user>` with the Windows account name. Then verify:
+
+```cmd
+where adb
+adb version
+adb devices
+```
+
+The phone should appear in the `adb devices` output. If it shows
+`unauthorized`, unlock the phone and accept the USB debugging authorization
+prompt.
+
+To add the folder permanently, use:
+
+1. Press `Win + R`.
+2. Enter `sysdm.cpl`.
+3. Open **Advanced** → **Environment Variables**.
+4. Under the user variables, select `Path` → **Edit** → **New**.
+5. Add the folder containing `adb.exe`.
+6. Confirm all dialogs and open a new terminal.
+
+### 5. Review configuration
+
+Open `config.py` and review:
+
+```python
+REPLIT_PASSWORD = "12345678"
+EMAIL_STRATEGY = "hybrid"
+PRIMARY_EMAIL_API = "1secmail"
+USER_CUSTOM_EMAIL = ""
+TEMP_MAIL_PROVIDER = "temp-mail.org"
+TEMP_MAIL_URL = "https://temp-mail.org/"
+ANDROID_DEVICE_ID = None
+GITHUB_REPO_URL = ""
+RUN_POST_ANDROID_STAGES = False
+```
+
+Change the sample password before a real run and keep `config.py` local. Leave
+`ANDROID_DEVICE_ID = None` when one Android device is connected. If multiple
+devices are connected, set it to the serial returned by `adb devices`.
+
+Email selection works as follows:
+
+- A non-empty `USER_CUSTOM_EMAIL` is used directly; no API or temp-mail
+  mailbox is created.
+- With a blank `USER_CUSTOM_EMAIL` and `EMAIL_STRATEGY = "hybrid"`, the
+  1secmail API is tried first and temp-mail.org is used only if address
+  acquisition fails.
+- `EMAIL_STRATEGY = "api"` uses only the configured API.
+- `EMAIL_STRATEGY = "temp-mail.org"` uses the browser mailbox directly.
+
+Leave `GITHUB_REPO_URL` empty to be prompted during the run, or set it to the
+operator's repository URL. `RUN_POST_ANDROID_STAGES` defaults to `False`
+because `CORE_FLOW.md` ends the flow once Replit is closed on the phone. Set
+it to `True` to also resume the PC session and attempt the optional GitHub
+import after Android.
+
+#### Settings added in pass 3 (`config.py`)
+
+- `AUTO_DETECT_STAGE = True`: at start the run looks at the Replit tab and the phone and continues from what is visibly done (never moves backwards, never clicks while looking). `False` trusts `state.json` only.
+- `EXISTING_SESSION_ACTION = "ask"` (also `AFK_EXISTING_SESSION_ACTION`): what to do when a Replit login is already open at sign-up. Your own automation profile is signed out (replit.com cookies only); a browser you attached yourself is never signed out by the script, it asks you.
+- `DELETE_TEMP_MAIL = "after_android"`: click the temp-mail page's Delete button after the phone part (`"after_verify"` = right after verification, `"never"`). Only done when the page shows this run's own address; a failure only warns.
+- `ALERT_SOUND = True` (`AFK_NO_SOUND=1` to silence): beep and bring the window forward when a CAPTCHA or other challenge needs you; the run continues by itself once it is gone, or press ENTER.
+- Failed Android steps now save `screenshots/android_*.xml` (the UI tree) next to the PNG; send these when reporting a phone problem.
+
+### 6. Run the safe preflight check
+
+This checks source syntax, configuration, and Python dependencies without
+opening the browser or launching the Android app:
+
+```cmd
+python preflight.py
+```
+
+To also check the configured browser and ADB installation:
+
+```cmd
+python preflight.py --integration
+```
+
+For a real Android run, require exactly one authorized device:
+
+```cmd
+python preflight.py --require-device
+```
+
+### 7. Start the automation
+
+Keep the browser and ADB environment variables configured in the same terminal,
+then run:
+
+```cmd
+python main.py
+```
+
+The process opens a visible browser, obtains the mailbox address, opens the
+Replit registration flow, pauses for manual CAPTCHA handling when necessary,
+verifies the mailbox message, and controls the Replit Android app. With
+`RUN_POST_ANDROID_STAGES = True`, it then resumes the PC session and attempts
+the visible GitHub import flow (this import is experimental: its success check
+is loose and it is outside the documented core flow).
+
+There is no separate desktop GUI. The user interface is the visible browser
+window, the real Android app, and the interactive terminal prompts.
+
+### 8. Recovery and terminal choices
+
+When a stage fails, the terminal offers:
+
+```text
+[r]etry / [m]anual takeover / [s]kip / [q]uit
+```
+
+- `r` retries the failed stage.
+- `m` records that the operator completed the step manually and advances.
+- `s` records an intentional skip and advances; use sparingly.
+- `q` stops without advancing the failed stage.
+
+Use `r` only for a known transient failure such as delayed mailbox delivery or
+normal page loading. Do not repeatedly retry a CAPTCHA, rate limit, provider
+block, account restriction, or other security challenge. Stop with `q`, save
+the evidence, and resolve the issue manually before deciding whether to
+resume.
+
+Press `Ctrl+C` to stop while preserving the checkpoint. Rerun:
+
+```cmd
+python main.py
+```
+
+and choose to resume when prompted. The checkpoint means the next stage to
+run, so a later-stage resume does not recreate the account.
+
+To deliberately start a fresh run, remove the saved state and browser session:
+
+```cmd
+del state.json 2>nul
+del auth_state.json 2>nul
+```
+
+Only do this intentionally; it removes the ability to resume the saved run.
+
+Manual takeover and skipped stages are recorded in the checkpoint, but they do
+not provide the same evidence as an automated successful transition. Review
+the browser, device, and saved evidence before treating a run as complete.
+
+The final checkpoint records one of these completion statuses:
+
+- `AUTOMATED_SUCCESS` — every enabled stage completed automatically.
+- `MANUAL_COMPLETION` — at least one failed stage was completed through manual
+  takeover.
+- `SKIPPED` — at least one stage was explicitly skipped.
+- `FAILED` — the run was interrupted or stopped before completion.
+
+For safety, `state.json` stores a password reference and a boolean verification
+indicator, not the password or the complete verification URL.
+
+### Windows safety and readiness
+
+Before a real run, confirm that the configured browser is ready, `adb devices` shows the
+operator-owned unlocked phone, and manual CAPTCHA handling is available. Do not
+run the Android or external-account flow without explicit operator approval.
+
+The current code is ready for local setup and offline checks, but the complete
+live flow is not yet proven in this workspace. The ADB daemon is available, but
+no Android device is currently connected. Provider-side Cloudflare blocks, UI
+changes, login errors, device-specific UI hierarchy differences, and delayed
+verification mail remain possible failure points. The automation must stop and
+record evidence instead of bypassing those protections.
+
+## First live run: what to run and what to send back
+
+Nothing in this repository has been run against the live sites or a real phone.
+For the first run:
+
+1. `python preflight.py --integration`
+2. `python main.py` (watch the terminal; solve any challenge in the browser window - the run beeps and carries on by itself).
+3. If anything fails or looks wrong, send back: the terminal output, the files in `screenshots/` (PNG and, for the phone, `android_*.xml`), and `android_actions.log`.
+
+## Runtime artifacts
+
+The implementation may produce:
+
+- `state.json`
+- `auth_state.json`
+- `browser_profile/` (the automation browser's saved profile: cookies of Replit and the mailbox; keep it local)
+- `android_actions.log`
+- `ui.xml`
+- screenshots under `screenshots/`
+
+These may contain account or session data and should remain local and out of
+source control. `state.json` also contains checkpoint and completion metadata;
+it intentionally excludes the password and complete verification URL.

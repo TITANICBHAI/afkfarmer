@@ -1,0 +1,866 @@
+# Task: Refactor and Complete the Replit PC + Android Automation
+
+You are working on an existing automation project. **Do not start by rewriting the project.** First inspect the current repository, understand the existing architecture and execution flow, then modify only what is necessary.
+
+The supplied project files, existing implementation, and screenshot steps are the source of truth for the current behavior.
+
+Your objective is to make the complete PC → email verification → Android flow robust and maintainable while adding the new email-provider strategy described below.
+
+---
+
+# 1. Core Requirements
+
+The complete flow is:
+
+```text
+PC / Web
+    ↓
+Acquire email
+    ↓
+Create Replit account
+    ↓
+Receive verification email
+    ↓
+Verify email
+    ↓
+Android
+    ↓
+Open Replit
+    ↓
+Login
+    ↓
+Onboarding
+    ↓
+Profile/logout
+    ↓
+Close Replit
+    ↓
+Done
+```
+
+Do not change the intended sequence unless required to fix a concrete implementation problem.
+
+The automation must explicitly handle loading/waiting states because page/app transitions are not instantaneous.
+
+---
+
+# 2. Email Strategy
+
+Implement the following priority:
+
+```text
+USER_CUSTOM_EMAIL
+        ↓
+PRIMARY API PROVIDER
+        ↓
+temp-mail.org browser fallback
+```
+
+## Case A — User-provided email
+
+If the user provides a non-empty email:
+
+```python
+USER_CUSTOM_EMAIL = "..."
+```
+
+use it directly.
+
+Do not create an API mailbox.
+
+Do not open temp-mail.org for address generation.
+
+## Case B — No user email
+
+Use `EMAIL_STRATEGY`.
+
+Supported values:
+
+```python
+"hybrid"
+"api"
+"temp-mail.org"
+```
+
+Default:
+
+```python
+EMAIL_STRATEGY = "hybrid"
+PRIMARY_EMAIL_API = "1secmail"
+```
+
+Behavior:
+
+### hybrid
+
+```text
+1secmail
+  ↓ failure
+temp-mail.org
+```
+
+### api
+
+Use the configured API provider and fail if it cannot provide a mailbox.
+
+### temp-mail.org
+
+Use the existing browser-based provider directly.
+
+Important: **temp-mail.org must remain fully supported. The API is an additional provider, not a replacement.**
+
+---
+
+# 3. Configuration
+
+Update `config.py` with:
+
+```python
+REPLIT_PASSWORD = "12345678"
+
+EMAIL_STRATEGY = "hybrid"
+PRIMARY_EMAIL_API = "1secmail"
+USER_CUSTOM_EMAIL = ""
+
+TEMP_MAIL_PROVIDER = "temp-mail.org"
+TEMP_MAIL_URL = "https://temp-mail.org/"
+
+REPLIT_PACKAGE_NAME = "com.replit.app"
+ANDROID_DEVICE_ID = None
+
+EMAIL_CHECK_TIMEOUT = 60
+ANDROID_STEP_DELAY = 2.0
+PAGE_LOAD_TIMEOUT = 15
+LOGIN_RETRY_DELAY = 3
+ELEMENT_WAIT_TIMEOUT = 10
+
+GITHUB_REPO_URL = ""
+DEBUG_MODE = True
+```
+
+Do not duplicate these values across multiple modules.
+
+---
+
+# 4. Dependency Changes
+
+Replace Playwright with Patchright.
+
+`requirements.txt` should contain:
+
+```text
+patchright>=1.40.0
+requests>=2.31.0
+colorama>=0.4.6
+```
+
+Update `preflight.py`:
+
+```python
+REQUIRED_MODULES = ("patchright", "requests", "colorama")
+```
+
+Also ensure preflight checks the actual runtime requirements relevant to the current project, including ADB/device availability where appropriate.
+
+Do not allow the main flow to fail several steps later because a required dependency was missing at startup.
+
+---
+
+# 5. Email Provider Architecture
+
+Create a common provider abstraction.
+
+Conceptually:
+
+```python
+class TempMailProvider(ABC):
+    @abstractmethod
+    def obtain_address(self) -> str:
+        ...
+
+    @abstractmethod
+    def open_verification_message(self):
+        ...
+
+    @abstractmethod
+    def verify_email(self) -> bool:
+        ...
+```
+
+Then implement:
+
+```text
+OneSecMailProvider
+TempMailOrgProvider
+```
+
+Both should expose the same high-level behavior to the PC automation layer.
+
+The PC automation code should not contain provider-specific mailbox logic scattered throughout the account-creation workflow.
+
+---
+
+# 6. OneSecMail Provider
+
+Implement an HTTP/API-based provider using `requests`.
+
+Base API:
+
+```text
+https://www.1secmail.com/api/v1/
+```
+
+The provider should:
+
+1. Generate an inbox identity.
+2. Return its email address.
+3. Poll for incoming messages until timeout.
+4. Identify the Replit verification message.
+5. Fetch the message body.
+6. Extract the verification URL.
+7. Store the verification URL.
+8. Complete verification.
+
+Handle network errors, invalid responses, malformed JSON, missing messages, and timeout cleanly.
+
+Do not silently report success when verification was not actually observed.
+
+---
+
+# 7. Temp-Mail Browser Provider
+
+Preserve the existing `TempMailOrgProvider`.
+
+When using temp-mail.org:
+
+### Address acquisition
+
+The temporary email address section may initially show a loading state.
+
+The automation must:
+
+```text
+open temp-mail.org
+    ↓
+wait while the temporary-address section loads
+    ↓
+detect the email address
+    ↓
+copy/use the address
+```
+
+Do not assume instantaneous loading.
+
+### Inbox
+
+When returning to temp-mail.org after creating the Replit account, the inbox may still show a loading state.
+
+Wait when necessary.
+
+Once the inbox is available, identify the Replit verification email.
+
+Expected current message characteristics include:
+
+```text
+Sender: verify@replit.com
+Subject: Replit: Verify Your Email
+```
+
+Do not depend on one exact historical subject string.
+
+Use normalized/tolerant matching based on sender and subject characteristics.
+
+---
+
+# 8. PC Browser Automation
+
+Replace Playwright imports/usages with Patchright.
+
+Use:
+
+```python
+from patchright.sync_api import (
+    sync_playwright,
+    TimeoutError as PlaywrightTimeoutError,
+)
+```
+
+Keep existing CDP attachment behavior if the project already supports it.
+
+If CDP attachment does not succeed, launch Patchright normally.
+
+The browser automation should have explicit waits/state transitions.
+
+---
+
+# 9. PC Account Creation Flow
+
+Preserve the following sequence:
+
+### Step 1
+
+Open temp-mail.org and obtain the email.
+
+### Step 2
+
+Open Replit.
+
+Handle:
+
+```text
+"Sign in to Replit.com with Google.com"
+```
+
+by closing the popup when it appears.
+
+Then click the orange:
+
+```text
+Create Account
+```
+
+button.
+
+If loading occurs, wait.
+
+### Step 3
+
+Select:
+
+```text
+Email
+```
+
+Enter the temporary/user/API email.
+
+Use the configured password:
+
+```text
+12345678
+```
+
+Click:
+
+```text
+Create Account
+```
+
+Replit may show a loading/rotating state. Wait for the process instead of treating the intermediate state as failure.
+
+Do not depend on the email shown in a reference screenshot being identical to the current mailbox.
+
+---
+
+# 10. PC Verification Flow — IMPORTANT
+
+The verification flow must match the supplied screenshots and actual UI behavior.
+
+Correct conceptual flow:
+
+```text
+Replit verification email
+        ↓
+open message
+        ↓
+wait for message content
+        ↓
+find "Verify Now"
+        ↓
+click
+        ↓
+verification page
+        ↓
+wait
+        ↓
+"Verifying email"
+        ↓
+success / automatic close
+```
+
+Do NOT introduce a separate required `"Verify Email"` click if the current page does not contain one.
+
+The current implementation must not assume:
+
+```text
+Verify Email
+    ↓
+Verify Now
+```
+
+when the actual message directly provides:
+
+```text
+Verify Now
+```
+
+---
+
+# 11. Verification Success Detection
+
+Support the real observed success behavior.
+
+The verification window may show:
+
+```text
+Success! This window will close automatically in a few seconds...
+```
+
+It may then close automatically.
+
+Treat both of these as valid successful completion states:
+
+```text
+explicit success state
+```
+
+or
+
+```text
+verification window closes after successful verification
+```
+
+Do not rely exclusively on phrases such as:
+
+```text
+email verified
+verification successful
+verifying email success
+```
+
+The success detector should use multiple observable signals.
+
+---
+
+# 12. Important Error-Recovery Rule
+
+Every asynchronous page transition should follow:
+
+```text
+ACTION
+  ↓
+WAIT
+  ↓
+CHECK EXPECTED STATE
+  ↓
+SUCCESS / RETRY / TIMEOUT
+```
+
+Do not rely on fixed sleeps as the primary synchronization mechanism.
+
+Configured delays may still be used as short settling delays.
+
+---
+
+# 13. Android Architecture
+
+Keep Android automation separate from PC browser automation.
+
+Use ADB for device interaction.
+
+Preserve the intended Android sequence.
+
+---
+
+# 14. Android Steps 1–5
+
+The existing Android sequence is:
+
+### Step 1
+
+Android home screen.
+
+### Step 2
+
+Open the app drawer using a swipe-up gesture.
+
+The agent may use accessibility or an equivalent interaction.
+
+Replit may appear at the top, but the preferred path is the existing described scroll/path toward Replit.
+
+### Step 3
+
+Click Replit.
+
+### Step 4
+
+Wait for Replit to load.
+
+### Step 5
+
+Once loaded:
+
+```text
+Continue
+    ↓
+Email
+```
+
+The Continue button is the stable interaction to prioritize.
+
+Do not make unrelated changing UI elements the primary locator when Continue is available.
+
+---
+
+# 15. Android Steps 6–10 — Login
+
+Handle both UI variants.
+
+## Normal case
+
+If the keyboard is already visible:
+
+```text
+enter email
+→ Continue
+→ enter password
+```
+
+No extra keyboard-opening action is required.
+
+## Edge case
+
+If the keyboard is not visible and the screen displays:
+
+```text
+Continue with Google
+Continue with Email
+```
+
+then:
+
+```text
+tap Continue with Email
+    ↓
+if login form still needs activation:
+tap once outside
+    ↓
+email field becomes active
+    ↓
+keyboard appears
+```
+
+Then enter the email and press Continue.
+
+Next enter the password using the keyboard.
+
+---
+
+# 16. Safe Android Text Input
+
+Centralize all ADB text entry in one function.
+
+Replace scattered/raw:
+
+```text
+adb shell input text
+```
+
+usage with a safe text-input helper.
+
+The helper must correctly handle special characters commonly found in emails/passwords.
+
+At minimum account for:
+
+```text
+space
+@
+&
+<
+>
+(
+)
+!
++
+```
+
+Do not blindly assume a replacement table is correct for every shell/device combination. Test the helper against representative values.
+
+All Android text entry should go through this helper.
+
+---
+
+# 17. Android Login Processing
+
+After password submission:
+
+```text
+wait
+```
+
+Possible outcomes include:
+
+### Success
+
+```text
+Welcome to Replit. Let's get started.
+```
+
+### Retry/error
+
+An invalid username/password-style message may temporarily appear.
+
+When that state appears:
+
+```text
+wait
+→ click Login again
+→ wait
+```
+
+Do not immediately terminate the entire automation on this recoverable state.
+
+---
+
+# 18. Android Onboarding
+
+Continue through the demonstrated sequence:
+
+```text
+Welcome to Replit
+    ↓
+Continue
+    ↓
+wait
+    ↓
+Continue
+    ↓
+Continue
+    ↓
+Google Search
+    ↓
+Continue
+    ↓
+Developer
+    ↓
+Continue
+    ↓
+Skip
+```
+
+Use explicit state detection where possible.
+
+Do not assume screens change instantly.
+
+---
+
+# 19. Android Profile / Logout Flow
+
+After Skip:
+
+```text
+profile-picture interface
+    ↓
+wait for it to open
+    ↓
+take/select profile picture
+    ↓
+wait as necessary
+    ↓
+scroll
+    ↓
+Logout
+```
+
+Then the confirmation dialog appears:
+
+```text
+Are you sure you want to log out?
+
+CANCEL
+LOG OUT
+```
+
+Click:
+
+```text
+LOG OUT
+```
+
+---
+
+# 20. Android Terminal State — IMPORTANT
+
+After logout, do NOT require another recognized Replit UI state.
+
+The actual terminal state is:
+
+```text
+Logout accepted
+    ↓
+Replit closes / is terminated
+    ↓
+Android home screen
+    ↓
+DONE
+```
+
+The implementation should explicitly verify that the Replit app is no longer the foreground application / process is no longer running as appropriate.
+
+Do not classify the Android home screen as a Replit error.
+
+This is a terminal device state, not a Replit UI state.
+
+---
+
+# 21. State-Machine Design
+
+Refactor the automation around explicit states rather than a long chain of unconditional clicks.
+
+For PC, conceptually:
+
+```text
+EMAIL_READY
+ACCOUNT_PAGE
+ACCOUNT_SUBMITTED
+VERIFICATION_EMAIL_FOUND
+VERIFICATION_MESSAGE_OPEN
+VERIFY_NOW
+VERIFYING
+VERIFICATION_SUCCESS
+```
+
+For Android:
+
+```text
+HOME
+APP_DRAWER
+REPLIT_LOADING
+REPLIT_READY
+EMAIL_LOGIN
+EMAIL_ENTRY
+PASSWORD_ENTRY
+LOGIN_PROCESSING
+LOGIN_RETRY
+WELCOME
+ONBOARDING
+PROFILE
+LOGOUT_CONFIRMATION
+LOGGED_OUT
+ANDROID_HOME
+COMPLETE
+```
+
+Each transition should have:
+
+```text
+action
+expected states
+timeout
+retry/recovery behavior
+debug logging
+```
+
+---
+
+# 22. Logging
+
+Logging should make failures diagnosable.
+
+For each important transition log:
+
+```text
+current state
+action
+wait
+detected state
+success/failure
+retry count
+```
+
+Avoid misleading messages such as "verification failed" when the actual problem is "expected UI selector not found."
+
+---
+
+# 23. Testing Strategy
+
+Before declaring the implementation complete, validate independently:
+
+### Email
+
+* user-provided email path
+* 1secmail API path
+* API failure → temp-mail fallback
+* temp-mail address loading
+* Replit email detection
+* Verify Now
+* verification success
+* automatic verification-window close
+
+### PC
+
+* Replit popup
+* account creation
+* loading states
+* verification
+
+### Android
+
+* app launch
+* login with keyboard already open
+* login with keyboard absent
+* safe email input
+* safe password input
+* invalid-login retry
+* onboarding
+* profile flow
+* logout confirmation
+* application termination
+* Android home-screen completion
+
+---
+
+# 24. Compatibility / Migration Requirements
+
+Before modifying files:
+
+1. Inspect the existing repository.
+2. Identify current public methods/classes used by other modules.
+3. Preserve compatible interfaces where practical.
+4. Do not delete working functionality merely because a cleaner implementation is possible.
+5. Avoid duplicate configuration.
+6. Avoid provider-specific logic leaking into the core workflow.
+7. Keep temp-mail.org support intact.
+8. Keep existing debugging/logging capabilities.
+
+Where a breaking change is genuinely necessary, update all dependent call sites and tests rather than leaving partially migrated code.
+
+---
+
+# 25. Deliverable
+
+The final result should be a coherent implementation in which:
+
+```text
+user email provided?
+    ├── yes → use it
+    └── no
+          ↓
+       strategy
+          ├── API
+          ├── hybrid → API → temp-mail fallback
+          └── temp-mail
+```
+
+and then:
+
+```text
+email
+ ↓
+Replit account creation
+ ↓
+verification
+ ↓
+Android login
+ ↓
+onboarding
+ ↓
+profile/logout
+ ↓
+app closed
+ ↓
+complete
+```
+
+The implementation should be driven by **observed UI states and explicit waits**, not brittle assumptions about instantaneous loading or one exact piece of visible text.
+
+Before finishing, run the available tests, syntax/type checks, and project preflight checks. Report any remaining environment-dependent limitation separately from actual code defects.
