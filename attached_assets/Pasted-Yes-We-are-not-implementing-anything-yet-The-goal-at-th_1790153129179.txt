@@ -1,0 +1,801 @@
+Yes. We are **not implementing anything yet**. The goal at this stage is to define the complete plan so the implementation is coherent rather than patching individual failures.
+
+# Overall plan
+
+The project becomes a **two-stage automation system**:
+
+```text
+PC / Web
+    ↓
+Create Replit account
+    ↓
+Verify email
+    ↓
+Android
+    ↓
+Login
+    ↓
+Onboarding
+    ↓
+Profile/logout
+    ↓
+End
+```
+
+The important change is that the **email subsystem becomes provider-independent**, while the rest of the automation only cares about:
+
+```text
+give me an email
+wait for the Replit verification message
+get the verification URL
+complete verification
+```
+
+---
+
+# 1. Email strategy
+
+We should support **three possibilities**, in this exact priority:
+
+```text
+User supplied email
+        ↓
+Primary API provider
+        ↓
+temp-mail.org browser fallback
+```
+
+### Case A — User gives an email
+
+For example:
+
+```text
+USER_CUSTOM_EMAIL = "someone@example.com"
+```
+
+Then we use that directly.
+
+No API mailbox is created.
+
+No temp-mail.org mailbox is opened.
+
+The user-provided address is therefore the **highest-priority option**.
+
+---
+
+### Case B — User leaves email blank
+
+Then the configured strategy is used.
+
+For the hybrid/default mode:
+
+```text
+Try 1secmail
+      ↓
+success → use it
+      ↓
+failure
+      ↓
+open temp-mail.org
+      ↓
+use temp-mail.org
+```
+
+This preserves your existing temp-mail workflow instead of removing it.
+
+So the system isn't:
+
+> "replace temp-mail with API"
+
+It is:
+
+> **"add API as an additional source, while retaining temp-mail.org as the browser fallback."**
+
+---
+
+# 2. Email provider abstraction
+
+The important architectural change is to stop `pc_automation.py` from knowing how every mailbox works.
+
+We create a common interface conceptually like:
+
+```text
+EmailProvider
+    ├── obtain_address()
+    ├── wait_for_verification_message()
+    └── get/complete_verification()
+```
+
+Then:
+
+```text
+OneSecMailProvider
+TempMailOrgProvider
+```
+
+both implement that same interface.
+
+This gives us:
+
+```text
+PCAutomation
+      ↓
+EmailProvider
+      ↓
+ ┌───────────────┬──────────────────┐
+ │ 1secmail API  │ temp-mail browser │
+ └───────────────┴──────────────────┘
+```
+
+That is much cleaner than putting provider-specific logic throughout the Replit flow.
+
+---
+
+# 3. Browser automation changes
+
+The browser layer should move from:
+
+```text
+Playwright
+```
+
+to:
+
+```text
+Patchright
+```
+
+with the dependency set:
+
+```text
+patchright
+requests
+colorama
+```
+
+The reason for this change in the plan is that your browser automation layer should have one consistent browser abstraction, while the API mail provider uses plain HTTP through `requests`.
+
+So the division becomes:
+
+```text
+Patchright → browser interaction
+requests   → email API interaction
+ADB        → Android interaction
+```
+
+Each mechanism has one job.
+
+---
+
+# 4. Preflight becomes stricter
+
+Before starting the automation, `preflight.py` should verify the actual runtime requirements.
+
+Conceptually:
+
+```text
+Python
+  ↓
+patchright available?
+requests available?
+colorama available?
+ADB available?
+Android device available?
+browser/CDP available?
+```
+
+This should fail **before** the main workflow starts if a critical dependency is missing.
+
+That avoids situations where the automation runs for several steps and only then discovers that something fundamental is unavailable.
+
+---
+
+# 5. PC flow should become a real state machine
+
+This is the most important correction from the screenshots/code mismatch.
+
+We should not implement the PC workflow as:
+
+```text
+click A
+click B
+click C
+hope page looks right
+```
+
+Instead:
+
+```text
+STATE 1
+Email obtained
+
+↓
+STATE 2
+Replit account form
+
+↓
+STATE 3
+Account creation submitted
+
+↓
+STATE 4
+Verification email available
+
+↓
+STATE 5
+Verification message opened
+
+↓
+STATE 6
+Verify Now clicked
+
+↓
+STATE 7
+Verification success
+```
+
+Each transition should have:
+
+```text
+action
++
+wait
++
+accepted states
++
+timeout
++
+recovery/fallback
+```
+
+That corresponds much better to what you described about the repeated loading periods.
+
+---
+
+# 6. Fix the actual PC verification mismatch
+
+The current implementation is based on the wrong assumptions.
+
+Your actual flow is:
+
+```text
+Replit email arrives
+        ↓
+Open email
+        ↓
+Verify Now
+        ↓
+Verifying email
+        ↓
+Success / automatic close
+```
+
+The implementation currently expects an extra verification interaction and different success wording.
+
+So the plan is to redesign verification around **observable states**, not hard-coded wording.
+
+For example:
+
+```text
+Find Replit message
+      ↓
+open message
+      ↓
+find Verify Now
+      ↓
+click
+      ↓
+wait
+      ↓
+detect one of:
+   • success text
+   • window closes
+   • verification-complete state
+```
+
+The subject matching should also be tolerant.
+
+Instead of depending on only:
+
+```text
+"replit verify email"
+```
+
+it should recognize the actual Replit verification message, including:
+
+```text
+Replit: Verify Your Email
+```
+
+and preferably use sender + subject characteristics rather than one exact phrase.
+
+---
+
+# 7. API verification and browser verification should share the same downstream result
+
+This is important.
+
+From the rest of the system's perspective, it should not matter whether the email came from:
+
+```text
+1secmail
+```
+
+or:
+
+```text
+temp-mail.org
+```
+
+Both should eventually produce something equivalent to:
+
+```text
+verification_url
+```
+
+Then:
+
+```text
+verification_url
+      ↓
+complete verification
+      ↓
+Replit account ready
+```
+
+So:
+
+```text
+1secmail ──────────────┐
+                      ├→ verification result
+temp-mail.org ────────┘
+```
+
+This prevents provider-specific logic from leaking into the rest of the workflow.
+
+---
+
+# 8. Android login needs its own robust state machine
+
+The Android screenshots show multiple valid states.
+
+For example:
+
+### Normal path
+
+```text
+Replit
+ ↓
+Continue
+ ↓
+Email
+ ↓
+keyboard already present
+ ↓
+enter email
+ ↓
+Continue
+ ↓
+enter password
+```
+
+### Edge path
+
+```text
+Replit
+ ↓
+Continue
+ ↓
+Email
+ ↓
+keyboard absent
+ ↓
+tap Continue with Email
+ ↓
+tap outside
+ ↓
+email field becomes active
+ ↓
+keyboard appears
+```
+
+So we should **not assume one UI state**.
+
+The automation should detect:
+
+```text
+keyboard present?
+email field visible?
+Continue with Email visible?
+login form visible?
+```
+
+and choose the appropriate branch.
+
+---
+
+# 9. Android typing needs a dedicated input layer
+
+Your proposed `type_text()` change belongs here.
+
+The objective is:
+
+```text
+Python string
+      ↓
+ADB-safe encoding
+      ↓
+Android text input
+```
+
+because email addresses can contain characters such as:
+
+```text
+@
++
+_
+.
+```
+
+The important design point is that **all ADB text input should go through one function**.
+
+No scattered:
+
+```text
+adb shell input text ...
+```
+
+calls throughout the code.
+
+Then if escaping needs to change later, there is one place to fix it.
+
+I would also treat the proposed escaping function as something to **test against real addresses/passwords**, rather than assuming the replacement table is universally correct for every shell invocation.
+
+---
+
+# 10. Android login failure should be treated as a recoverable state
+
+Your described flow has:
+
+```text
+enter password
+ ↓
+wait
+ ↓
+possible "invalid username/password"
+ ↓
+click Login again
+```
+
+Therefore the state machine should explicitly allow:
+
+```text
+LOGIN_PROCESSING
+        ↓
+ ┌───────────────┐
+ │               │
+success       retry/error
+ │               │
+ ↓               ↓
+welcome        Login
+                  ↓
+              wait again
+```
+
+rather than interpreting the error screen as a fatal failure immediately.
+
+---
+
+# 11. Android onboarding
+
+After authentication:
+
+```text
+Welcome to Replit
+      ↓
+Continue
+      ↓
+wait
+      ↓
+Continue
+      ↓
+Continue
+      ↓
+Google Search
+      ↓
+Continue
+      ↓
+Developer
+      ↓
+Continue
+      ↓
+Skip
+```
+
+Each of these should be treated as a **separate state transition**, with loading handled between transitions.
+
+This matches your "wait whenever the UI is changing" rule.
+
+---
+
+# 12. Profile/logout is a separate terminal phase
+
+After `Skip`:
+
+```text
+Skip
+ ↓
+profile picture flow
+ ↓
+wait for profile UI
+ ↓
+scroll
+ ↓
+Logout
+ ↓
+confirmation
+ ↓
+Logout
+ ↓
+close Replit
+ ↓
+Android home screen
+```
+
+This is where the current code has a specific architectural bug.
+
+The current implementation expects another recognized **Replit screen** after pressing Logout.
+
+But your screenshot shows the final state is:
+
+```text
+Android home screen
+```
+
+So the terminal condition should be:
+
+```text
+logout accepted
+        ↓
+app closed
+        ↓
+Android home screen
+        ↓
+DONE
+```
+
+not:
+
+```text
+logout accepted
+        ↓
+wait for another Replit classification
+```
+
+---
+
+# 13. The final Android termination should be explicit
+
+The end of the automation should have a dedicated terminal state:
+
+```text
+ANDROID_COMPLETE
+```
+
+with checks such as:
+
+```text
+Replit process stopped
+AND
+device is responsive
+AND
+Replit UI is no longer foreground
+```
+
+The home screen itself does not need to be interpreted as a Replit screen.
+
+That cleanly separates:
+
+```text
+application state
+```
+
+from:
+
+```text
+device state
+```
+
+---
+
+# 14. Configuration structure
+
+The configuration becomes roughly:
+
+```text
+Replit
+ ├── password
+ └── account settings
+
+Email
+ ├── strategy
+ ├── primary API provider
+ ├── optional user email
+ ├── temp-mail provider
+ └── email timeout
+
+Android
+ ├── package name
+ ├── device ID
+ └── step delay
+
+Timing
+ ├── page load
+ ├── element wait
+ ├── login retry
+ └── email polling
+
+Debug
+ └── debug mode
+```
+
+This keeps behavior out of hard-coded functions.
+
+---
+
+# 15. The final end-to-end architecture
+
+The whole system should eventually look like this:
+
+```text
+                   ┌────────────────────┐
+                   │      Config        │
+                   └─────────┬──────────┘
+                             │
+                             ▼
+                    EMAIL STRATEGY
+                             │
+             ┌───────────────┼────────────────┐
+             │               │                │
+             ▼               ▼                ▼
+      User Email       1secmail API      temp-mail.org
+             │               │                │
+             └───────────────┼────────────────┘
+                             ▼
+                       Email Address
+                             │
+                             ▼
+                    Replit PC Browser
+                             │
+                             ▼
+                    Account Creation
+                             │
+                             ▼
+                   Verification Message
+                             │
+             ┌───────────────┴───────────────┐
+             │                               │
+        API verification              Browser verification
+             │                               │
+             └───────────────┬───────────────┘
+                             ▼
+                    Account Verified
+                             │
+                             ▼
+                       Android App
+                             │
+                             ▼
+                         Login
+                             │
+                             ▼
+                       Onboarding
+                             │
+                             ▼
+                      Profile / Logout
+                             │
+                             ▼
+                     Close Replit
+                             │
+                             ▼
+                    Android Home Screen
+                             │
+                             ▼
+                           DONE
+```
+
+# 16. Implementation order
+
+I would **not** modify everything simultaneously. The clean implementation order is:
+
+### Phase 1 — Dependencies and infrastructure
+
+```text
+requirements.txt
+preflight.py
+Patchright setup
+requests setup
+ADB input helper
+```
+
+### Phase 2 — Email abstraction
+
+```text
+EmailProvider
+OneSecMailProvider
+TempMailOrgProvider
+user-provided email
+hybrid selection
+```
+
+### Phase 3 — PC automation
+
+Fix:
+
+```text
+email acquisition
+account creation
+email detection
+Verify Now
+verification success
+loading/wait handling
+```
+
+### Phase 4 — Android input/login
+
+Fix:
+
+```text
+keyboard branching
+email input
+password input
+retry state
+```
+
+### Phase 5 — Android onboarding
+
+Implement:
+
+```text
+Continue
+Google Search
+Developer
+Skip
+profile
+```
+
+### Phase 6 — Android termination
+
+Fix:
+
+```text
+Logout
+confirmation
+app termination
+home-screen completion
+```
+
+### Phase 7 — Validation
+
+Test each layer independently:
+
+```text
+email provider test
+PC registration test
+verification test
+Android login test
+onboarding test
+logout/termination test
+full end-to-end test
+```
+
+The key architectural principle is **not to make the new API path a replacement for your existing process**. It should be a provider plugged into the same email interface, with:
+
+```text
+USER EMAIL
+   ↓
+PRIMARY API
+   ↓
+TEMP-MAIL.ORG
+```
+
+and the rest of the automation remaining unaware of which provider actually supplied the mailbox.

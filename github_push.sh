@@ -3,8 +3,10 @@
 # Safe-by-default GitHub workspace sync.
 #
 # Normal sync mirrors the current workspace's Git tree to a GitHub branch:
-# tracked additions, edits, and deletions are pushed. Remote-only files are
-# removed because the branch is updated to the local commit tree.
+# additions, edits, and deletions are pushed. Workspace reference assets under
+# attached_assets/ are force-added because Replit globally ignores that folder.
+# Remote-only files are removed because the branch is updated to the local
+# commit tree.
 #
 # Deleting the entire GitHub repository is a separate, explicit operation:
 #   bash github_push.sh --delete-remote-repo \
@@ -246,6 +248,12 @@ sync_workspace() {
   log
   log "Staging the workspace..."
   git -C "$ROOT" add -A -- .
+  # Replit's system-wide ignore rules exclude attached_assets/, even though
+  # project code and documentation may depend on those files. Keep this
+  # workspace mirror complete by force-staging that project-owned directory.
+  if [[ -d "$ROOT/attached_assets" ]]; then
+    git -C "$ROOT" add -f -A -- attached_assets
+  fi
 
   if git -C "$ROOT" diff --cached --quiet; then
     log "No local file changes need a commit."

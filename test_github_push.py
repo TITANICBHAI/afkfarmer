@@ -122,6 +122,35 @@ class GithubPushFlowTests(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
+    def test_sync_force_adds_ignored_workspace_assets(self):
+        temp_dir, repo = self.make_repo()
+        try:
+            bin_dir = self.fake_git_path(temp_dir)
+            assets = repo / "attached_assets"
+            assets.mkdir()
+            (assets / "reference.png").write_bytes(b"reference image")
+            with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+                exclude.write("\n/attached_assets/\n")
+
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "--sync", "--yes"],
+                cwd=ROOT,
+                env=self.base_env(repo, bin_dir),
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Workspace sync completed", result.stdout)
+            tracked = subprocess.check_output(
+                ["git", "-C", str(repo), "ls-files", "attached_assets"],
+                env=self.base_env(repo, bin_dir),
+                text=True,
+            ).splitlines()
+            self.assertEqual(tracked, ["attached_assets/reference.png"])
+        finally:
+            temp_dir.cleanup()
+
     def test_check_auth_is_read_only_and_uses_noninteractive_header(self):
         temp_dir, repo = self.make_repo()
         try:

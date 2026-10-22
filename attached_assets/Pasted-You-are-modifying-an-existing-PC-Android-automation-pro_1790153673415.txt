@@ -1,0 +1,400 @@
+You are modifying an existing PC + Android automation project.
+
+First inspect the current repository and existing architecture. Do not rewrite the project blindly.
+
+The objective is to make the current automation reliable, modular, observable, and maintainable.
+
+IMPORTANT:
+
+* Preserve existing working behavior where possible.
+* Do not add functionality whose purpose is to bypass CAPTCHA, anti-bot challenges, account restrictions, rate limits, fingerprinting systems, or other platform security controls.
+* If a security/anti-abuse challenge appears, stop the affected flow, record the state, save diagnostics, and report the reason.
+* Synchronize primarily using observable UI/application states rather than arbitrary timing.
+* Do not introduce fake-human interaction specifically to disguise automation.
+
+## 1. Dependencies
+
+Replace Playwright with Patchright if compatible with the existing architecture.
+
+Use:
+
+```text
+patchright>=1.40.0
+requests>=2.31.0
+colorama>=0.4.6
+```
+
+Update preflight to verify:
+
+```python
+REQUIRED_MODULES = ("patchright", "requests", "colorama")
+```
+
+Also verify required ADB/device/browser prerequisites before execution.
+
+## 2. Email architecture
+
+Implement a provider abstraction:
+
+```text
+EmailProvider
+├── OneSecMailProvider
+└── TempMailOrgProvider
+```
+
+Configuration:
+
+```python
+REPLIT_PASSWORD = "12345678"
+
+EMAIL_STRATEGY = "hybrid"
+PRIMARY_EMAIL_API = "1secmail"
+USER_CUSTOM_EMAIL = ""
+
+TEMP_MAIL_PROVIDER = "temp-mail.org"
+TEMP_MAIL_URL = "https://temp-mail.org/"
+
+EMAIL_CHECK_TIMEOUT = 60
+```
+
+Priority:
+
+```text
+USER_CUSTOM_EMAIL
+    ↓
+primary API
+    ↓
+temp-mail.org fallback
+```
+
+If the user email is blank:
+
+* `hybrid` → API first, temp-mail fallback
+* `api` → API only
+* `temp-mail.org` → browser temp-mail only
+
+Do not remove the existing temp-mail.org implementation.
+
+## 3. Browser synchronization
+
+Replace fixed sleep-heavy synchronization with state-based waits.
+
+Every important operation should conceptually be:
+
+```text
+ACTION
+→ WAIT FOR EXPECTED STATE
+→ VALIDATE STATE
+→ CONTINUE / RETRY / TIMEOUT
+```
+
+A bounded settling delay is allowed when necessary, but it must not be the primary synchronization mechanism.
+
+## 4. PC account creation
+
+Preserve the existing sequence:
+
+```text
+temp-mail/email available
+→ Replit
+→ close Google sign-in popup if present
+→ Create Account
+→ Email
+→ enter email
+→ enter password
+→ Create Account
+→ wait for resulting state
+```
+
+Handle loading states explicitly.
+
+Do not assume a reference screenshot's email is the current email.
+
+## 5. Replit verification
+
+The actual observed email flow is:
+
+```text
+Replit verification email
+→ open message
+→ wait for message content
+→ Verify Now
+→ verification page
+→ Verifying email
+→ success / automatic close
+```
+
+The current implementation must not require an additional "Verify Email" click if the actual message directly contains "Verify Now".
+
+Support the currently observed message characteristics:
+
+```text
+sender: verify@replit.com
+subject: Replit: Verify Your Email
+```
+
+Do not hard-code only one historical subject.
+
+Normalize sender/subject text before matching.
+
+Success should support both:
+
+```text
+explicit success message
+```
+
+and:
+
+```text
+verification window closes after successful verification
+```
+
+Do not rely on a single success phrase.
+
+## 6. Email provider output
+
+Both providers must expose the same high-level result:
+
+```text
+email address
+verification message
+verification URL/result
+verification success/failure
+```
+
+The rest of PC automation must not care which provider was used.
+
+## 7. Android architecture
+
+Keep Android automation separate from browser automation.
+
+State model should include at least:
+
+```text
+HOME
+APP_DRAWER
+REPLIT_LOADING
+REPLIT_READY
+EMAIL_LOGIN
+EMAIL_ENTRY
+PASSWORD_ENTRY
+LOGIN_PROCESSING
+LOGIN_RETRY
+WELCOME
+ONBOARDING
+PROFILE
+LOGOUT_CONFIRMATION
+LOGGED_OUT
+ANDROID_HOME
+COMPLETE
+SECURITY_CHALLENGE
+ERROR
+```
+
+## 8. Android login
+
+Support both states:
+
+### Keyboard already visible
+
+```text
+email
+→ Continue
+→ password
+```
+
+### Keyboard absent
+
+```text
+Continue with Email
+→ tap outside if necessary
+→ email field activates
+→ keyboard appears
+→ email
+→ Continue
+```
+
+Do not assume one UI state is always present.
+
+## 9. Android text input
+
+Centralize all ADB typing in one helper.
+
+Do not scatter raw `adb shell input text` calls throughout the code.
+
+The helper must safely handle normal email/password characters.
+
+Test it using representative values containing characters such as:
+
+```text
+@
++
+_
+.
+!
+```
+
+Do not assume one shell escaping implementation is universally correct without testing.
+
+## 10. Android login retry
+
+After password submission:
+
+```text
+wait
+```
+
+Possible state:
+
+```text
+invalid username/password
+```
+
+If that recoverable state occurs:
+
+```text
+wait
+→ click Login again
+→ wait
+```
+
+Do not immediately classify it as a fatal failure.
+
+## 11. Android onboarding
+
+Preserve:
+
+```text
+Welcome to Replit
+→ Continue
+→ wait
+→ Continue
+→ Continue
+→ Google Search
+→ Continue
+→ Developer
+→ Continue
+→ Skip
+```
+
+Use state-based waits.
+
+## 12. Profile/logout
+
+After Skip:
+
+```text
+profile-picture flow
+→ wait
+→ select/take profile picture
+→ wait
+→ scroll
+→ Logout
+→ logout confirmation
+→ LOG OUT
+```
+
+After successful logout:
+
+```text
+terminate/close Replit
+→ verify Replit is no longer foreground
+→ verify Android home/terminal device state
+→ COMPLETE
+```
+
+Do NOT require another Replit UI state after logout.
+
+## 13. Security challenge handling
+
+If the application presents:
+
+```text
+CAPTCHA
+reCAPTCHA
+bot verification
+suspicious-login challenge
+account restriction
+rate-limit block
+additional identity verification
+```
+
+do not bypass it.
+
+Instead:
+
+```text
+STOP
+→ capture screenshot
+→ record current state
+→ record diagnostic information
+→ return actionable failure reason
+```
+
+## 14. Observability
+
+For every state transition log:
+
+```text
+current state
+action
+expected state
+detected state
+retry count
+timeout
+failure reason
+```
+
+Take a screenshot on unexpected UI states where possible.
+
+Differentiate:
+
+```text
+automation bug
+timeout
+network failure
+provider failure
+service error
+security challenge
+```
+
+## 15. Tests
+
+Add/repair tests for:
+
+### Email
+
+* user-provided email
+* API email
+* API failure → temp-mail fallback
+* temp-mail loading
+* verification-message detection
+* Verify Now
+* verification success
+* automatic verification-window close
+
+### Android
+
+* keyboard already present
+* keyboard absent
+* email entry
+* password entry
+* login retry
+* onboarding
+* logout
+* app termination
+* terminal Android home state
+
+## 16. Completion criteria
+
+The refactor is complete only when:
+
+1. The project passes syntax/import/preflight checks.
+2. Existing tests are updated rather than silently removed.
+3. Provider-specific email logic is isolated.
+4. PC verification matches the observed UI.
+5. Android logout correctly recognizes the final device state.
+6. Unexpected security challenges stop safely rather than being bypassed.
+7. Remaining environment limitations are explicitly reported.
+
+Do not add fingerprint spoofing, proxy rotation, CAPTCHA bypass, fabricated browser characteristics, or human-behavior simulation whose purpose is to evade anti-bot detection.

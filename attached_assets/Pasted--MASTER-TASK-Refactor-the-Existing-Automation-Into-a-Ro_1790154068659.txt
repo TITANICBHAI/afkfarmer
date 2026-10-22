@@ -1,0 +1,1031 @@
+# MASTER TASK — Refactor the Existing Automation Into a Robust, State-Driven System
+
+You are working on an existing PC + Android automation project.
+
+**Do not rewrite the project blindly.**
+
+Before making changes, inspect the repository, current implementation, `steps.md`, and the corresponding screenshots in `attached_assets/`.
+
+## SOURCE-OF-TRUTH RULE
+
+Always inspect:
+
+```text
+steps.md
+attached_assets/
+existing implementation
+existing tests
+```
+
+Treat:
+
+* `steps.md` as the procedural source of truth.
+* The corresponding screenshots in `attached_assets/` as the visual/UI source of truth.
+* Existing code as the current implementation, not automatically the correct conceptual model.
+
+When these disagree, identify the discrepancy and repair the implementation to match the documented procedure and observed UI.
+
+Preserve unrelated working behavior.
+
+---
+
+# 1. SYSTEM OBJECTIVE
+
+The intended complete flow is:
+
+```text
+PC / Web
+    ↓
+Acquire email
+    ↓
+Create Replit account
+    ↓
+Receive verification email
+    ↓
+Verify email
+    ↓
+Android
+    ↓
+Open Replit
+    ↓
+Login
+    ↓
+Onboarding
+    ↓
+Profile / Logout
+    ↓
+Close Replit
+    ↓
+Android terminal state
+    ↓
+DONE
+```
+
+The system must be:
+
+* state-driven
+* observable
+* recoverable
+* bounded
+* modular
+* easy to debug
+* resistant to normal UI/loading variation
+* explicit about unsupported/security-blocked states
+
+Do not rely on arbitrary fixed timing as the primary synchronization mechanism.
+
+---
+
+# 2. IMPORTANT DESIGN PRINCIPLE
+
+Do not attempt to make automation "look human" through artificial behavior.
+
+Do NOT implement:
+
+```text
+fingerprint spoofing
+navigator property fabrication
+proxy rotation for detection avoidance
+CAPTCHA bypass
+security-challenge bypass
+device-attestation bypass
+fake browser identity
+randomized mouse trajectories intended to fool detection
+randomized typing intended to fool detection
+```
+
+Instead, focus on:
+
+```text
+environment consistency
+real browser/device configuration
+observable application state
+correct synchronization
+bounded retries
+rate-limit awareness
+diagnostics
+safe stopping
+```
+
+The goal is a clean, coherent automation environment rather than a detector-evasion system.
+
+---
+
+# 3. ENVIRONMENT INTEGRITY
+
+The browser and Android environment should be internally consistent.
+
+## Browser
+
+Do not invent arbitrary values for:
+
+```text
+viewport
+timezone
+locale
+device scale factor
+hardware concurrency
+device memory
+```
+
+Use values that correspond to the actual execution environment/configuration.
+
+Do not inject fake `navigator.hardwareConcurrency` or `navigator.deviceMemory` values merely to appear more human.
+
+If Patchright is used, configure it consistently and document the configuration.
+
+## Network
+
+Keep a single coherent network/session environment during one authorized run.
+
+Do not rotate IPs during a session.
+
+Do not add residential/mobile proxy infrastructure for the purpose of defeating reputation systems.
+
+Do not make unsupported assumptions such as "all cloud/datacenter IPs are blocked."
+
+If the service itself returns:
+
+```text
+rate limit
+security challenge
+access denied
+account restriction
+```
+
+classify that explicitly rather than trying to circumvent it.
+
+---
+
+# 4. DEPENDENCIES
+
+Use:
+
+```text
+patchright>=1.40.0
+requests>=2.31.0
+colorama>=0.4.6
+```
+
+Update preflight accordingly:
+
+```python
+REQUIRED_MODULES = (
+    "patchright",
+    "requests",
+    "colorama",
+)
+```
+
+Also verify required runtime components:
+
+```text
+Python
+browser runtime
+ADB
+Android device
+device connectivity
+```
+
+Fail early if a required component is unavailable.
+
+---
+
+# 5. EMAIL STRATEGY
+
+Implement:
+
+```text
+USER_CUSTOM_EMAIL
+        ↓
+PRIMARY API
+        ↓
+temp-mail.org fallback
+```
+
+Configuration:
+
+```python
+REPLIT_PASSWORD = "12345678"
+
+EMAIL_STRATEGY = "hybrid"
+PRIMARY_EMAIL_API = "1secmail"
+USER_CUSTOM_EMAIL = ""
+
+TEMP_MAIL_PROVIDER = "temp-mail.org"
+TEMP_MAIL_URL = "https://temp-mail.org/"
+
+EMAIL_CHECK_TIMEOUT = 60
+```
+
+Behavior:
+
+### User email provided
+
+Use it as the primary address.
+
+Do not create an API mailbox.
+
+Do not open temp-mail.org just to generate an address.
+
+### User email blank + hybrid
+
+Try primary API.
+
+If provider acquisition fails, use temp-mail.org.
+
+### API strategy
+
+Use API only and report failure if mailbox acquisition fails.
+
+### temp-mail strategy
+
+Use existing temp-mail.org implementation.
+
+---
+
+# 6. EMAIL PROVIDER ABSTRACTION
+
+Create a common provider interface.
+
+Conceptually:
+
+```python
+class EmailProvider(ABC):
+    def obtain_address(self) -> str:
+        ...
+
+    def wait_for_verification_message(self):
+        ...
+
+    def get_verification_result(self):
+        ...
+
+    def verify_email(self) -> bool:
+        ...
+```
+
+Implement:
+
+```text
+OneSecMailProvider
+TempMailOrgProvider
+```
+
+The main PC workflow must not care which provider supplied the mailbox.
+
+Provider-specific HTTP/browser details must remain isolated.
+
+---
+
+# 7. ONESECMail API
+
+Implement the API using `requests`.
+
+Responsibilities:
+
+```text
+generate mailbox
+→ return email
+→ poll inbox
+→ identify Replit verification message
+→ fetch message
+→ extract verification URL
+→ perform verification
+→ report success/failure
+```
+
+Handle:
+
+```text
+network errors
+malformed JSON
+HTTP failures
+empty inbox
+message timeout
+missing verification URL
+```
+
+Never report verification success without positive evidence.
+
+---
+
+# 8. TEMP-MAIL.ORG
+
+Keep the existing browser provider.
+
+## Address state
+
+The temporary email section may show a loading state.
+
+Therefore:
+
+```text
+open page
+→ observe address area
+→ if loading: wait
+→ detect actual email
+→ obtain email
+```
+
+Do not rely on arbitrary sleep durations.
+
+## Inbox state
+
+When returning to temp-mail.org:
+
+```text
+inbox loading
+    OR
+inbox ready
+```
+
+Wait for the actual inbox state.
+
+Current observed Replit message characteristics include:
+
+```text
+Sender: verify@replit.com
+Subject: Replit: Verify Your Email
+```
+
+Do not rely on one historical exact subject string.
+
+Normalize subject/sender text and use tolerant matching.
+
+---
+
+# 9. PC STATE MACHINE
+
+The PC browser workflow should use explicit states.
+
+Minimum conceptual states:
+
+```text
+EMAIL_READY
+REPLIT_ACCOUNT_PAGE
+EMAIL_FORM
+PASSWORD_FORM
+ACCOUNT_SUBMITTING
+ACCOUNT_CREATED
+VERIFICATION_INBOX
+VERIFICATION_MESSAGE
+VERIFY_NOW
+VERIFYING
+VERIFICATION_SUCCESS
+SECURITY_CHALLENGE
+RATE_LIMITED
+TIMEOUT
+ERROR
+```
+
+Every state transition must contain:
+
+```text
+current state
+action
+expected next states
+wait strategy
+timeout
+retry/recovery
+terminal failure
+```
+
+---
+
+# 10. ACTION + POSTCONDITION MODEL
+
+Do not write actions as isolated clicks.
+
+Conceptual pattern:
+
+```text
+ACTION
+    ↓
+WAIT
+    ↓
+OBSERVE
+    ↓
+VERIFY POSTCONDITION
+    ↓
+transition
+```
+
+Example:
+
+```text
+click Create Account
+    ↓
+wait
+    ↓
+detect:
+  account-created
+  loading
+  verification-required
+  known-error
+    ↓
+continue according to detected state
+```
+
+The automation must never assume that a click succeeded solely because the click API returned without throwing.
+
+---
+
+# 11. PC REGISTRATION FLOW
+
+Preserve the documented sequence:
+
+```text
+temp email available
+→ Replit
+→ close Google popup when present
+→ Create Account
+→ Email
+→ enter email
+→ enter password
+→ Create Account
+→ wait
+```
+
+Handle all observed loading transitions.
+
+Do not assume the account creation response is instantaneous.
+
+---
+
+# 12. PC VERIFICATION FLOW
+
+The observed flow is:
+
+```text
+Replit email
+→ open message
+→ wait for email content
+→ Verify Now
+→ verification page
+→ Verifying email
+→ success / automatic close
+```
+
+Do NOT insert an additional required "Verify Email" action unless `steps.md` and the reference screenshot for that state actually show it.
+
+The implementation must support the currently observed subject:
+
+```text
+Replit: Verify Your Email
+```
+
+and sender:
+
+```text
+verify@replit.com
+```
+
+The verification result may be:
+
+```text
+explicit success state
+```
+
+or:
+
+```text
+verification window closes after successful verification
+```
+
+Treat both as valid completion signals when supported by the observed flow.
+
+---
+
+# 13. APPLICATION COOLDOWNS AND RATE LIMITS
+
+Do not confuse application cooldowns with automation failures.
+
+Examples:
+
+```text
+Please wait
+Too many attempts
+Try again later
+Resend unavailable
+Rate limited
+```
+
+These should become explicit states.
+
+Correct pattern:
+
+```text
+detect cooldown
+→ calculate remaining/waitable state if available
+→ wait
+→ re-check
+```
+
+Incorrect pattern:
+
+```text
+fixed 2-second sleep
+→ click again
+→ click again
+→ click again
+```
+
+Never hammer an action simply because a fixed sleep elapsed.
+
+---
+
+# 14. RETRY POLICY
+
+Retries must be state-specific.
+
+Do not implement:
+
+```python
+if anything_fails:
+    retry()
+```
+
+Instead:
+
+```text
+email not yet arrived
+→ poll
+
+page still loading
+→ wait
+
+temporary HTTP failure
+→ bounded backoff
+
+recoverable login error
+→ documented retry
+
+unknown UI
+→ screenshot + diagnostic
+
+security challenge
+→ stop
+```
+
+Every retry loop must be bounded.
+
+---
+
+# 15. DIAGNOSTICS
+
+On every unexpected state capture:
+
+```text
+screenshot
+current workflow state
+last action
+detected UI state
+retry count
+timestamp
+error/exception
+```
+
+Store run artifacts under a run-specific directory, for example:
+
+```text
+runs/
+    YYYY-MM-DD_HH-MM-SS/
+        events.json
+        run.log
+        pc/
+        android/
+```
+
+This should make a failed run reconstructable without reproducing it immediately.
+
+---
+
+# 16. EVENT LOG
+
+Record state transitions like:
+
+```json
+{
+  "from": "REPLIT_LOGIN",
+  "action": "click_continue_email",
+  "to": "EMAIL_ENTRY",
+  "duration_ms": 1430,
+  "attempt": 1
+}
+```
+
+This is more important than merely logging:
+
+```text
+Step 10 failed
+```
+
+The log should explain:
+
+```text
+what state we expected
+what we saw
+what action was attempted
+what happened afterward
+```
+
+---
+
+# 17. ANDROID STATE MACHINE
+
+Minimum states:
+
+```text
+HOME
+APP_DRAWER
+REPLIT_LOADING
+REPLIT_READY
+EMAIL_OPTION
+EMAIL_ENTRY
+PASSWORD_ENTRY
+LOGIN_PROCESSING
+LOGIN_RETRY
+WELCOME
+ONBOARDING
+PROFILE
+LOGOUT_CONFIRMATION
+LOGGED_OUT
+ANDROID_HOME
+COMPLETE
+SECURITY_CHALLENGE
+UNKNOWN
+```
+
+---
+
+# 18. ANDROID LOGIN BRANCHING
+
+Support both documented paths.
+
+### Keyboard already visible
+
+```text
+email
+→ Continue
+→ password
+```
+
+### Keyboard absent
+
+```text
+Continue with Email
+→ if necessary tap outside
+→ email field active
+→ keyboard visible
+→ email
+→ Continue
+```
+
+The detector should determine which state actually exists before acting.
+
+---
+
+# 19. SAFE ADB INPUT
+
+Create exactly one centralized ADB text-input helper.
+
+Every text entry must use it.
+
+Test special characters such as:
+
+```text
+@
++
+.
+_
+!
+```
+
+Do not assume the shell escaping is correct without testing on the actual target environment.
+
+---
+
+# 20. ANDROID LOGIN RETRY
+
+After password submission:
+
+```text
+wait
+```
+
+Possible:
+
+```text
+success
+```
+
+or:
+
+```text
+invalid username/password
+```
+
+If the latter is transient/recoverable according to the documented flow:
+
+```text
+click Login
+→ wait
+→ observe again
+```
+
+Do not loop forever.
+
+---
+
+# 21. ANDROID ONBOARDING
+
+Preserve:
+
+```text
+Welcome
+→ Continue
+→ wait
+→ Continue
+→ Continue
+→ Google Search
+→ Continue
+→ Developer
+→ Continue
+→ Skip
+```
+
+Each transition should observe the new state.
+
+---
+
+# 22. PROFILE / LOGOUT
+
+After Skip:
+
+```text
+profile flow
+→ wait
+→ profile picture
+→ wait
+→ scroll
+→ Logout
+→ confirmation
+→ LOG OUT
+```
+
+Do not assume the final Replit screen exists after logout.
+
+---
+
+# 23. ANDROID TERMINAL STATE
+
+The final state is a **device state**:
+
+```text
+LOG OUT
+→ Replit closes/terminates
+→ Replit is no longer foreground
+→ Android home screen
+→ COMPLETE
+```
+
+Do not require `classify_screen()` to identify the Android home screen as a Replit screen.
+
+Separate:
+
+```text
+application state
+```
+
+from:
+
+```text
+device state
+```
+
+---
+
+# 24. ACCESSIBILITY AND UI DETECTION
+
+Use semantic/accessibility locators when available:
+
+```text
+resource-id
+content-description
+aria-label
+stable semantic text
+```
+
+They should be preferred because they correspond to the application's accessible UI structure.
+
+However, do not assume that a locator is valid forever.
+
+Use layered detection:
+
+```text
+stable identifier
+→ accessibility/semantic locator
+→ structural locator
+→ coordinate fallback only where necessary
+```
+
+Document every coordinate fallback.
+
+---
+
+# 25. REFERENCE SCREENSHOTS
+
+For each important state, associate the implementation with the relevant screenshot from:
+
+```text
+attached_assets/
+```
+
+When debugging a step:
+
+1. Read the corresponding section of `steps.md`.
+2. Inspect its screenshot.
+3. Inspect the current implementation.
+4. Compare expected vs actual state.
+5. Modify only the necessary transition/detector.
+
+Do not rely solely on memory of the UI.
+
+---
+
+# 26. NO BLIND TIMING
+
+Avoid code such as:
+
+```python
+sleep(2)
+click(...)
+sleep(3)
+click(...)
+```
+
+when a real state can be observed.
+
+Preferred:
+
+```text
+click
+→ wait until element/state exists
+→ act
+```
+
+A small settling delay is acceptable when an application genuinely needs it, but it must remain secondary to state observation.
+
+---
+
+# 27. ENVIRONMENT CONSISTENCY
+
+The automation environment should be stable within a run.
+
+Do not introduce:
+
+```text
+IP rotation
+random proxy rotation
+fake hardware properties
+timezone spoofing
+device-memory spoofing
+navigator spoofing
+WebRTC manipulation
+TLS impersonation solely for detection avoidance
+```
+
+If a genuine API compatibility problem requires changing an HTTP client, make that decision based on the actual provider/API behavior rather than assuming that a browser-like fingerprint is required.
+
+---
+
+# 28. SECURITY / ANTI-ABUSE STATES
+
+Explicitly detect and stop on:
+
+```text
+CAPTCHA
+reCAPTCHA
+bot verification
+suspicious login
+account restriction
+rate-limit block
+device-integrity challenge
+additional identity verification
+```
+
+When encountered:
+
+```text
+STOP
+→ screenshot
+→ log state
+→ save diagnostic data
+→ return actionable error
+```
+
+Do not attempt to bypass the challenge.
+
+---
+
+# 29. RESUMABILITY
+
+Design checkpoints such as:
+
+```text
+EMAIL_READY
+ACCOUNT_CREATED
+EMAIL_VERIFIED
+ANDROID_LOGIN_COMPLETE
+ONBOARDING_COMPLETE
+LOGOUT_COMPLETE
+```
+
+A future implementation may use these to resume after a process crash.
+
+Do not mark a checkpoint complete without positive evidence.
+
+---
+
+# 30. TESTING
+
+Create/repair tests for:
+
+### Email
+
+```text
+custom email
+API mailbox
+API failure → temp-mail fallback
+temp-mail loading
+message detection
+Verify Now
+verification success
+verification window close
+```
+
+### PC
+
+```text
+popup handling
+account form
+loading
+verification
+unexpected state
+```
+
+### Android
+
+```text
+keyboard present
+keyboard absent
+email input
+password input
+login retry
+onboarding
+profile
+logout
+app termination
+Android home completion
+```
+
+### Infrastructure
+
+```text
+preflight
+imports
+ADB connectivity
+Patchright startup
+provider contracts
+state transitions
+```
+
+---
+
+# 31. Review Before Completion
+
+Before claiming the task is complete:
+
+1. Re-read `steps.md`.
+2. Inspect all relevant screenshots in `attached_assets/`.
+3. Compare each documented step with the implemented state machine.
+4. Verify no step was silently removed.
+5. Verify no loading state was converted into an assumed instant transition.
+6. Verify every retry is bounded.
+7. Verify every terminal state has positive evidence.
+8. Verify security challenges stop the run safely.
+9. Run the available tests.
+10. Clearly distinguish code defects from environment/setup limitations.
+
+Final output must include:
+
+```text
+Implemented
+Tests passed
+Tests unavailable
+Known limitations
+Remaining discrepancies
+```
+
+Do not claim success for anything that was not actually verified.
