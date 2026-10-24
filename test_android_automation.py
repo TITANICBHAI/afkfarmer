@@ -169,7 +169,7 @@ class AndroidScreenClassificationTests(unittest.TestCase):
         supplied_files = {
             path.name
             for path in Path("attached_assets").glob("*.jpg")
-            if re.match(r"^(7|8|9|1[0-9]|2[0-4])_", path.name)
+            if re.match(r"^(7|8|9|1[0-9]|19\.5|2[0-4])_", path.name)
         }
         self.assertEqual(referenced_files, supplied_files)
         self.assertEqual(

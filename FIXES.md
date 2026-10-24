@@ -1,8 +1,39 @@
 # Fix log
 
-Three passes. None of them changes how CAPTCHA, anti-bot, security-challenge or
+Four passes. None of them changes how CAPTCHA, anti-bot, security-challenge or
 rate-limit checkpoints are handled: they stay manual. The run pauses, a person
 completes the challenge, and nothing here solves, hides or bypasses one.
+
+## Pass 4 (2026-10-23): old account at the start, Notifications sheet, logout crash
+
+CAPTCHAs stay manual; nothing here touches that. Nothing in this pass was run live.
+
+| Request | What changed | Proven how |
+|---|---|---|
+| Replit opens signed in (`https://replit.com/~`, tilde): do not go straight to sign-in | The cause: the page was looked at only before navigating, and the redirect to `/~` comes a moment after the load, so the run jumped to the sign-up link. Now it waits for the redirect (`_settle_replit_home`, also when the page is still empty at `replit.com/`), and on `/~` goes to `settings/profile`, scrolls to **Request account deletion**, **Yes, Delete my Account**, waits for the logged-out home page, then signs up. A logged-out home page skips all of it. `EXISTING_SESSION_ACTION` (`delete` default / `signout` / `ask` / `keep`). | Scripted pages (`test_stale_account.py`, 25 tests) and a real-Chromium imitation of the pages (`SimulatedOldAccountTests`). The live settings page, its markup and Replit's timing were **not observed**. |
+| Never delete after the new account is verified | Deletion is only reachable from the start of `create_account` (a test reads the source), never after submit; the run's own address is never deleted; a resumed sign-up never auto-deletes. Because deleting is permanent I added a ledger (`created_accounts.json`): accounts this tool created are deleted without asking, any other account only after its e-mail is typed. | Tests, plus "undo one guard" checks: own-account, ledger and resumed guards each made a test fail. |
+| Android 19.5: Notifications sheet | `Not Now` is tapped only if the sheet shows (checked before the home screen, since a dump can include the screen behind it); `Turn On Notifications` is never tapped; nothing waits for it. | Simulated phone. The real sheet's node structure is assumed from the screenshot. |
+| Android 15/16: do not rewrite name / username | Only Continue is tapped. The field is typed into only if it is empty and Continue is disabled. The avatar is found by the initials Replit actually shows. | Simulated phone. |
+| Logout tap worked but the app crashed / the profile page is stuck | After the tap the run looks at the phone: not in the foreground gets Replit opened again (up to 2 times, waiting up to 45 looks), still-signed-in logs out again, a stuck profile page is scrolled up, an inconclusive result is trusted and saved as `logout_unconfirmed`. | Simulated phone (crash, slow relaunch, crash still logged in, stuck page, unrecognised screen, app never returns). Built from your description; never seen on a real phone. |
+| `attached_assets/` confusion | New pictures added as `step_2.1a` to `step_2.1e` and `19.5_...jpg`; `attached_assets/INDEX.md` explains the series. No existing file was renamed (code and tests use the names). | A test checks every supplied Android screenshot has a state reference. |
+
+Two real gaps were found by writing the tests and fixed: an empty `replit.com/` page counted as "logged out", so the late redirect was missed; and a damaged `created_accounts.json` of the wrong shape crashed instead of counting as empty.
+
+### Evidence status after pass 4
+
+| Evidence | Status |
+|---|---|
+| Unit tests with scripted page / phone doubles | Run: 363 tests, 0 failures (346 without a browser, 17 skipped) |
+| Real Chromium: simulated sites incl. old-account flow | Run, pass (`AFK_SIM_FULL=1`, 363 run, 0 skipped) |
+| "Undo one fix" checks | 7 made a test fail (relaunch, scroll-up, Not Now, late-redirect wait, own-account guard, ledger guard, resumed guard); the late-redirect check first survived and led to a new test |
+| Live replit.com, temp-mail.org, 1secmail | **Never run** |
+| Android device / the real Replit app | **Never run** |
+
+### Decisions left to you
+
+- `RUN_POST_ANDROID_STAGES` is still `False`: after the Android steps and the mailbox Delete the run ends; going back to Replit or the GitHub import is off.
+- `"delete"` is the default as asked. Set `EXISTING_SESSION_ACTION = "signout"` if you would rather never delete an account.
+- Your note began "done run test for now but"; I read it as "don't run tests" for the live flow and ran only offline tests.
 
 ## Pass 3 (2026-10-22): operator feedback
 

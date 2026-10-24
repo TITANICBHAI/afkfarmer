@@ -3,12 +3,14 @@
 ## Update 2026-10-19
 
 The sections below are the 2026-09 report and are kept as written (56 tests).
-The suite has since grown to **295 tests**; what changed and what each tool
+The suite has since grown to **363 tests**; what changed and what each tool
 proves is in [`FIXES.md`](FIXES.md).
 
-- PASS: `python -m unittest` without a browser: 295 run, 13 skipped (the
+- PASS: `python -m unittest` without a browser: 363 run, 17 skipped (the
   real-browser tests), 0 failures. With a Chromium-family browser and
-  `AFK_SIM_FULL=1`: 295 run, 0 skipped, 0 failures (pass 3, 2026-10-22).
+  `AFK_SIM_FULL=1`: 363 run, 0 skipped, 0 failures (pass 4, 2026-10-23). Set
+  `AFK_ACCOUNT_LEDGER` to a temporary file when running the suite by hand so that
+  no `created_accounts.json` is written into the project.
 - SIMULATED (real headless Chromium): the PC flow (temp-mail.org address, Replit
   sign-up, mailbox message, verification link) against local imitations of the
   two sites. Challenges are imitated and cleared by the test before ENTER is

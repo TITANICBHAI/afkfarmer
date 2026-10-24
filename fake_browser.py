@@ -197,7 +197,8 @@ class FakeReplitSignup:
                     finish (None: never); the spinner shows no text meanwhile
     validation_error  a line shown instead of "Email is available"/
                     "Password is valid" once the checks finish
-    outcome         what submitting does: "verify", "error" or "nothing"
+    outcome         what submitting does: "verify", "workspace" (the new account
+                    is signed in at /~), "error" or "nothing"
     challenge       None, "text" (words in the page) or "frame" (an iframe)
     challenge_when  "submit" (appears after the click), "fill" or "load"
     solvable        whether the operator's manual solve works
@@ -214,8 +215,15 @@ class FakeReplitSignup:
     start_state     where the tab is when the run looks at it: "blank" (default),
                     "landing", "chooser", "form", "result" (check-your-email) or
                     "authenticated" (already logged in)
-    logged_in       the site keeps a login: loading it shows the workspace until
-                    the cookies are cleared (``FakeContext.clear_cookies``)
+    logged_in       the site keeps a login: loading it shows the workspace (at
+                    ``/~``) until the cookies are cleared or the account is deleted
+    settings_email / settings_username   what Settings > Profile shows
+    logout_delay_s  seconds from "Yes, Delete my Account" until Replit is back on
+                    the logged-out home page
+    logout_lingers  True: confirming the deletion never logs out by itself
+    delete_button   False: the settings page has no "Request account deletion"
+    home_redirect_s seconds a logged-in visitor of replit.com sees an empty page
+                    before Replit moves on to the workspace at ``/~``
     """
 
     LANDING = (
@@ -251,6 +259,12 @@ class FakeReplitSignup:
         popup: Optional[str] = None,
         start_state: str = "blank",
         logged_in: bool = False,
+        settings_email: str = "old.account@example.test",
+        settings_username: str = "oldaccount",
+        logout_delay_s: float = 3.0,
+        logout_lingers: bool = False,
+        delete_button: bool = True,
+        home_redirect_s: float = 0.0,
     ) -> None:
         # Imported here so this module stays importable without patchright.
         from pc_automation import PCAutomation
@@ -274,6 +288,15 @@ class FakeReplitSignup:
 
         self.logged_in = logged_in or start_state == "authenticated"
         self.url = "about:blank" if start_state == "blank" else "https://replit.com/"
+        if start_state == "authenticated":
+            self.url = "https://replit.com/~"
+        self.settings_email = settings_email
+        self.settings_username = settings_username
+        self.home_redirect_s = home_redirect_s
+        self.logout_delay_s = logout_delay_s
+        self.logout_lingers = logout_lingers
+        self.logout_at: Optional[float] = None
+        self.deleted = False
         self.state = start_state  # blank | landing | chooser | form | result | authenticated
         self.navigated_at = clock.now
         self.filled_at: Optional[float] = None
@@ -345,8 +368,20 @@ class FakeReplitSignup:
         )
         self.dialog = Node(
             "dialog",
-            visible=lambda: self.state in {"chooser", "form", "result"},
+            visible=lambda: self.state in {"chooser", "form", "result", "delete_dialog"},
             text=self.dialog_text,
+        )
+        self.delete_request = Node(
+            "request_account_deletion",
+            visible=lambda: self.state == "settings" and delete_button,
+            present=lambda: self.state == "settings" and delete_button,
+            on_click=self._on_request_deletion,
+        )
+        self.delete_confirm = Node(
+            "yes_delete_my_account",
+            visible=lambda: self.state == "delete_dialog",
+            present=lambda: self.state == "delete_dialog",
+            on_click=self._on_confirm_deletion,
         )
         self.body = Node("body", text=self.body_text)
 
@@ -363,8 +398,17 @@ class FakeReplitSignup:
         self.url = url
         self.navigated_at = self.clock.now
         self.challenge_active = False
-        if self.logged_in:
-            self.state = "authenticated"
+        if url.startswith("https://replit.com/settings"):
+            if self.logged_in:
+                self.state = "settings"
+            else:
+                self.state, self.url = "login", "https://replit.com/login"
+        elif self.logged_in:
+            if self.home_redirect_s > 0:
+                self.state = "redirecting"  # nothing on screen yet, still at replit.com/
+            else:
+                self.state = "authenticated"
+                self.url = "https://replit.com/~"
         elif url.startswith(self.DEEP_LINK):
             self.state = "chooser" if self.deep_link == "chooser" else "landing"
         else:
@@ -377,6 +421,18 @@ class FakeReplitSignup:
 
     def wait_for_timeout(self, milliseconds: float) -> None:
         self.clock.advance_ms(milliseconds)
+        if (
+            self.state == "redirecting"
+            and self.clock.now - self.navigated_at >= self.home_redirect_s
+        ):
+            self.state, self.url = "authenticated", "https://replit.com/~"
+        if self.logout_at is not None and self.clock.now >= self.logout_at:
+            self.logout_at = None
+            self.logged_in = False
+            self.deleted = True
+            self.state, self.url = "landing", "https://replit.com/"
+            self.navigated_at = self.clock.now
+            self._log("logged out after the deletion")
         if self.rearm_at is not None and self.clock.now >= self.rearm_at:
             self.rearm_at = None
             self.show_challenge("challenge returned")
@@ -402,6 +458,10 @@ class FakeReplitSignup:
             "[role='dialog'] button[aria-label='Close']",
         ):
             return self.popup_close
+        if selector in pc.REQUEST_DELETION_SELECTORS:
+            return self.delete_request
+        if selector in pc.CONFIRM_DELETION_SELECTORS:
+            return self.delete_confirm
         if selector in pc.CAPTCHA_SELECTORS:
             return self.challenge_frame
         if selector in pc.VALIDATION_SELECTORS:
@@ -498,6 +558,14 @@ class FakeReplitSignup:
             ]
         elif self.state == "result":
             lines = ["Verify your email to start building"]
+        elif self.state == "delete_dialog":
+            lines = [
+                "Delete Account",
+                "All your hosted Projects and content will be taken down within 24 hours.",
+                "This cannot be undone.",
+                "Cancel",
+                "Yes, Delete my Account",
+            ]
         else:
             lines = []
         if self.challenge_active and self.challenge == "text":
@@ -505,9 +573,26 @@ class FakeReplitSignup:
         lines.append(self.NOTICE)
         return "\n".join(lines)
 
+    def settings_text(self) -> str:
+        return (
+            "Back to app\nPersonal workspace\nProfile\n"
+            f"@{self.settings_username}\nFirst name\nLast name\nLocation\nBio\n"
+            f"Your email\n{self.settings_email}\nEdit\nYour password\nEdit\n"
+            "Sign out of all devices\nDelete account\n"
+            + ("Request account deletion" if self.delete_request.is_visible() or self.state == "delete_dialog" else "")
+        )
+
     def body_text(self) -> str:
+        if self.state == "redirecting":
+            return ""
         if self.state == "authenticated":
             return "Personal workspace\nWhat are we working on today?"
+        if self.state == "settings":
+            return self.settings_text()
+        if self.state == "delete_dialog":
+            return self.settings_text() + "\n" + self.dialog_text()
+        if self.state == "login":
+            return "Log in to Replit"
         parts = [self.LANDING]
         if self.state in {"chooser", "form", "result"}:
             parts.append(self.dialog_text())
@@ -533,6 +618,15 @@ class FakeReplitSignup:
     def _on_email_option(self) -> None:
         self.state = "form"
         self._log("form opened")
+
+    def _on_request_deletion(self) -> None:
+        self.state = "delete_dialog"
+        self._log("deletion dialog opened")
+
+    def _on_confirm_deletion(self) -> None:
+        self._log("deletion confirmed")
+        if not self.logout_lingers:
+            self.logout_at = self.clock.now + self.logout_delay_s
 
     def _on_popup_close(self) -> None:
         self.popup_closed = True
@@ -561,6 +655,10 @@ class FakeReplitSignup:
         if self.outcome == "verify":
             self.state = "result"
             self._log("result shown")
+        elif self.outcome == "workspace":
+            # The brand-new account is signed in straight away (at /~).
+            self.state, self.url, self.logged_in = "authenticated", "https://replit.com/~", True
+            self._log("new account signed in")
         elif self.outcome == "error":
             self.error_line = "Something went wrong. Please try again."
         # "nothing": the page just sits there.

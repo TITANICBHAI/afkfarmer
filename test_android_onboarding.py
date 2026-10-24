@@ -84,7 +84,8 @@ class FakeReplitDevice(AndroidAutomation):
                  already_onboarded=False, fields=None, expected_email=EMAIL,
                  email_sheet=None, unreadable_fields=False, multi_window=True,
                  sheet_top=SHEET_TOP, scroll_gain=0.12, ignore_slow_swipes=False,
-                 background_after_taps=None):
+                 background_after_taps=None, prefill_name=True, notifications_prompt=False,
+                 after_logout="normal", relaunch_ticks=0, relaunch_works=True):
         """``email_sheet`` reproduces attached_assets/6 and 7: after "Continue with
         Email" the login sheet stays on top of the e-mail form and swallows the
         first tap, like a modal scrim. "keyboard_visible" keeps the field focused
@@ -100,6 +101,20 @@ class FakeReplitDevice(AndroidAutomation):
         swipe; ``ignore_slow_swipes`` makes swipes of 600 ms or more do nothing;
         ``background_after_taps`` sends the app to the background after that many
         taps (an incoming call, a stray Home press).
+
+        Replit fills the first name in from the e-mail (attached_assets/15), so
+        ``prefill_name`` shows ``display_name`` on the name screen;
+        ``prefill_name=False`` is the edge case of an empty field.
+        ``notifications_prompt`` shows the optional Notifications sheet
+        (attached_assets/19.5) after the plan screen's Skip.
+
+        ``after_logout`` is what the phone does after the final "Log Out" tap:
+        "normal" shows the login screen, "crash" falls back to the Android home
+        screen (the app comes back logged out), "crash_logged_in" does the same
+        but the logout never happened, "stuck_profile" leaves the profile page on
+        screen until it is scrolled up, "never" shows a screen nothing
+        recognises. ``relaunch_ticks`` is how many looks the app needs to load
+        after it is opened again; ``relaunch_works=False`` never brings it back.
         """
 
         super().__init__(device_id="FAKE")
@@ -126,6 +141,18 @@ class FakeReplitDevice(AndroidAutomation):
         self.already_onboarded = already_onboarded
         self.fields = {"email": "", "password": "", "first_name": ""}
         self.fields.update(fields or {})
+        self.prefill_name = prefill_name
+        self.notifications_prompt = notifications_prompt
+        self.after_logout = after_logout
+        self.relaunch_ticks = relaunch_ticks
+        self.relaunch_works = relaunch_works
+        self.crashed = False
+        self.crash_return = "initial_login"
+        self.splash_ticks = 0
+        self.stuck_profile = False
+        self.opened = 0
+        if start_screen == "name":
+            self._prefill()
         self.focus = None
         self.scrolled = False
         self.source_selected = False
@@ -136,6 +163,10 @@ class FakeReplitDevice(AndroidAutomation):
         self.evidence = []
 
     # ---- rendering -------------------------------------------------------
+
+    def _prefill(self):
+        if self.prefill_name and not self.fields["first_name"]:
+            self.fields["first_name"] = self.display_name
 
     def _avatar(self):
         return (self.fields["first_name"] or self.display_name)[:2].upper()
@@ -195,10 +226,27 @@ class FakeReplitDevice(AndroidAutomation):
         elif screen == "welcome_onboarding":
             text("Welcome to Replit. Let's get started.", 0)
             button("Continue", "welcome_continue", 5)
+        elif screen == "splash":
+            _node(root, "", "android.widget.ProgressBar", _row(4))
+        elif screen == "notifications":
+            if self.multi_window:
+                # The home screen stays in the dump behind the bottom sheet.
+                text("What are we working on today?", 3)
+                home = _node(root, "", "android.view.ViewGroup", "[900,100][1000,200]",
+                             True, **{"fake-action": "open_profile", "fake-layer": "home"})
+                _node(home, self._avatar(), bounds="[920,120][980,180]")
+            text("Notifications", 6)
+            text("Receive important updates about your Projects and your account. "
+                 "Notifications can be turned off from Account settings at any time.", 7)
+            button("Turn On Notifications", "notifications_on", 8)
+            button("Not Now", "notifications_not_now", 9)
         elif screen == "name":
             text("What's your name?", 0)
             field("first_name", "First name", 1)
-            button("Continue", "name_continue", 5)
+            # Like the real form, Continue is disabled while the name is empty.
+            _node(root, "Continue", "android.widget.Button", _row(5), True,
+                  enabled="true" if self.fields["first_name"] else "false",
+                  **{"fake-action": "name_continue"})
         elif screen == "username":
             text("Let's create a username", 0)
             button("Continue", "username_continue", 5)
@@ -265,6 +313,11 @@ class FakeReplitDevice(AndroidAutomation):
                 _node(row, label, bounds=clipped)
 
     def dump_ui(self):
+        if self.screen == "splash":
+            if self.splash_ticks > 0:
+                self.splash_ticks -= 1
+            else:
+                self.screen = self.crash_return
         if self.backgrounded:
             root = ET.Element("hierarchy")
             _node(root, "Home screen", bounds=_row(0))
@@ -291,6 +344,9 @@ class FakeReplitDevice(AndroidAutomation):
             left, top, right, bottom = aa.parse_bounds(node.get("bounds"))
             if left <= x <= right and top <= y <= bottom and node.get("clickable") == "true":
                 hit = node
+        if self.screen == "notifications" and hit is not None and hit.get("fake-layer") == "home":
+            self.taps.append("scrim")  # the sheet is modal: nothing behind it reacts
+            return True
         if (
             self.screen == "profile_menu"
             and hit is not None
@@ -343,6 +399,12 @@ class FakeReplitDevice(AndroidAutomation):
         self.swipes.append((x1, y1, x2, y2, duration_ms))
         if self.screen != "profile_menu":
             return True
+        if self.stuck_profile:
+            # Replit's stuck profile page: only dragging it back down frees it.
+            if y2 > y1:
+                self.stuck_profile = False
+                self.screen = "initial_login"
+            return True
         if y1 < self.sheet_top:
             self.screen = "main"  # a drag that starts on the scrim dismisses the sheet
             return True
@@ -370,6 +432,7 @@ class FakeReplitDevice(AndroidAutomation):
             self.screen = "login_processing"
         elif screen == "welcome_onboarding" and action == "welcome_continue":
             self.screen = "name"
+            self._prefill()
         elif screen == "name" and action == "name_continue":
             if self.fields["first_name"] == "Mipok" or self.fields["first_name"]:
                 self.screen = "username"
@@ -386,6 +449,8 @@ class FakeReplitDevice(AndroidAutomation):
             if self.role_selected:
                 self.screen = "plan"
         elif screen == "plan" and action == "skip_plan":
+            self.screen = "notifications" if self.notifications_prompt else "main"
+        elif screen == "notifications" and action in {"notifications_not_now", "notifications_on"}:
             self.screen = "main"
         elif screen == "main" and action == "open_profile":
             self.screen = "edit_profile_page" if self.wrong_first_open else "profile_menu"
@@ -400,7 +465,22 @@ class FakeReplitDevice(AndroidAutomation):
             if self.ignore_confirm > 0:
                 self.ignore_confirm -= 1
             else:
-                self.screen = "initial_login"  # logged out; the app is still running
+                self._finish_logout()
+
+    def _finish_logout(self):
+        mode, self.after_logout = self.after_logout, "normal"
+        if mode in {"crash", "crash_logged_in"}:
+            self.crashed = True
+            self.crash_return = "main" if mode == "crash_logged_in" else "initial_login"
+            self.app_running = False
+            self.screen = "launcher"
+        elif mode == "stuck_profile":
+            self.stuck_profile = True
+            self.screen = "profile_menu"
+        elif mode == "never":
+            self.screen = "mystery"
+        else:
+            self.screen = "initial_login"  # logged out; the app is still running
 
     # ---- device state ----------------------------------------------------
 
@@ -408,11 +488,18 @@ class FakeReplitDevice(AndroidAutomation):
         return True
 
     def open_app(self, package_name):
-        self.opened = getattr(self, "opened", 0) + 1
+        self.opened += 1
         self.backgrounded = False
+        if self.crashed and not self.relaunch_works:
+            return True  # the app never comes back
         if not self.app_running:
             self.app_running = True
-            self.screen = "initial_login"
+            if self.crashed:
+                self.crashed = False
+                self.splash_ticks = self.relaunch_ticks
+                self.screen = "splash"
+            else:
+                self.screen = "initial_login"
         return True
 
     def close_app(self, package_name):

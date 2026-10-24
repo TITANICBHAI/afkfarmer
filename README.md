@@ -36,7 +36,7 @@ The state-driven offline implementation is verified, including provider
 selection and fallback, atomic checkpoints, PC registration classification,
 Android UI-state transitions, safe text input, session synchronization after
 Android completion, and safe GitHub-import failure handling. The combined
-offline test suite is 295 tests and passes. Part of it runs the PC flow in a
+offline test suite is 363 tests and passes. Part of it runs the PC flow in a
 real headless Chromium against local imitations of replit.com and
 temp-mail.org (`site_simulator.py`, `test_site_simulation.py`); those pages are
 built from the screenshots, so they prove the logic and the order of actions,
@@ -140,7 +140,7 @@ export LD_LIBRARY_PATH="$(dirname "$LIBSTDCPP")${LD_LIBRARY_PATH:+:$LD_LIBRARY_P
 python -m unittest -v
 ```
 
-The full suite currently contains 295 tests. A direct `python -m unittest -v`
+The full suite currently contains 363 tests (346 without a browser; 17 more need a Chromium-family browser). A direct `python -m unittest -v`
 without that library path may fail before tests start with a
 `libstdc++.so.6` import error; that is a runtime setup issue, not a test
 assertion failure.
@@ -434,7 +434,7 @@ import after Android.
 #### Settings added in pass 3 (`config.py`)
 
 - `AUTO_DETECT_STAGE = True`: at start the run looks at the Replit tab and the phone and continues from what is visibly done (never moves backwards, never clicks while looking). `False` trusts `state.json` only.
-- `EXISTING_SESSION_ACTION = "ask"` (also `AFK_EXISTING_SESSION_ACTION`): what to do when a Replit login is already open at sign-up. Your own automation profile is signed out (replit.com cookies only); a browser you attached yourself is never signed out by the script, it asks you.
+- `EXISTING_SESSION_ACTION = "delete"` (also `AFK_EXISTING_SESSION_ACTION`): what to do when Replit opens already signed in (at `https://replit.com/~`, a tilde) at the start of sign-up. `"delete"` (default) goes to `https://replit.com/settings/profile`, scrolls to **Request account deletion**, clicks **Yes, Delete my Account** and waits for the logged-out home page before signing up (`attached_assets/step_2.1a` to `step_2.1e`). `"signout"` only ends the login (your own automation profile only; replit.com cookies); `"ask"` asks every time; `"keep"` leaves the login alone. Deleting an account is permanent, so: it only ever happens at the very start, never after the new account was submitted or verified; the account whose e-mail is this run's address is never deleted; an account this tool created itself (addresses are listed in `created_accounts.json`) is deleted without asking, any other account only after you type its e-mail; a resumed sign-up never deletes by itself. If you would rather never delete, set `"signout"` or `"ask"`.
 - `DELETE_TEMP_MAIL = "after_android"`: click the temp-mail page's Delete button after the phone part (`"after_verify"` = right after verification, `"never"`). Only done when the page shows this run's own address; a failure only warns.
 - `ALERT_SOUND = True` (`AFK_NO_SOUND=1` to silence): beep and bring the window forward when a CAPTCHA or other challenge needs you; the run continues by itself once it is gone, or press ENTER.
 - Failed Android steps now save `screenshots/android_*.xml` (the UI tree) next to the PNG; send these when reporting a phone problem.
@@ -560,6 +560,7 @@ The implementation may produce:
 - `state.json`
 - `auth_state.json`
 - `browser_profile/` (the automation browser's saved profile: cookies of Replit and the mailbox; keep it local)
+- `created_accounts.json` (the e-mail addresses this tool signed Replit accounts up with, no passwords; it is what lets the next run delete an old account without asking)
 - `android_actions.log`
 - `ui.xml`
 - screenshots under `screenshots/`

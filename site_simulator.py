@@ -21,6 +21,11 @@ real PCAutomation code can be exercised in a real Chromium:
   buttons, an inbox that fills after a delay (div rows or table rows) and the
   message body in an iframe (or inline) with a ``target=_blank`` "Verify Now"
   link and the same link printed as text;
+* an optional OLD login (``old_account``): replit.com first shows an empty page and
+  moves on to the workspace at ``/~`` a moment later; Settings > Profile is a tall
+  page whose "Request account deletion" button sits at the very bottom, opens a
+  "Delete Account" dialog, and "Yes, Delete my Account" ends the login and sends
+  the browser back to the logged-out home page;
 * a single-use ``/action-code`` page: "Verifying email", then "Success! This
   window will close automatically...", and a "link already used" page on any
   second visit.
@@ -67,6 +72,9 @@ DEFAULTS: dict[str, Any] = {
     "footer_email": False,       # extra email field earlier in the DOM than the modal
     "email_type": "email",       # input type for the email field
     "show_notice": True,         # reCAPTCHA legal notice in modals
+    "old_account": "",           # e-mail already signed in at the start ("" = nobody)
+    "redirect_ms": 700,          # signed-in visitor of / moves on to /~ after this long
+    "delete_ms": 800,            # from "Yes, Delete my Account" to the logged-out home page
     # mailbox page
     "mail_delay_ms": 2500,       # verification mail arrives this long after signup
     "message_view": "iframe",    # iframe | inline
@@ -119,6 +127,7 @@ class Sim:
         self.current: Optional[dict] = None        # the mailbox the page shows
         self.codes: dict[str, dict] = {}           # oobCode -> {email, uses}
         self.captcha_solved = False
+        self.session: Optional[str] = self.cfg["old_account"] or None
 
     # ------------------------------------------------------------ bookkeeping
     def log(self, kind: str, **data: Any) -> None:
@@ -211,6 +220,25 @@ class Sim:
 
     # ------------------------------------------------------------------ replit
     def replit_get(self, h: _Exchange, path: str, query: dict) -> None:
+        if path == "/~":
+            if self.session:
+                self.log("workspace_page", email=self.session)
+                return h._send(200, WORKSPACE_PAGE)
+            return h._send(302, "", headers={"Location": "https://replit.com/"})
+        if path == "/settings/profile":
+            if not self.session:
+                return h._send(302, "", headers={"Location": "https://replit.com/login"})
+            self.log("settings_page", email=self.session)
+            page = SETTINGS_PAGE.replace("__EMAIL__", self.session).replace(
+                "__USER__", re.sub(r"[^a-z0-9]", "", self.session.split("@")[0].lower()) or "user"
+            ).replace("__DELETE_MS__", str(int(self.cfg["delete_ms"])))
+            return h._send(200, page)
+        if path == "/login":
+            return h._send(200, "<!doctype html><title>Replit</title><h1>Log in to Replit</h1>"
+                           "<input type=email placeholder=Email><input type=password placeholder=Password>")
+        if path == "/" and self.session:
+            self.log("signed_in_home_load")
+            return h._send(200, SIGNED_IN_HOME.replace("__MS__", str(int(self.cfg["redirect_ms"]))))
         if path == "/":
             self.log("replit_page_load", authModal=(query.get("authModal") or [""])[0])
             return h._send(200, REPLIT_PAGE.replace("__CFG__", json.dumps(self.cfg)))
@@ -262,6 +290,10 @@ class Sim:
                 return h._json({"status": "challenge", "mode": self.cfg["captcha"]})
             self.deliver_verification_mail(email)
             return h._json({"status": "ok"})
+        if path == "/api/delete-account":
+            self.log("account_deleted", email=self.session)
+            self.session = None
+            return h._json({"ok": True})
         if path == "/api/ui-event":
             self.log("replit_ui", **{k: v for k, v in body.items() if k in ("event", "id")})
             return h._json({"ok": True})
@@ -384,6 +416,34 @@ main h1{font-size:44px;margin:0 0 10px}
 footer{padding:30px 60px;text-align:left}
 .grecaptcha-badge{position:fixed;right:0;bottom:70px;width:256px;height:60px;background:#fff;border:1px solid #ccc;z-index:10}
 """
+
+SIGNED_IN_HOME = """<!doctype html><html><head><meta charset="utf-8"><title>Replit</title></head>
+<body><script>setTimeout(function () { location.replace('/~'); }, __MS__);</script></body></html>"""
+
+WORKSPACE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Replit</title></head>
+<body style="font:16px sans-serif"><h1>Personal workspace</h1><p>What are we working on today?</p>
+<a href="/settings/profile">Settings</a></body></html>"""
+
+SETTINGS_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Replit</title>
+<style>body{font:16px sans-serif;margin:0 40px} .filler{height:2600px}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none}
+.overlay.open{display:flex;align-items:center;justify-content:center}
+.dialog{background:#fff;padding:24px;width:420px}</style></head><body>
+<p>Back to app</p><h1>Profile</h1><p>@__USER__</p>
+<p>First name</p><p>Last name</p><p>Location</p><p>Bio</p>
+<p>Your email</p><p>__EMAIL__</p><button>Edit</button>
+<p>Your password</p><button>Edit</button>
+<div class="filler"></div>
+<h2>Delete account</h2>
+<button id="req" onclick="document.getElementById('dlg').classList.add('open')">Request account deletion</button>
+<div class="overlay" id="dlg"><div class="dialog" role="dialog"><h3>Delete Account</h3>
+<p>All your hosted Projects and content will be taken down within 24 hours.</p>
+<button onclick="document.getElementById('dlg').classList.remove('open')">Cancel</button>
+<button id="yes" onclick="yes()">Yes, Delete my Account</button></div></div>
+<script>
+function yes(){fetch('/api/delete-account',{method:'POST',body:'{}'}).then(function(){
+  setTimeout(function(){location.href='/';}, __DELETE_MS__);});}
+</script></body></html>"""
 
 REPLIT_PAGE = (
     """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Replit</title>

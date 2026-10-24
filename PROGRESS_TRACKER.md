@@ -21,7 +21,7 @@ This tracker is mandatory for every agent working on this repository.
 - **Next action:** Run explicitly authorized PC and Android smoke tests in an
   environment where the browser provider is not blocked; do not bypass provider
   protections.
-- **Last updated:** 2026-10-22 (pass 3: operator-feedback changes verified offline and in local Chromium simulations only; see `FIXES.md`. No live evidence yet.)
+- **Last updated:** 2026-10-23 (pass 4: old-account deletion at the start, Notifications sheet, name/username left alone and logout-crash recovery verified offline and in local Chromium simulations only; see `FIXES.md`. Earlier: pass 3: operator-feedback changes verified offline and in local Chromium simulations only; see `FIXES.md`. No live evidence yet.)
 - **Blockers:** No Android device run has been authorized or performed. The PC
   runtime wrapper can launch Playwright, but the live `temp-mail.org` page
   returns a Cloudflare block page. No bypass is permitted.

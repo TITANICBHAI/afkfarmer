@@ -137,6 +137,30 @@ Use locator-driven waits for:
 Pause for a human if a CAPTCHA or anti-bot challenge is detected. Never retry
 the challenge automatically.
 
+### Old login at the start (pass 4)
+
+`create_account()` looks at the Replit tab before doing anything. Replit sends a
+signed-in visitor of `replit.com` on to `https://replit.com/~` (tilde) a moment after
+the page loads, so after opening the home page the code waits for that redirect
+(`_settle_replit_home`) instead of searching a workspace for "Create account".
+When the workspace shows, an old account is still logged in and
+`_handle_existing_session()` runs, controlled by `EXISTING_SESSION_ACTION`:
+
+| Value | Behaviour |
+|---|---|
+| `"delete"` (default) | Settings > Profile > "Request account deletion" > "Yes, Delete my Account", then wait for the logged-out home page, then sign up |
+| `"signout"` | clear the Replit cookies (only in the tool's own browser profile) |
+| `"ask"` | ask every time |
+| `"keep"` | leave the login alone |
+
+Guards, because the deletion is permanent: it is only reachable from the start of
+`create_account` (a test reads the source to check that), never after the new
+account was submitted; the account whose e-mail equals the current run's address is
+never deleted; an account the tool created itself (`account_ledger`, file
+`created_accounts.json`) is deleted without asking, any other account only after its
+e-mail is typed; a resumed sign-up never deletes by itself. Reference screenshots:
+`attached_assets/step_2.1a` to `step_2.1e`.
+
 ### Email verification
 
 The visible flow is:
@@ -173,13 +197,25 @@ The supplied screenshots are the visual reference set:
 | Google search source | `attached_assets/17_1790062961802.jpg` |
 | Developer role | `attached_assets/18_1790062961803.jpg` |
 | Subscription screen with Skip | `attached_assets/19_1790062961803.jpg` |
+| Notifications sheet (optional; tap **Not Now**) | `attached_assets/19.5_1790062961803.jpg` |
 | Main interface | `attached_assets/20_1790062961804.jpg` |
 | Profile menu before scrolling | `attached_assets/21_1790062961805.jpg` |
 | Profile menu with Log Out visible | `attached_assets/22_1790062961806.jpg` |
 | Logout confirmation | `attached_assets/23_1790062961807.jpg` |
 | Post-close home screen | `attached_assets/24_1790062961808.jpg` |
 
-The earlier PNG references cover the PC registration and mailbox states.
+The earlier PNG references cover the PC registration and mailbox states. The
+optional old-account branch at the start has its own set:
+
+| State | Reference |
+|---|---|
+| Replit opens signed in at `https://replit.com/~` | `attached_assets/step_2.1a_replit_existing_session_workspace.png` |
+| Settings > Profile | `attached_assets/step_2.1b_replit_profile_settings.png` |
+| "Request account deletion" at the bottom | `attached_assets/step_2.1c_replit_request_account_deletion.png` |
+| "Delete Account" dialog | `attached_assets/step_2.1d_replit_confirm_account_deletion.png` |
+| Logged-out home page again | `attached_assets/step_2.1e_replit_logged_out_home.png` |
+
+`attached_assets/INDEX.md` explains which series each file belongs to.
 
 ### Android state transitions
 
@@ -194,15 +230,16 @@ The earlier PNG references cover the PC registration and mailbox states.
 | Login | Spinner resolves to success or known invalid-credentials banner |
 | Retry Login | Banner disappears and welcome state becomes reachable |
 | Welcome Continue | Name screen is visible |
-| Name Continue | Username screen is visible |
-| Username Continue | Source screen is visible |
+| Name Continue | Username screen is visible (the name is left as Replit filled it in) |
+| Username Continue | Source screen is visible (the username is left as it is) |
 | Google search Continue | Role screen is visible |
 | Developer Continue | Main/subscription onboarding is visible |
 | Skip | Expected next onboarding/main screen is visible |
+| Not Now (only if the Notifications sheet shows) | Main screen is visible; "Turn On Notifications" is never tapped |
 | Open profile | Profile menu is visible |
 | Scroll | Log Out is visible |
 | Log Out | Confirmation dialog is visible |
-| Confirm Log Out | Logged-out state is visible |
+| Confirm Log Out | Logged-out state is visible. If the app crashed to the Android home screen it is opened again and given time to load; a profile page stuck on screen is scrolled up; an inconclusive result is trusted and saved as `logout_unconfirmed` |
 | Force-stop | `com.replit.app` is not foreground |
 
 Keyboard visibility must be observed, not inferred from a fixed Y coordinate.

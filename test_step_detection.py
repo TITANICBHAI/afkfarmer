@@ -27,6 +27,15 @@ class ClassifyReplitPageTests(unittest.TestCase):
             (dict(url="https://replit.com/login", text=""), "login"),
             (dict(url="https://replit.com/", text="Verify your email to start building"), "check_email"),
             (dict(url="https://replit.com/", text="What are we working on today?"), "authenticated"),
+            (dict(url="https://replit.com/~", text=""), "authenticated"),
+            (dict(url="https://replit.com/~/", text="Home"), "authenticated"),
+            # A logged-out control on the page outranks a stale /~ address.
+            (dict(url="https://replit.com/~", text="Log in", create_button=True), "landing"),
+            (dict(url="https://replit.com/~", text="", fields=True), "signup_form"),
+            (dict(url="https://replit.com/~", text="Continue with Email", chooser=True), "signup_chooser"),
+            # The page being created right now is never an "old" login.
+            (dict(url="https://replit.com/~", text="Verify your email to start building"), "check_email"),
+            (dict(url="https://replit.com/-", text=""), "other"),
             (dict(url="https://replit.com/", text="x", challenge=True), "challenge"),
             (dict(url="https://replit.com/", text="Please complete the CAPTCHA"), "challenge"),
         ]
@@ -53,7 +62,10 @@ class InferPositionTests(unittest.TestCase):
         self.assertEqual((position.stage, position.moved), ("VERIFY", False))
 
     def test_a_phone_past_login_means_the_account_exists(self):
-        for screen in ("welcome_onboarding", "name", "plan", "main", "profile_menu", "logout_dialog"):
+        for screen in (
+            "welcome_onboarding", "name", "plan", "notifications_prompt", "main",
+            "profile_menu", "logout_dialog",
+        ):
             with self.subTest(screen=screen):
                 position = stage_detect.infer_position(
                     "SIGNUP", self.STATE, phone_state=screen
@@ -113,6 +125,10 @@ class SignupPositionTests(unittest.TestCase):
     """create_account() looks at the open Replit tab before it does anything."""
 
     EMAIL = "mail@example.test"
+    # The default is to delete an old account (see test_stale_account.py); these
+    # tests cover the other settings, which stay available.
+    SIGNOUT = {"AFK_EXISTING_SESSION_ACTION": "signout"}
+    ASK = {"AFK_EXISTING_SESSION_ACTION": "ask"}
 
     def run_signup(self, *, answers=(), own_profile=False, resumed=False,
                    clearing_works=True, env=None, on_input=None, **page_options):
@@ -178,21 +194,26 @@ class SignupPositionTests(unittest.TestCase):
         self.assertEqual(page.goto_urls[0], "https://replit.com/")
 
     def test_an_old_login_in_the_own_profile_is_signed_out_without_asking(self):
-        ok, page, pc, prompts = self.run_signup(start_state="authenticated", own_profile=True)
+        ok, page, pc, prompts = self.run_signup(
+            start_state="authenticated", own_profile=True, env=self.SIGNOUT
+        )
         self.assertTrue(ok)
         self.assertEqual(prompts, [])
         self.assertEqual(len(pc.context.cleared), 1)
         self.assertEqual(page.email.value, self.EMAIL)  # the new account was then created
 
     def test_only_replit_cookies_are_cleared(self):
-        _ok, _page, pc, _prompts = self.run_signup(start_state="authenticated", own_profile=True)
+        _ok, _page, pc, _prompts = self.run_signup(
+            start_state="authenticated", own_profile=True, env=self.SIGNOUT
+        )
         domain = pc.context.cleared[0]["domain"]
         self.assertTrue(domain.search("replit.com"))
         self.assertFalse(domain.search("temp-mail.org"))
 
     def test_a_login_that_cannot_be_ended_fails_instead_of_signing_up_on_top_of_it(self):
         ok, page, pc, _prompts = self.run_signup(
-            start_state="authenticated", own_profile=True, clearing_works=False
+            start_state="authenticated", own_profile=True, clearing_works=False,
+            env=self.SIGNOUT,
         )
         self.assertFalse(ok)
         self.assertEqual(page.email.value, "")
@@ -218,7 +239,7 @@ class SignupPositionTests(unittest.TestCase):
         # Not our profile: the login may be their own account.
         ok, page, pc, prompts = self.run_signup(
             start_state="authenticated", own_profile=False, answers=["s", ""],
-            on_input=lambda page: setattr(page, "logged_in", False) or setattr(page, "state", "landing"),
+            env=self.ASK, on_input=lambda page: setattr(page, "logged_in", False) or setattr(page, "state", "landing"),
         )
         self.assertEqual(pc.context.cleared, [])
         self.assertEqual(len(prompts), 2)  # the question, then "press ENTER when signed out"
@@ -226,7 +247,8 @@ class SignupPositionTests(unittest.TestCase):
 
     def test_an_attached_browser_that_is_still_logged_in_after_the_wait_fails(self):
         ok, _page, pc, _prompts = self.run_signup(
-            start_state="authenticated", own_profile=False, answers=["s", ""]
+            start_state="authenticated", own_profile=False, answers=["s", ""],
+            env=self.ASK,
         )
         self.assertFalse(ok)
         self.assertEqual(pc.context.cleared, [])

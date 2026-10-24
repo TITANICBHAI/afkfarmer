@@ -128,6 +128,90 @@ class FlowRun:
             return [e.get("event") for e in self.sim.events if e["kind"] == "mail_ui"]
 
 
+class SimulatedOldAccountTests(unittest.TestCase):
+    """Replit opens signed in to an old account: it is deleted, then sign-up runs."""
+
+    OLD = "old.account@example.test"
+    EMAIL = "new.account@example.test"
+
+    def setUp(self):
+        if _skip_reason:
+            self.skipTest(_skip_reason)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.ledger = os.path.join(self.temp.name, "ledger.json")
+        env = patch.dict(os.environ, {
+            "AFK_ACCOUNT_LEDGER": self.ledger,
+            "AFK_EXISTING_SESSION_ACTION": "delete",
+        })
+        env.start()
+        self.addCleanup(env.stop)
+
+    def run_signup(self, *, known=True, answers=(), **sim_options):
+        import account_ledger
+
+        if known:
+            account_ledger.record(self.OLD)
+        options = dict(FAST)
+        options.update(old_account=self.OLD, **sim_options)
+        sim = Sim(**options)
+        context = _browser.new_context(viewport={"width": 1366, "height": 700})
+        sim.install(context)
+        prompts, queue = [], list(answers)
+
+        def ask(prompt=""):
+            prompts.append(str(prompt))
+            return queue.pop(0) if queue else ""
+
+        output = io.StringIO()
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(self.temp.name)
+            with patch("builtins.input", ask), patch("operator_alert.beep"), patch(
+                "operator_alert.enter_pressed", return_value=False
+            ), patch("operator_alert.discard_pending_input"), contextlib.redirect_stdout(output):
+                pc = PCAutomation(self.EMAIL, "12345678")
+                pc.context = context
+                pc.page = context.new_page()
+                pc._owns_browser = True
+                ok = pc.create_account()
+        finally:
+            os.chdir(original_cwd)
+            context.close()
+        return ok, sim, prompts, output.getvalue()
+
+    def test_the_old_account_is_deleted_through_the_settings_page_then_signup_runs(self):
+        ok, sim, prompts, log = self.run_signup()
+        self.assertTrue(ok, log)
+        self.assertEqual(prompts, [])
+        self.assertEqual(sim.errors, [])
+        self.assertEqual(sim.count("blocked_request"), 0)
+        self.assertEqual(sim.count("account_deleted", email=self.OLD), 1)
+        self.assertEqual(sim.count("signup_submit", email=self.EMAIL), 1)
+        kinds = [e["kind"] for e in sim.events]
+        self.assertLess(kinds.index("account_deleted"), kinds.index("signup_submit"))
+        self.assertLess(kinds.index("settings_page"), kinds.index("account_deleted"))
+
+    def test_a_slow_redirect_and_a_slow_deletion_are_waited_for(self):
+        ok, sim, _prompts, log = self.run_signup(redirect_ms=3000, delete_ms=4000)
+        self.assertTrue(ok, log)
+        self.assertEqual(sim.count("account_deleted"), 1)
+        self.assertEqual(sim.count("signup_submit"), 1)
+
+    def test_an_account_the_tool_did_not_create_is_kept_when_the_email_is_not_typed(self):
+        ok, sim, prompts, _log = self.run_signup(known=False, answers=[""])
+        self.assertFalse(ok)
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(sim.count("account_deleted"), 0)
+        self.assertEqual(sim.count("signup_submit"), 0)
+
+    def test_typing_the_email_of_an_unknown_account_deletes_it(self):
+        ok, sim, prompts, _log = self.run_signup(known=False, answers=[self.OLD])
+        self.assertTrue(ok)
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(sim.count("account_deleted"), 1)
+
+
 class SimulatedSiteFlowTests(unittest.TestCase):
     def setUp(self):
         if _skip_reason:

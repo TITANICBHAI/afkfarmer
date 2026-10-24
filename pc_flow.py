@@ -177,6 +177,54 @@ def classify_session_state(current_url: Any, page_text: Any) -> str:
         return "login_required"
     return "unknown"
 
+WORKSPACE_PATH_PATTERN = re.compile(r"^/~(?:/|$)")
+EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+HANDLE_PATTERN = re.compile(r"(?<![\w.@])@([A-Za-z0-9_]{3,})")
+
+
+def is_workspace_url(current_url: Any) -> bool:
+    """Whether the URL is the signed-in workspace home (``https://replit.com/~``).
+
+    The character is a tilde, not a hyphen. Replit sends a signed-in visitor of
+    ``replit.com`` here, so seeing it right after opening Replit means an old
+    login is still in the browser.
+    """
+
+    try:
+        parts = urlsplit(str(current_url or ""))
+    except ValueError:
+        return False
+    host = (parts.hostname or "").casefold()
+    on_replit = host == "replit.com" or host.endswith(".replit.com")
+    return on_replit and bool(WORKSPACE_PATH_PATTERN.match(parts.path))
+
+
+def parse_account_identity(page_text: Any) -> dict:
+    """The e-mail and @username shown on Replit's Settings > Profile page.
+
+    Returns ``{"email": str | None, "username": str | None}``. The e-mail is the
+    address under "Your email"; the username is the first ``@handle`` on the page.
+    """
+
+    text = str(page_text or "")
+    email = None
+    labelled = re.search(r"your\s+e-?mail", text, re.IGNORECASE)
+    if labelled:
+        found = EMAIL_PATTERN.search(text, labelled.end())
+        email = found.group(0) if found else None
+    handle = HANDLE_PATTERN.search(text)
+    return {"email": email, "username": handle.group(1) if handle else None}
+
+
+def is_profile_settings_text(page_text: Any) -> bool:
+    """Whether text is the signed-in Settings > Profile page (it has the delete control)."""
+
+    text = _text(page_text).casefold()
+    return "request account deletion" in text or (
+        "your email" in text and "first name" in text
+    )
+
+
 def classify_replit_page(
     current_url: Any,
     page_text: Any,
@@ -202,6 +250,12 @@ def classify_replit_page(
         return "authenticated"
     if any(pattern.search(str(page_text or "")) for pattern in SUCCESS_PATTERNS):
         return "check_email"
+    # The workspace URL alone (the page text may still be loading) counts as a
+    # login too, but only after the "check your email" evidence above, so the
+    # account that is being created right now is never mistaken for an old one,
+    # and only while the page shows no logged-out controls.
+    if is_workspace_url(current_url) and not (fields or chooser or create_button):
+        return "authenticated"
     try:
         parts = urlsplit(str(current_url or ""))
         host, path = (parts.hostname or "").casefold(), parts.path.casefold().rstrip("/")

@@ -64,6 +64,7 @@ CANONICAL_STATE_NAMES = {
     "source": "ONBOARDING",
     "role": "ONBOARDING",
     "plan": "ONBOARDING",
+    "notifications_prompt": "ONBOARDING",
     "main": "REPLIT_READY",
     "profile_menu": "PROFILE",
     "logout_dialog": "LOGOUT_CONFIRMATION",
@@ -101,6 +102,24 @@ SCROLL_GESTURES = (
     (0.85, 0.15, 350),
     (0.70, 0.30, 900),
 )
+# After the final "Log out" tap the app may crash back to the Android home screen,
+# or leave the profile page stuck on screen (a Replit-side glitch that goes away
+# when it is scrolled up). The tap itself counts as the logout; these bound the
+# extra look at the screen afterwards. One check is about a second apart.
+POST_LOGOUT_CHECKS = 30            # looks at the screen after the tap
+POST_LOGOUT_LOAD_CHECKS = 45       # looks after Replit was opened again (it loads slowly)
+POST_LOGOUT_RELAUNCH_LIMIT = 2     # times the app is opened again
+POST_LOGOUT_SHEET_PATIENCE = 2     # looks before a leftover profile page is scrolled up
+POST_LOGOUT_SCROLL_UP_LIMIT = 3    # scroll-up swipes on a leftover profile page
+LOGGED_OUT_STATES = frozenset(
+    {"initial_login", "email_choice", "email_login", "password_login", "logged_out"}
+)
+LOGGED_IN_STATES = frozenset(
+    {
+        "welcome_onboarding", "name", "username", "source", "role", "plan",
+        "notifications_prompt", "main",
+    }
+)
 KEYCODE_DEL = 67
 KEYCODE_MOVE_END = 123
 ONBOARDING_STATES = frozenset(
@@ -117,6 +136,7 @@ ONBOARDING_STATES = frozenset(
         "source",
         "role",
         "plan",
+        "notifications_prompt",
         "main",
         "profile_menu",
         "logout_dialog",
@@ -146,6 +166,7 @@ SCREENSHOT_REFERENCES = {
     "source": ("attached_assets/17_1790062961802.jpg",),
     "role": ("attached_assets/18_1790062961803.jpg",),
     "plan": ("attached_assets/19_1790062961803.jpg",),
+    "notifications_prompt": ("attached_assets/19.5_1790062961803.jpg",),
     "main": ("attached_assets/20_1790062961804.jpg",),
     "profile_menu": (
         "attached_assets/21_1790062961805.jpg",
@@ -261,6 +282,11 @@ def classify_screen(root: Optional[ET.Element]) -> str:
         return "logout_dialog"
     if "invalid username or password" in text:
         return "invalid_credentials"
+    # Replit's optional "Notifications - Turn On Notifications / Not Now" sheet
+    # (attached_assets/19.5). Checked before the profile sheet: its own words
+    # ("notifications", "about") would otherwise make it look like that sheet.
+    if "turn on notifications" in text and "not now" in text:
+        return "notifications_prompt"
     # The settings sheet is checked BEFORE the home screen. On current Android a
     # UI dump can include every window, so the home screen's "What are we working
     # on today?" is still in the dump behind the open sheet; checked first, the
@@ -540,14 +566,15 @@ class AndroidAutomation:
                 best, best_size = bounds, size
         return best
 
-    def swipe_up(self, root: Optional[ET.Element] = None, attempt: int = 0) -> bool:
-        """Scroll the list one page down (content moves up), then recheck the UI.
+    def _swipe_in_area(
+        self, root: Optional[ET.Element], attempt: int, content_up: bool
+    ) -> bool:
+        """One scroll gesture drawn inside the scrollable container found in ``root``.
 
-        The gesture is drawn inside the scrollable container found in ``root``
-        (the settings sheet), so it cannot start on the dimmed background and
-        dismiss the sheet. Without a usable dump it falls back to the middle of
-        the screen. ``attempt`` picks a different speed/length from
-        ``SCROLL_GESTURES`` after a swipe that changed nothing.
+        Inside the settings sheet, so it cannot start on the dimmed background and
+        dismiss the sheet. Without a usable dump it uses the middle of the screen.
+        ``attempt`` picks a different speed/length from ``SCROLL_GESTURES`` after a
+        swipe that changed nothing.
         """
 
         width, height = self._get_screen_size()
@@ -558,10 +585,23 @@ class AndroidAutomation:
         start_f, end_f, duration = SCROLL_GESTURES[attempt % len(SCROLL_GESTURES)]
         span = max(1, bottom - top)
         x = (left + right) // 2
-        start_y = top + int(span * start_f)
-        end_y = top + int(span * end_f)
+        low_y = top + int(span * start_f)
+        high_y = top + int(span * end_f)
+        if content_up:
+            return self.swipe(x, low_y, x, high_y, duration)
+        return self.swipe(x, high_y, x, low_y, duration)
+
+    def swipe_up(self, root: Optional[ET.Element] = None, attempt: int = 0) -> bool:
+        """Scroll the list one page down (content moves up), then recheck the UI."""
+
         self.log("Scrolling the profile menu to reveal semantic controls.", Fore.CYAN)
-        return self.swipe(x, start_y, x, end_y, duration)
+        return self._swipe_in_area(root, attempt, content_up=True)
+
+    def swipe_down(self, root: Optional[ET.Element] = None, attempt: int = 0) -> bool:
+        """Scroll back up (content moves down)."""
+
+        self.log("Scrolling the page back up.", Fore.CYAN)
+        return self._swipe_in_area(root, attempt, content_up=False)
 
     def type_text(self, text: str) -> bool:
         safe_text = encode_adb_text(text)
@@ -1101,6 +1141,77 @@ class AndroidAutomation:
             return "not_replit"
         return classify_screen(self.dump_ui())
 
+    @staticmethod
+    def _field_text(field: Optional[ET.Element]) -> str:
+        """What a text field shows, "" when it is empty (a placeholder does not count)."""
+
+        if field is None:
+            return ""
+        current = field.get("text") or ""
+        return current if current != (field.get("hint") or "") else ""
+
+    def _settle_after_logout(self) -> str:
+        """Look at the phone after the final "Log out" tap.
+
+        The tap is what logs out; this only makes sure the app is left in a state
+        the run can finish from. Returns "logged_out" (a login screen is
+        showing), "dialog" (the confirmation is still open: tap again),
+        "still_logged_in" (a signed-in screen is back: the logout did not
+        happen) or "unconfirmed" (nothing conclusive in time; the tap is
+        trusted). A crash to the Android home screen opens Replit again and
+        waits for it to load; a profile page left on screen is scrolled up.
+        """
+
+        checks = POST_LOGOUT_CHECKS
+        relaunches = scrolls = sheet_looks = 0
+        pressed_back = False
+        while checks > 0:
+            checks -= 1
+            foreground = self.foreground_package()
+            if foreground is not None and foreground != REPLIT_PACKAGE_NAME:
+                if relaunches >= POST_LOGOUT_RELAUNCH_LIMIT:
+                    return "unconfirmed"
+                relaunches += 1
+                self.log(
+                    f"Replit is not in the foreground after the logout ({foreground}); it "
+                    "may have crashed. Opening it again; loading can take a while.",
+                    Fore.YELLOW,
+                )
+                self.open_app(REPLIT_PACKAGE_NAME)
+                checks = max(checks, POST_LOGOUT_LOAD_CHECKS)
+                time.sleep(ONBOARDING_SETTLE_SECONDS)
+                continue
+            root = self.dump_ui()
+            screen = classify_screen(root)
+            self.last_observed_state = screen
+            if screen in LOGGED_OUT_STATES:
+                self.log("The logged-out front page is showing.", Fore.GREEN)
+                return "logged_out"
+            if screen == "logout_dialog":
+                return "dialog"
+            if screen in LOGGED_IN_STATES or screen == "security_challenge":
+                return "still_logged_in"
+            if screen == "profile_menu":
+                sheet_looks += 1
+                if sheet_looks > POST_LOGOUT_SHEET_PATIENCE:
+                    if scrolls < POST_LOGOUT_SCROLL_UP_LIMIT:
+                        scrolls += 1
+                        self.log(
+                            "The profile page is still on screen after the logout (a "
+                            "Replit app glitch); scrolling it up.",
+                            Fore.YELLOW,
+                        )
+                        self.swipe_down(root, scrolls - 1)
+                        time.sleep(ONBOARDING_SETTLE_SECONDS)
+                        continue
+                    if not pressed_back:
+                        pressed_back = True
+                        self.press_key(KEYCODE_BACK)
+                        time.sleep(ONBOARDING_SETTLE_SECONDS)
+                        continue
+            time.sleep(1.0)
+        return "unconfirmed"
+
     def _drive_onboarding(self, email: str, password: str, username: str) -> bool:
         first_name = first_name_from_username(username)
         initials = avatar_initials(first_name)
@@ -1117,6 +1228,21 @@ class AndroidAutomation:
         last_logged_state = None
 
         for _cycle in range(ONBOARDING_MAX_CYCLES):
+            if logout_pending:
+                verdict = self._settle_after_logout()
+                if verdict in {"logged_out", "unconfirmed"}:
+                    if verdict == "unconfirmed":
+                        self.log(
+                            "The logout confirmation was tapped, but the logged-out screen "
+                            "could not be seen in time; continuing on the tap alone.",
+                            Fore.YELLOW,
+                        )
+                        self.save_failure_evidence("logout_unconfirmed")
+                        self.last_failure_reason = ""
+                    # Close Replit completely, as the flow requires, then verify.
+                    return self.force_stop_and_verify(REPLIT_PACKAGE_NAME)
+                # The dialog is still up, or a signed-in screen is back: act on it.
+                logout_pending = False
             root = self.dump_ui()
             state = classify_screen(root)
             self.last_observed_state = state
@@ -1134,18 +1260,11 @@ class AndroidAutomation:
                 return False
             if root is None or state == "unknown":
                 unreadable += 1
-                if (
-                    not logout_pending
-                    and unreadable % ONBOARDING_UNKNOWN_BEFORE_RECOVERY == 0
-                ):
+                if unreadable % ONBOARDING_UNKNOWN_BEFORE_RECOVERY == 0:
                     self._recover_from_unknown_screen(recovery, profile_touched)
                 time.sleep(0.5)
                 continue
             unreadable = 0
-            if logout_pending and state != "logout_dialog":
-                # The logout confirmation was accepted and its dialog is gone.
-                # Close Replit completely, as the flow requires, then verify.
-                return self.force_stop_and_verify(REPLIT_PACKAGE_NAME)
             if state not in ONBOARDING_STATES:
                 unexpected += 1
                 if unexpected > ONBOARDING_UNEXPECTED_LIMIT:
@@ -1183,13 +1302,16 @@ class AndroidAutomation:
             elif state == "welcome_onboarding":
                 self._act(root, taps, "welcome_continue", [{"text": "Continue"}])
             elif state == "name":
-                if not typed["first_name"]:
-                    if field is not None and self._enter_text(
-                        root, taps, "type_first_name", field, first_name
-                    ):
-                        typed["first_name"] = True
-                else:
-                    self._act(root, taps, "name_continue", [{"text": "Continue"}])
+                # Replit fills the first name in from the e-mail (attached_assets/15).
+                # It is left exactly as it is: only Continue is tapped. The field
+                # is typed into only when it is empty (Continue cannot work then).
+                shown_name = self._field_text(field)
+                if shown_name:
+                    initials = avatar_initials(shown_name)
+                if not self._act(root, taps, "name_continue", [{"text": "Continue"}]):
+                    if field is not None and not shown_name and not typed["first_name"]:
+                        if self._enter_text(root, taps, "type_first_name", field, first_name):
+                            typed["first_name"] = True
             elif state == "username":
                 self._act(root, taps, "username_continue", [{"text": "Continue"}])
             elif state == "source":
@@ -1208,6 +1330,18 @@ class AndroidAutomation:
                     )
             elif state == "plan":
                 self._act(root, taps, "skip_plan", [{"text": "Skip"}])
+            elif state == "notifications_prompt":
+                # Optional sheet (attached_assets/19.5): only "Not Now" is ever
+                # tapped, never "Turn On Notifications". It is handled whenever it
+                # shows up and never waited for.
+                self._act(
+                    root,
+                    taps,
+                    "notifications_not_now",
+                    [{"text": "Not Now"}],
+                    limit=4,
+                    avoid=("turn on notifications",),
+                )
             elif state == "main":
                 matchers = [
                     {"desc": "Profile", "partial": True},

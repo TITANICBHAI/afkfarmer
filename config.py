@@ -42,9 +42,16 @@ BROWSER_DEBUG_PORT = 9333
 # True: look at the real browser / phone to find the current step (and where in
 # the step) instead of trusting only the saved checkpoint.
 AUTO_DETECT_STAGE = True
-# A Replit login that is already open in the browser when sign-up starts:
-# "ask" (default), "signout" (own browser profile only) or "keep".
-EXISTING_SESSION_ACTION = "ask"
+# A Replit login that is already open in the browser when a NEW sign-up starts
+# (Replit opens at https://replit.com/~ instead of the logged-out home page):
+#   "delete" (default): delete that old account (Settings > Profile > Request
+#            account deletion). Permanent. It is done without asking only for an
+#            account this tool created (created_accounts.json) and never for the
+#            account of the current run; any other account needs its e-mail typed.
+#   "signout": only end the login (own browser profile only; the account stays).
+#   "ask":     ask every time.   "keep": leave it as it is.
+# A resumed sign-up never deletes by itself. Override with AFK_EXISTING_SESSION_ACTION.
+EXISTING_SESSION_ACTION = "delete"
 
 # --- Temporary mailbox ---
 # The temp-mail address only exists to receive the verification link. When it is

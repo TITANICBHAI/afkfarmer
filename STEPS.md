@@ -18,6 +18,38 @@
 2. A pop-up may appear saying **“Sign in to Replit.com with Google.com.”**
 3. Click the **× (cross)** to close the pop-up.
 
+#### 2.1 — Conditional branch: Replit opens already signed in (pass 4)
+
+Only when Replit opens **signed in** — the address becomes `https://replit.com/~`
+(a tilde, not a hyphen) a moment after the page loads — an old account is still
+logged in. Do **not** go straight to the sign-up link. Instead:
+
+1. Open `https://replit.com/settings/profile` directly
+   (`attached_assets/step_2.1a_replit_existing_session_workspace.png`,
+   `step_2.1b_replit_profile_settings.png`).
+2. Scroll down to the very bottom and click **Request account deletion**
+   (`step_2.1c_replit_request_account_deletion.png`).
+3. In the **Delete Account** dialog click **Yes, Delete my Account**
+   (`step_2.1d_replit_confirm_account_deletion.png`).
+4. Wait. Replit refreshes by itself to the **logged-out** home page, where
+   **Create account** is visible (`step_2.1e_replit_logged_out_home.png`). It can
+   load slowly.
+5. Continue with step 2.2 as normal.
+
+If Replit instead opens the normal logged-out home page, none of this happens:
+skip straight to 2.2.
+
+Safety rules (deleting an account cannot be undone):
+
+- It is only ever done **here, at the very start**, before this run's new account
+  exists. Nothing is ever deleted after the new account's e-mail is verified, and a
+  resumed sign-up never deletes by itself.
+- The account whose e-mail is the address of the **current run** is never deleted.
+- An account the tool created itself (listed in `created_accounts.json`) is deleted
+  without asking. Any other account is only deleted after its e-mail is typed.
+- `EXISTING_SESSION_ACTION` in `config.py` chooses the behaviour: `"delete"`
+  (default), `"signout"` (only end the login), `"ask"` or `"keep"`.
+
 ### 2.2 — Close the Pop-up
 
 1. After clicking the cross, the pop-up is closed.
@@ -192,12 +224,17 @@ the expected screen on a target device.
 ## Android Step 15 — Continue
 
 1. Once loading has finished, click **Continue**.
+2. Replit has already filled in the first name from the e-mail. **Leave it exactly
+   as it is** — the script does not retype or change it (pass 4). Only if the field
+   is empty (Continue is greyed out) is it filled in once as a fallback.
 
 ---
 
 ## Android Step 16 — Continue Again
 
 1. Click **Continue** again.
+2. The username shown is Replit's own suggestion. **Leave it as it is** — only
+   **Continue** is tapped (pass 4).
 
 ## Android Step 17 — Select Google Search
 
@@ -221,6 +258,17 @@ the expected screen on a target device.
 ## Android Step 21 — Skip
 
 1. Select **Skip**.
+
+## Android Step 21.5 — Notifications prompt (conditional, pass 4)
+
+1. After **Skip** a bottom sheet may appear: **“Notifications — Receive important
+   updates about your Projects and your account…”** with **Turn On Notifications**
+   and **Not Now** (`attached_assets/19.5_1790062961803.jpg`).
+2. If it is on screen, click **Not Now**. Never click **Turn On Notifications**.
+3. If it does not appear, do nothing and do not wait for it: go on to the profile icon.
+
+(The file is numbered 19.5 because the screenshots were numbered before the
+Skip step; it belongs between the plan screen and the profile icon.)
 
 ## Android Step 22 — Profile Picture Flow
 
@@ -246,6 +294,20 @@ the expected screen on a target device.
 2. The available options are **Cancel** and **Logout**.
 3. Click **Logout**.
 4. After logging out, **close the Replit app completely**.
+
+**If the app misbehaves after the Logout tap (pass 4):**
+
+- If Replit **crashes to the Android home screen**, the logout tap still counts.
+  Open Replit again, give it time to load (it is slow), and expect the same front
+  page as at the very start of the Android flow. If the front page shows, the flow is
+  finished and the app is closed completely. If instead the account is still signed in,
+  the logout is done again.
+- If Replit's **profile page gets stuck** on screen (a Replit app bug), scroll it up
+  (drag down); the normal login screen comes back, and the flow is finished.
+- If nothing conclusive shows up in time, the Logout tap is trusted, the evidence is
+  saved as `logout_unconfirmed`, and the app is closed.
+
+None of this has been seen on a real phone; it is built from the description.
 
 # Temp-mail clean-up (pass 3)
 

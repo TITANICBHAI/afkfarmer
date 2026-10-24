@@ -12,6 +12,7 @@ from patchright.sync_api import (
 )
 from colorama import Fore, Style
 
+import account_ledger
 import browser_locator
 import operator_alert
 from email_provider import EmailProvider
@@ -23,6 +24,9 @@ from pc_flow import (
     classify_signup_state,
     find_validation_errors,
     has_security_challenge_text,
+    is_profile_settings_text,
+    is_workspace_url,
+    parse_account_identity,
 )
 from temp_mail import TempMailOrgProvider
 
@@ -57,6 +61,13 @@ class PCAutomation:
     CHALLENGE_AUTO_WAIT_S = 900         # after this, ask for ENTER the old way
     MAX_MANUAL_CHALLENGES = 3           # manual pauses per sign-up attempt
     CONTROL_TAP_LIMIT = 3               # clicks on one control before giving up on it
+    # Removing an old account that is still signed in (attached_assets/step_2.1a-e)
+    SETTINGS_PROFILE_URL = "https://replit.com/settings/profile"
+    HOME_SETTLE_WAIT_MS = 10_000        # replit.com decides: landing page or the signed-in /~
+    SETTINGS_LOAD_WAIT_MS = 30_000      # Settings > Profile appears
+    SETTINGS_EMAIL_WAIT_MS = 6_000      # its e-mail line fills in a moment after the labels
+    DELETE_STEP_WAIT_MS = 15_000        # the delete button / the confirmation dialog appear
+    LOGGED_OUT_WAIT_MS = 90_000         # after confirming: back to the logged-out home page
     POLL_MS = 250
 
     # Challenge widgets only. Sites using reCAPTCHA Enterprise also inject an
@@ -116,6 +127,14 @@ class PCAutomation:
         f"form:has({PASSWORD_INPUT}) :is({EMAIL_INPUT})",
         f":is({EMAIL_INPUT})",
     )
+    REQUEST_DELETION_SELECTORS = (
+        "button:has-text('Request account deletion')",
+        "[role='button']:has-text('Request account deletion')",
+    )
+    CONFIRM_DELETION_SELECTORS = (
+        "[role='dialog'] button:has-text('Yes, Delete my Account')",
+        "button:has-text('Yes, Delete my Account')",
+    )
     SUBMIT_SELECTORS = (
         "[role='dialog'] form button[type='submit']",
         "form button[type='submit']",
@@ -162,6 +181,9 @@ class PCAutomation:
         # True when sign-up is being resumed after an interrupted attempt, so a
         # Replit login found in the browser may well be the account being created.
         self.signup_resumed = False
+        # True once the sign-up form was submitted in this process: from then on
+        # a login in the browser may be the new account, never an old one.
+        self.signup_submitted = False
 
     def log(self, message, color=Fore.WHITE):
         print(f"{color}{message}{Style.RESET_ALL}")
@@ -517,37 +539,260 @@ class PCAutomation:
     def _existing_session_choice(self) -> str:
         """Decide what to do about a Replit login that is already open at sign-up.
 
-        Returns "signout", "keep", "manual" or "quit". In the run's own browser
-        profile a login that is there when a NEW account is about to be created
-        cannot be that account, so it is signed out. In a browser the operator
-        attached us to, or when sign-up is being resumed, a person decides.
+        Returns "delete", "signout", "keep", "manual" or "quit".
+        EXISTING_SESSION_ACTION: "delete" (default) removes the old account from
+        Replit's settings; "signout" only ends the login (own browser profile
+        only); "keep" leaves it; "ask" asks every time. A resumed sign-up never
+        deletes by itself, because the login may be the account being created.
         """
 
-        mode = str(_setting("EXISTING_SESSION_ACTION", "ask")).strip().lower()
+        mode = str(_setting("EXISTING_SESSION_ACTION", "delete")).strip().lower()
+        if mode not in {"delete", "ask", "signout", "keep"}:
+            mode = "ask"
         own_profile = self._owns_browser or self._persistent
         if mode == "keep":
             return "keep"
         if mode == "signout" and own_profile:
             return "signout"
-        if mode == "ask" and own_profile and not self.signup_resumed:
+        can_delete = not self.signup_resumed
+        if mode == "delete" and can_delete:
+            return "delete"
+        self.log("\n⚠️ This browser is already logged in to a Replit account.", Fore.YELLOW)
+        if self.signup_resumed:
             self.log(
-                "ℹ️ The browser still has a Replit login from an earlier run; the "
-                "new account needs a clean session, so it is signed out first.",
+                "   Sign-up is being resumed, so this may be the account that was just created.",
                 Fore.YELLOW,
             )
-            return "signout"
-        self.log("\n⚠️ This browser is already logged in to a Replit account.", Fore.YELLOW)
         operator_alert.beep()
-        answer = input(
-            "   [k]eep it (it is the account being created) / "
-            "[s]ign out here" + (" myself, then press ENTER" if not own_profile else "")
-            + " / [q]uit: "
-        ).strip().lower()
+        options = "[k]eep it (it is the account being created)"
+        if can_delete:
+            options += " / [d]elete that account for good"
+        options += " / [s]ign out here" + (" myself, then press ENTER" if not own_profile else "")
+        answer = input(f"   {options} / [q]uit: ").strip().lower()
         if answer == "k":
             return "keep"
+        if answer == "d" and can_delete:
+            return "delete"
         if answer == "s":
             return "signout" if own_profile else "manual"
         return "quit"
+
+    def _handle_existing_session(self):
+        """Deal with an old Replit login before a new account is created.
+
+        Returns None when sign-up should carry on (the browser is logged out
+        now), True when the login that is open is kept as the account being
+        created, False when the run should stop here.
+        """
+
+        choice = self._existing_session_choice()
+        if choice == "keep":
+            self.log("✅ Keeping the Replit login that is open.", Fore.GREEN)
+            return True
+        if choice == "quit":
+            return False
+        if choice == "manual":
+            input("🖐️ Sign out of Replit in the browser, then press ENTER...")
+        elif choice == "delete":
+            verdict = self._delete_stale_account()
+            if verdict == "own_account":
+                self.log(
+                    "✅ The account that is open is the one this run is creating; "
+                    "keeping it.",
+                    Fore.GREEN,
+                )
+                return True
+            if verdict == "declined":
+                self.log("ℹ️ The old account was not deleted, so sign-up stops here.", Fore.YELLOW)
+                return False
+            if verdict == "failed":
+                self.log("❌ The old Replit account could not be removed.", Fore.RED)
+                return False
+        elif choice == "signout" and not self._sign_out_of_replit():
+            self._save_failure("signup_signout_failed")
+            self.log("❌ The old Replit login could not be ended.", Fore.RED)
+            return False
+        position = self.observe_replit_page()
+        if position == "authenticated":
+            self._save_failure("signup_still_logged_in")
+            self.log("❌ The browser is still logged in to Replit.", Fore.RED)
+            return False
+        return None
+
+    def _settle_replit_home(self) -> Optional[str]:
+        """After opening replit.com, wait until the page shows what it is.
+
+        A signed-in visitor is sent on to the workspace (``/~``) a moment after
+        the page loads, so one look right after ``goto`` can miss it.
+        """
+
+        deadline = time.monotonic() + self.HOME_SETTLE_WAIT_MS / 1_000
+        position = self.observe_replit_page()
+        while time.monotonic() < deadline and (
+            position in (None, "other")
+            # An address of replit.com/ with nothing on it yet reads as "landing"
+            # too; it only counts once the logged-out page really shows a button.
+            or (position == "landing" and not self._shows_logged_out_home())
+        ):
+            self._pause(500)
+            position = self.observe_replit_page()
+        return position
+
+    def _shows_logged_out_home(self) -> bool:
+        try:
+            return self._visible_control(self.CREATE_ACCOUNT_SELECTORS, timeout=300) is not None
+        except Exception:
+            return False
+
+    def _wait_for_settings_page(self):
+        """Settings > Profile as ``{"email", "username"}``; "signed_out" if Replit sent us to a login page; None on timeout."""
+
+        deadline = time.monotonic() + self.SETTINGS_LOAD_WAIT_MS / 1_000
+        while True:
+            if is_profile_settings_text(self._page_text()):
+                break
+            if self.observe_replit_page() in {"login", "landing", "signup_form", "signup_chooser"}:
+                return "signed_out"
+            if time.monotonic() >= deadline:
+                return None
+            self._pause(self.POLL_MS)
+        # The labels render before the e-mail line does.
+        email_deadline = time.monotonic() + self.SETTINGS_EMAIL_WAIT_MS / 1_000
+        identity = parse_account_identity(self._page_text())
+        while not identity["email"] and time.monotonic() < email_deadline:
+            self._pause(self.POLL_MS)
+            identity = parse_account_identity(self._page_text())
+        return identity
+
+    def _confirm_account_deletion(self, identity: dict, known: bool) -> bool:
+        """Ask a person to type the e-mail of an account this tool did not create."""
+
+        email, username = identity.get("email"), identity.get("username")
+        expected = email or (f"@{username}" if username else "DELETE")
+        self.log("\n⚠️ About to DELETE the Replit account that is signed in here:", Fore.YELLOW)
+        self.log(
+            f"   e-mail: {email or 'not readable'}   "
+            f"username: {('@' + username) if username else 'not readable'}",
+            Fore.YELLOW,
+        )
+        self.log(
+            "   " + ("This script created it." if known else "This script did NOT create it, or cannot tell."),
+            Fore.YELLOW,
+        )
+        self.log("   Deleting is permanent: all of its projects are destroyed.", Fore.YELLOW)
+        operator_alert.beep()
+        answer = input(f"   Type {expected} to delete it, or just press ENTER to keep it: ").strip()
+        return answer.casefold() == expected.casefold()
+
+    def _delete_stale_account(self) -> str:
+        """Delete the old Replit account this browser is signed in to.
+
+        Path (attached_assets/step_2.1a-e): Settings > Profile, scroll to the
+        bottom, "Request account deletion", "Yes, Delete my Account", then wait
+        for Replit to land on the logged-out home page.
+
+        Returns "deleted", "signed_out" (there was no login after all),
+        "own_account" (it is the account this run is creating: nothing is
+        touched), "declined" (a person said no) or "failed".
+
+        Guards, because deleting is permanent: the account whose e-mail is the
+        address of THIS run is never deleted; an account this tool did not
+        create (see account_ledger) is only deleted after its e-mail is typed.
+        """
+
+        self.log("\n🧹 Replit opened already signed in (an old account). Opening its settings...", Fore.CYAN)
+        try:
+            self.page.goto(self.SETTINGS_PROFILE_URL, wait_until="domcontentloaded")
+        except Exception as exc:
+            self.log(f"ℹ️ Settings could not be opened ({type(exc).__name__}).", Fore.YELLOW)
+            self._save_failure("stale_settings_not_opened")
+            return "failed"
+        identity = self._wait_for_settings_page()
+        if identity == "signed_out":
+            self.log("ℹ️ Replit showed a login page instead; there is no old account to delete.", Fore.YELLOW)
+            return "signed_out"
+        if identity is None:
+            self._save_failure("stale_settings_not_loaded")
+            self.log("❌ The settings page did not load.", Fore.RED)
+            return "failed"
+
+        email = identity.get("email")
+        if email and self.email and email.strip().casefold() == self.email.strip().casefold():
+            return "own_account"
+        known = account_ledger.is_known(email)
+        self.log(
+            f"   Signed in as {email or 'an unreadable address'}"
+            + (f" (@{identity['username']})" if identity.get("username") else "")
+            + (" - an account this script created." if known else "."),
+            Fore.CYAN,
+        )
+        if not known and not self._confirm_account_deletion(identity, known):
+            return "declined"
+
+        button = self._wait_for_control(self.REQUEST_DELETION_SELECTORS, timeout=self.DELETE_STEP_WAIT_MS)
+        if button is None:
+            self._save_failure("stale_delete_button_not_found")
+            self.log("❌ 'Request account deletion' was not found on the settings page.", Fore.RED)
+            return "failed"
+        try:
+            button.scroll_into_view_if_needed(timeout=3_000)
+        except Exception:
+            pass  # click() scrolls too
+        self.log("[2/4] Clicking 'Request account deletion'...", Fore.CYAN)
+        try:
+            button.click(timeout=5_000)
+        except Exception as exc:
+            self._save_failure("stale_delete_button_click_failed")
+            self.log(f"❌ The delete button could not be clicked ({type(exc).__name__}).", Fore.RED)
+            return "failed"
+        confirm = self._wait_for_control(self.CONFIRM_DELETION_SELECTORS, timeout=self.DELETE_STEP_WAIT_MS)
+        if confirm is None:
+            self._save_failure("stale_delete_dialog_not_found")
+            self.log("❌ The confirmation dialog did not appear.", Fore.RED)
+            return "failed"
+        self.log("[3/4] Confirming 'Yes, Delete my Account'...", Fore.CYAN)
+        try:
+            confirm.click(timeout=5_000)
+        except Exception as exc:
+            self._save_failure("stale_delete_confirm_failed")
+            self.log(f"❌ The confirmation could not be clicked ({type(exc).__name__}).", Fore.RED)
+            return "failed"
+
+        self.log(
+            "[4/4] Deletion requested. Waiting for Replit to return to the logged-out "
+            "home page (this can take a while)...",
+            Fore.CYAN,
+        )
+        if self._wait_for_logged_out_home():
+            self.log("✅ The old account is gone and Replit is logged out.", Fore.GREEN)
+            return "deleted"
+        # The request was accepted but the login lingers. In the run's own
+        # profile the session cookies can simply be cleared.
+        if (self._owns_browser or self._persistent) and self._sign_out_of_replit():
+            self.log("✅ Deletion requested; the lingering login was cleared.", Fore.GREEN)
+            return "deleted"
+        self._save_failure("stale_delete_not_logged_out")
+        return "failed"
+
+    def _wait_for_logged_out_home(self) -> bool:
+        """After the deletion was confirmed: wait until Replit shows the logged-out pages."""
+
+        deadline = time.monotonic() + self.LOGGED_OUT_WAIT_MS / 1_000
+        reloaded_at = time.monotonic() + self.LOGGED_OUT_WAIT_MS / 2_000
+        reloaded = False
+        while True:
+            if self.observe_replit_page() in {"landing", "login", "signup_chooser", "signup_form"}:
+                return True
+            now = time.monotonic()
+            if not reloaded and now >= reloaded_at:
+                reloaded = True  # one fresh look at the home page
+                try:
+                    self.page.goto(self.REPLIT_URL, wait_until="domcontentloaded")
+                except Exception:
+                    pass
+            if now >= deadline:
+                return False
+            self._pause(500)
 
     def _sign_out_of_replit(self) -> bool:
         """End the Replit login in this browser profile (cookies of replit.com only)."""
@@ -1030,6 +1275,8 @@ class PCAutomation:
             fields = self._signup_fields()
             if fields is not None:
                 return fields
+            if is_workspace_url(self.page.url):
+                return None  # signed in: there is no sign-up form here (the caller deals with it)
 
             if self._security_challenge_present():
                 manual_pauses += 1
@@ -1171,23 +1418,10 @@ class PCAutomation:
                 self.log("✅ Replit already shows the 'check your email' page.", Fore.GREEN)
                 return True
             if position == "authenticated":
-                choice = self._existing_session_choice()
-                if choice == "keep":
-                    self.log("✅ Keeping the Replit login that is open.", Fore.GREEN)
-                    return True
-                if choice == "manual":
-                    input("🖐️ Sign out of Replit in the browser, then press ENTER...")
-                if choice == "quit":
-                    return False
-                if choice == "signout" and not self._sign_out_of_replit():
-                    self._save_failure("signup_signout_failed")
-                    self.log("❌ The old Replit login could not be ended.", Fore.RED)
-                    return False
+                verdict = self._handle_existing_session()
+                if verdict is not None:
+                    return verdict
                 position = self.observe_replit_page()
-                if position == "authenticated":
-                    self._save_failure("signup_still_logged_in")
-                    self.log("❌ The browser is still logged in to Replit.", Fore.RED)
-                    return False
             in_place = position in {"signup_form", "signup_chooser", "challenge"}
 
             if in_place:
@@ -1199,6 +1433,13 @@ class PCAutomation:
                     self.page.wait_for_load_state("load", timeout=5_000)
                 except PlaywrightTimeoutError:
                     pass
+                # Replit sends a signed-in visitor on to /~ a moment later. Look
+                # again instead of searching a workspace for a "Create account"
+                # button and then jumping to the sign-up link.
+                if self._settle_replit_home() == "authenticated":
+                    verdict = self._handle_existing_session()
+                    if verdict is not None:
+                        return verdict
 
             self.log("[2] Checking for Google One-Tap popup...", Fore.CYAN)
             close_btn = None if in_place else self._visible_control(
@@ -1226,6 +1467,12 @@ class PCAutomation:
                 self.log("ℹ️ No popup found, continuing...", Fore.YELLOW)
 
             fields = self._open_signup_form()
+            if fields is None and is_workspace_url(self.page.url):
+                # The redirect to the signed-in workspace came late.
+                verdict = self._handle_existing_session()
+                if verdict is not None:
+                    return verdict
+                fields = self._open_signup_form()
             if fields is None:
                 self._save_failure("signup_form_not_found")
                 self.log(
@@ -1278,6 +1525,7 @@ class PCAutomation:
             # The modal has a second, visually similar header button. Use the
             # form submit control above and verify that the click is accepted.
             submit_url = self.page.url
+            self.signup_submitted = True
             submit_btn.click()
             self.log(
                 f"⏳ Waiting up to {self.SIGNUP_RESULT_WAIT_MS // 1_000} seconds "

@@ -21,6 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SOURCE_FILES = (
+    "account_ledger.py",
     "browser_locator.py",
     "browser_verification.py",
     "config.py",

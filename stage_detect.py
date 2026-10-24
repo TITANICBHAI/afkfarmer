@@ -21,7 +21,7 @@ STAGES = ("EMAIL", "SIGNUP", "VERIFY", "ANDROID", "PC_LOGIN", "GITHUB", "DONE")
 PHONE_PAST_LOGIN = frozenset(
     {
         "welcome_onboarding", "name", "username", "source", "role", "plan",
-        "main", "profile_menu", "logout_dialog",
+        "notifications_prompt", "main", "profile_menu", "logout_dialog",
     }
 )
 PHONE_LOGIN = frozenset(

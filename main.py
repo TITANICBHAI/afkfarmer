@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from colorama import Fore, Style, init
 
+import account_ledger
 import operator_alert
 from android_automation import AndroidAutomation
 from config import (
@@ -62,6 +63,8 @@ class ReplitAutomationOrchestrator:
         # sign-up apart from a fresh one.
         self._resumed_stage = (self.state.get("in_progress") or {}).get("stage")
         self._stage_attempts = {}
+        # An address saved by an earlier run belongs to an account this tool made.
+        self._remember_account()
 
     # ---------------- logging & state ----------------
 
@@ -155,7 +158,20 @@ class ReplitAutomationOrchestrator:
             outcome={"stage": stage, "outcome": outcome},
         )
 
+    def _remember_account(self):
+        """Write the saved address to the local account list (see account_ledger).
+
+        It is what lets a later run delete that account from a still-signed-in
+        browser without asking. An address the operator brought themselves
+        ("custom") may belong to a real account and is never listed.
+        """
+
+        address = self.state.get("temp_email")
+        if address and self.state.get("email_provider") != "custom":
+            account_ledger.record(address)
+
     def reset_state(self):
+        self._remember_account()
         self.state = fresh_state()
         if os.path.exists(STATE_FILE):
             os.remove(STATE_FILE)
@@ -251,6 +267,7 @@ class ReplitAutomationOrchestrator:
             self.state["temp_email"] = self.pc.obtain_temp_email()
             self.state["email_provider"] = self.pc.email_provider_name
             self.state["username"] = self.state["temp_email"].split("@")[0]
+            self._remember_account()
         except Exception as e:
             self.log(f"❌ Failed to get temp email: {e}", Fore.RED)
             return False
@@ -263,8 +280,14 @@ class ReplitAutomationOrchestrator:
         self.log("💻 STAGE 2/6: PC Account Creation (browser)", Fore.MAGENTA)
         self.log("=" * 60, Fore.MAGENTA)
         self._ensure_browser()
-        self.pc.signup_resumed = (
-            self._resumed_stage == "SIGNUP" or self._stage_attempts.get("SIGNUP", 0) > 1
+        # A login found in the browser may be the new account only if the
+        # previous process died inside sign-up, or this process already
+        # submitted the form. A retry after a failure BEFORE the form was
+        # submitted (for example a failed clean-up of the old account) is not a
+        # resume.
+        self.pc.signup_resumed = bool(
+            self._resumed_stage == "SIGNUP"
+            or (self._stage_attempts.get("SIGNUP", 0) > 1 and self.pc.signup_submitted)
         )
         return bool(self.pc.create_account())
 

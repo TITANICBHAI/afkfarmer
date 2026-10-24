@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,11 @@ class CheckpointTests(unittest.TestCase):
         self.state_path = Path(self.temp_dir.name) / "state.json"
         self.original_state_file = main.STATE_FILE
         main.STATE_FILE = str(self.state_path)
+        # The list of accounts this tool created must stay inside the test folder.
+        self.ledger_path = Path(self.temp_dir.name) / "created_accounts.json"
+        env = patch.dict(os.environ, {"AFK_ACCOUNT_LEDGER": str(self.ledger_path)})
+        env.start()
+        self.addCleanup(env.stop)
         # The failed-stage menu makes a sound; the tests must stay silent.
         beep = patch("operator_alert.beep")
         self.beep = beep.start()
@@ -332,18 +338,45 @@ class DetectionTests(CheckpointTests):
             self.assertTrue(orchestrator.stage_verify())
 
     def test_a_resumed_signup_is_told_apart_from_a_fresh_one(self):
-        for resumed_stage, attempts, expected in (
-            (None, 1, False), ("SIGNUP", 1, True), ("EMAIL", 1, False), (None, 2, True),
+        # (stage the previous process died in, attempts so far, form submitted in
+        # this process, expected). A retry after a failure BEFORE the form was
+        # submitted is not a resume: no new account can exist yet.
+        for resumed_stage, attempts, submitted, expected in (
+            (None, 1, False, False), ("SIGNUP", 1, False, True), ("EMAIL", 1, False, False),
+            (None, 2, False, False), (None, 2, True, True),
         ):
-            with self.subTest(resumed_stage=resumed_stage, attempts=attempts):
+            with self.subTest(resumed_stage=resumed_stage, attempts=attempts, submitted=submitted):
                 orchestrator = self.ready("SIGNUP")
                 orchestrator._resumed_stage = resumed_stage
                 orchestrator._stage_attempts = {"SIGNUP": attempts}
                 orchestrator.pc = Mock()
                 orchestrator.pc.context = object()
+                orchestrator.pc.signup_submitted = submitted
                 orchestrator.pc.create_account.return_value = True
                 orchestrator.stage_signup()
                 self.assertEqual(orchestrator.pc.signup_resumed, expected)
+
+    def test_addresses_the_tool_obtained_are_listed_for_later_clean_up(self):
+        import account_ledger
+
+        orchestrator = self.ready("SIGNUP", temp_email="Made.By@Tool.test", email_provider="temp-mail.org")
+        orchestrator._remember_account()
+        self.assertTrue(account_ledger.is_known("made.by@tool.test"))
+
+    def test_an_address_the_operator_brought_is_never_listed(self):
+        import account_ledger
+
+        orchestrator = self.ready("SIGNUP", temp_email="me@mine.test", email_provider="custom")
+        orchestrator._remember_account()
+        self.assertFalse(account_ledger.is_known("me@mine.test"))
+
+    def test_the_previous_runs_address_is_listed_when_a_fresh_run_starts(self):
+        import account_ledger
+
+        orchestrator = self.ready("DONE", temp_email="old@tool.test", email_provider="temp-mail.org")
+        orchestrator.reset_state()
+        self.assertTrue(account_ledger.is_known("old@tool.test"))
+        self.assertIsNone(orchestrator.state["temp_email"])
 
     def finish_run(self, orchestrator, setting, deleted=True):
         orchestrator.pc = Mock()
