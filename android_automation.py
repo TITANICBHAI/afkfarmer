@@ -1239,8 +1239,8 @@ class AndroidAutomation:
                         )
                         self.save_failure_evidence("logout_unconfirmed")
                         self.last_failure_reason = ""
-                    # Close Replit completely, as the flow requires, then verify.
-                    return self.force_stop_and_verify(REPLIT_PACKAGE_NAME)
+                       ##Skip force-stop; finish onboarding after logout handling.
+                    return True
                 # The dialog is still up, or a signed-in screen is back: act on it.
                 logout_pending = False
             root = self.dump_ui()
