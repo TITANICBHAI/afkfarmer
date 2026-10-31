@@ -1,8 +1,23 @@
 # Fix log
 
-Four passes. None of them changes how CAPTCHA, anti-bot, security-challenge or
+Five passes. None of them changes how CAPTCHA, anti-bot, security-challenge or
 rate-limit checkpoints are handled: they stay manual. The run pauses, a person
 completes the challenge, and nothing here solves, hides or bypasses one.
+
+## Pass 5 (2026-10-31): no deletion prompt, GitHub import page as the last step
+
+CAPTCHAs stay manual; nothing here touches that. Nothing in this pass was run against live Replit.
+
+| Request | What changed | Proven how |
+|---|---|---|
+| Remove the "About to DELETE the Replit account that is signed in here ... Type <e-mail>" prompt | `_confirm_account_deletion` and the `"declined"` result are gone: the account signed in at the start of sign-up is deleted without asking. Kept: the account of the current run is never deleted; a resumed sign-up never deletes by itself. | `test_stale_account.py`; `SimulatedOldAccountTests` (real headless Chromium against the local imitation) |
+| After the phone part and the temp-mail delete, open replit.com/import/github and type the GitHub link in; take the link from a txt named repo that is pre-made or created by the script, asking once in the terminal, ENTER skips | New last step (`OPEN_GITHUB_IMPORT_PAGE`, `REPO_FILE`): `open_github_import_page()` and `enter_github_repo_url()` in `pc_automation.py`, `repo_link.py` for `repo.txt`, the terminal question and the hook in `main.py`. Run only after the state is saved as DONE; it can never fail the run. Nothing on the page is clicked. | `test_repo_link.py`, `test_pc_github_import.py`, `GithubImportPageTests` (`test_main.py`), `SimulatedImportPageTests` (a copy of the page built from `attached_assets/import_from_github_page.png`) |
+
+Not verified: the real page after a link has been typed (the screenshot shows only
+the empty state), so the import button's label is unknown and the run presses
+nothing. The box is found by its placeholder (`https://github.com/username/repo`)
+or its label ("GitHub Repo URL"); if Replit changes either, the link is printed
+for pasting by hand.
 
 ## Pass 4 (2026-10-23): old account at the start, Notifications sheet, logout crash
 
@@ -11,7 +26,7 @@ CAPTCHAs stay manual; nothing here touches that. Nothing in this pass was run li
 | Request | What changed | Proven how |
 |---|---|---|
 | Replit opens signed in (`https://replit.com/~`, tilde): do not go straight to sign-in | The cause: the page was looked at only before navigating, and the redirect to `/~` comes a moment after the load, so the run jumped to the sign-up link. Now it waits for the redirect (`_settle_replit_home`, also when the page is still empty at `replit.com/`), and on `/~` goes to `settings/profile`, scrolls to **Request account deletion**, **Yes, Delete my Account**, waits for the logged-out home page, then signs up. A logged-out home page skips all of it. `EXISTING_SESSION_ACTION` (`delete` default / `signout` / `ask` / `keep`). | Scripted pages (`test_stale_account.py`, 25 tests) and a real-Chromium imitation of the pages (`SimulatedOldAccountTests`). The live settings page, its markup and Replit's timing were **not observed**. |
-| Never delete after the new account is verified | Deletion is only reachable from the start of `create_account` (a test reads the source), never after submit; the run's own address is never deleted; a resumed sign-up never auto-deletes. Because deleting is permanent I added a ledger (`created_accounts.json`): accounts this tool created are deleted without asking, any other account only after its e-mail is typed. | Tests, plus "undo one guard" checks: own-account, ledger and resumed guards each made a test fail. |
+| Never delete after the new account is verified | Deletion is only reachable from the start of `create_account` (a test reads the source), never after submit; the run's own address is never deleted; a resumed sign-up never auto-deletes. A ledger (`created_accounts.json`) once gated this behind a typed e-mail for accounts the tool did not create; that prompt was removed on request, so every signed-in account is now deleted without asking and the ledger only labels the log line. | Tests, plus "undo one guard" checks: own-account, ledger and resumed guards each made a test fail. |
 | Android 19.5: Notifications sheet | `Not Now` is tapped only if the sheet shows (checked before the home screen, since a dump can include the screen behind it); `Turn On Notifications` is never tapped; nothing waits for it. | Simulated phone. The real sheet's node structure is assumed from the screenshot. |
 | Android 15/16: do not rewrite name / username | Only Continue is tapped. The field is typed into only if it is empty and Continue is disabled. The avatar is found by the initials Replit actually shows. | Simulated phone. |
 | Logout tap worked but the app crashed / the profile page is stuck | After the tap the run looks at the phone: not in the foreground gets Replit opened again (up to 2 times, waiting up to 45 looks), still-signed-in logs out again, a stuck profile page is scrolled up, an inconclusive result is trusted and saved as `logout_unconfirmed`. | Simulated phone (crash, slow relaunch, crash still logged in, stuck page, unrecognised screen, app never returns). Built from your description; never seen on a real phone. |

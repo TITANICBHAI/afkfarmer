@@ -591,3 +591,32 @@ Add one entry after each meaningful session:
 - Next action: an authorized PC smoke test with CAPTCHA handled by hand, then
   the phone stage; decide the open items in `FIXES.md` (the `.replit` Run
   button, the Android launch path).
+
+### 2026-10-31 — No deletion prompt; GitHub import page as the last step
+- Completed: (1) on request, the "About to DELETE the Replit account that is
+  signed in here ... Type <e-mail>" prompt was removed
+  (`_confirm_account_deletion` and the `"declined"` result are gone). With
+  `EXISTING_SESSION_ACTION = "delete"`, whichever account is signed in at the
+  start of sign-up is deleted without asking. Kept on purpose: the account whose
+  e-mail is this run's address is never deleted, a resumed sign-up never deletes
+  by itself, and deletion is only reachable from the start of `create_account`.
+  `created_accounts.json` now only labels a log line. Do not re-add a
+  confirmation unless the operator asks for one.
+  (2) New last step of a run, also on request (`OPEN_GITHUB_IMPORT_PAGE = True`):
+  after the temp-mail Delete and after the state is saved as DONE, the browser
+  opens `https://replit.com/import/github` and the link from `repo.txt`
+  (`REPO_FILE`, module `repo_link.py`) is typed into the "GitHub Repo URL" box.
+  No `repo.txt`: the terminal asks once and saves the answer; ENTER skips (no
+  file, asked again next run). Nothing on that page is clicked. It never fails the
+  run, and it is skipped when the optional GITHUB stage already imported a repo.
+- Evidence: `test_stale_account.py`, `test_repo_link.py`,
+  `test_pc_github_import.py`, `GithubImportPageTests` (`test_main.py`),
+  `SimulatedOldAccountTests` and `SimulatedImportPageTests` (real headless
+  Chromium against the local imitation; the import page copy was built from
+  `attached_assets/import_from_github_page.png`).
+- Still open: the real import page after a link is typed was never seen, so the
+  import button is not pressed. Nothing was run against live Replit.
+- Blockers: none.
+- Next action: operator runs `python main.py` once and reports what the import
+  page did (a screenshot of it with the link typed in would let the final click be
+  added).

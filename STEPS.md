@@ -45,8 +45,8 @@ Safety rules (deleting an account cannot be undone):
   exists. Nothing is ever deleted after the new account's e-mail is verified, and a
   resumed sign-up never deletes by itself.
 - The account whose e-mail is the address of the **current run** is never deleted.
-- An account the tool created itself (listed in `created_accounts.json`) is deleted
-  without asking. Any other account is only deleted after its e-mail is typed.
+- Whichever account is signed in is deleted without asking (there is no confirmation
+  prompt). `created_accounts.json` only lets the log say whether the tool created it.
 - `EXISTING_SESSION_ACTION` in `config.py` chooses the behaviour: `"delete"`
   (default), `"signout"` (only end the login), `"ask"` or `"keep"`.
 
@@ -352,6 +352,13 @@ is closed on the phone. Set the flag to `True` to opt in to the PC resume and
 optional GitHub import that come after it. The saved completion status
 distinguishes automated success from manual completion, skipped stages, and
 failure.
+
+One step is added after the end of the numbered flow, at the operator's request
+(`OPEN_GITHUB_IMPORT_PAGE`): once the temporary mailbox has been deleted and the
+run is recorded as complete, the browser is taken to
+`https://replit.com/import/github` and the GitHub link from `repo.txt` is typed
+into the "GitHub Repo URL" box (if the file is missing the terminal asks once and
+saves the answer; ENTER skips). Nothing on that page is clicked.
 
 ### Notes taken from the screenshots (not in the numbered steps above)
 

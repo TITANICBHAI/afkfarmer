@@ -434,10 +434,15 @@ import after Android.
 #### Settings added in pass 3 (`config.py`)
 
 - `AUTO_DETECT_STAGE = True`: at start the run looks at the Replit tab and the phone and continues from what is visibly done (never moves backwards, never clicks while looking). `False` trusts `state.json` only.
-- `EXISTING_SESSION_ACTION = "delete"` (also `AFK_EXISTING_SESSION_ACTION`): what to do when Replit opens already signed in (at `https://replit.com/~`, a tilde) at the start of sign-up. `"delete"` (default) goes to `https://replit.com/settings/profile`, scrolls to **Request account deletion**, clicks **Yes, Delete my Account** and waits for the logged-out home page before signing up (`attached_assets/step_2.1a` to `step_2.1e`). `"signout"` only ends the login (your own automation profile only; replit.com cookies); `"ask"` asks every time; `"keep"` leaves the login alone. Deleting an account is permanent, so: it only ever happens at the very start, never after the new account was submitted or verified; the account whose e-mail is this run's address is never deleted; an account this tool created itself (addresses are listed in `created_accounts.json`) is deleted without asking, any other account only after you type its e-mail; a resumed sign-up never deletes by itself. If you would rather never delete, set `"signout"` or `"ask"`.
+- `EXISTING_SESSION_ACTION = "delete"` (also `AFK_EXISTING_SESSION_ACTION`): what to do when Replit opens already signed in (at `https://replit.com/~`, a tilde) at the start of sign-up. `"delete"` (default) goes to `https://replit.com/settings/profile`, scrolls to **Request account deletion**, clicks **Yes, Delete my Account** and waits for the logged-out home page before signing up (`attached_assets/step_2.1a` to `step_2.1e`). `"signout"` only ends the login (your own automation profile only; replit.com cookies); `"ask"` asks every time; `"keep"` leaves the login alone. Deleting an account is permanent, so: it only ever happens at the very start, never after the new account was submitted or verified; the account whose e-mail is this run's address is never deleted; whichever account is signed in is deleted without asking (there is no confirmation prompt; `created_accounts.json` only lets the log say whether this tool created it); a resumed sign-up never deletes by itself. If you would rather never delete, set `"signout"` or `"ask"`.
 - `DELETE_TEMP_MAIL = "after_android"`: click the temp-mail page's Delete button after the phone part (`"after_verify"` = right after verification, `"never"`). Only done when the page shows this run's own address; a failure only warns.
 - `ALERT_SOUND = True` (`AFK_NO_SOUND=1` to silence): beep and bring the window forward when a CAPTCHA or other challenge needs you; the run continues by itself once it is gone, or press ENTER.
 - Failed Android steps now save `screenshots/android_*.xml` (the UI tree) next to the PNG; send these when reporting a phone problem.
+
+#### Settings added in pass 5 (`config.py`)
+
+- `OPEN_GITHUB_IMPORT_PAGE = True`: the last step of a run. After the temp-mail Delete (and once the run is recorded as done) the browser is taken to `https://replit.com/import/github` and the repository link is typed into its "GitHub Repo URL" box. Nothing on that page is clicked: starting the import, and connecting a GitHub account for a private repository, stay with you. Skipped when the optional GITHUB stage (`RUN_POST_ANDROID_STAGES = True`) already imported a repository. A page that cannot be opened or a box that cannot be found only warns, and prints the link so you can paste it.
+- `REPO_FILE = "repo.txt"` (also `AFK_REPO_FILE`): where that link comes from, a file in the project folder with the link on its first line (`https://github.com/<owner>/<repo>`; blank lines and `#` notes are ignored). Write it yourself, or leave it out: the run then asks for the link once in the terminal and creates the file. Pressing ENTER at that question skips typing a link (the import page is still opened, no file is made, and you are asked again next run). A file without a GitHub link in it is asked about again and replaced by your answer. A `config.py` that lacks these two lines works too: the defaults above apply.
 
 ### 6. Run the safe preflight check
 
@@ -475,6 +480,10 @@ verifies the mailbox message, and controls the Replit Android app. With
 `RUN_POST_ANDROID_STAGES = True`, it then resumes the PC session and attempts
 the visible GitHub import flow (this import is experimental: its success check
 is loose and it is outside the documented core flow).
+
+The very last thing it does (`OPEN_GITHUB_IMPORT_PAGE`) is open
+`https://replit.com/import/github` and type the link from `repo.txt` into the
+"GitHub Repo URL" box; you press the import button yourself.
 
 There is no separate desktop GUI. The user interface is the visible browser
 window, the real Android app, and the interactive terminal prompts.
@@ -560,7 +569,8 @@ The implementation may produce:
 - `state.json`
 - `auth_state.json`
 - `browser_profile/` (the automation browser's saved profile: cookies of Replit and the mailbox; keep it local)
-- `created_accounts.json` (the e-mail addresses this tool signed Replit accounts up with, no passwords; it is what lets the next run delete an old account without asking)
+- `created_accounts.json` (the e-mail addresses this tool signed Replit accounts up with, no passwords; a record that only labels the log line when the next run deletes an old account)
+- `repo.txt` (the GitHub repository link for the import page; you may write it yourself, kept local)
 - `android_actions.log`
 - `ui.xml`
 - screenshots under `screenshots/`

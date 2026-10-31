@@ -233,6 +233,14 @@ class Sim:
                 "__USER__", re.sub(r"[^a-z0-9]", "", self.session.split("@")[0].lower()) or "user"
             ).replace("__DELETE_MS__", str(int(self.cfg["delete_ms"])))
             return h._send(200, page)
+        if path == "/import/github":
+            if not self.session:
+                self.log("import_page_signed_out")  # the page itself moves a visitor on, like the SPA
+                return h._send(200, REDIRECT_TO_LOGIN.replace("__MS__", str(int(self.cfg["redirect_ms"]))))
+            self.log("import_page", email=self.session)
+            return h._send(
+                200, IMPORT_GITHUB_PAGE.replace("__HYDRATE_MS__", str(int(self.cfg["hydrate_ms"])))
+            )
         if path == "/login":
             return h._send(200, "<!doctype html><title>Replit</title><h1>Log in to Replit</h1>"
                            "<input type=email placeholder=Email><input type=password placeholder=Password>")
@@ -295,7 +303,7 @@ class Sim:
             self.session = None
             return h._json({"ok": True})
         if path == "/api/ui-event":
-            self.log("replit_ui", **{k: v for k, v in body.items() if k in ("event", "id")})
+            self.log("replit_ui", **{k: v for k, v in body.items() if k in ("event", "id", "value")})
             return h._json({"ok": True})
         return h._json({"ok": False}, 404)
 
@@ -420,9 +428,47 @@ footer{padding:30px 60px;text-align:left}
 SIGNED_IN_HOME = """<!doctype html><html><head><meta charset="utf-8"><title>Replit</title></head>
 <body><script>setTimeout(function () { location.replace('/~'); }, __MS__);</script></body></html>"""
 
+REDIRECT_TO_LOGIN = """<!doctype html><html><head><meta charset="utf-8"><title>Replit</title></head>
+<body><script>setTimeout(function () { location.replace('/login'); }, __MS__);</script></body></html>"""
+
 WORKSPACE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Replit</title></head>
 <body style="font:16px sans-serif"><h1>Personal workspace</h1><p>What are we working on today?</p>
 <a href="/settings/profile">Settings</a></body></html>"""
+
+# replit.com/import/github as seen in attached_assets/import_from_github_page.png: the
+# "GitHub Repo URL" box renders a moment after load; "Connect your GitHub account" and
+# "Import from GitHub" must never be clicked by the run (the tests count their clicks).
+IMPORT_GITHUB_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>Import from GitHub - Replit</title>
+<style>body{font:14px Inter,Arial,sans-serif;background:#f5f3f0;margin:0;padding:40px 280px}
+.card{border:1px solid #ddd;border-radius:8px;padding:16px;background:#f9f8f6}
+input{width:100%;padding:8px;border:1px solid #ccc;border-radius:6px}
+.connect{text-align:center;margin-top:60px} button{padding:8px 12px}</style></head><body>
+<button type="button">All import sources</button>
+<h1>Import from GitHub</h1>
+<p>Import a repository or existing app. Agent support may be limited.</p>
+<div class="card" id="card"><p>Loading...</p></div>
+<script>
+function ev(name, extra) {
+  fetch('/api/ui-event', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(Object.assign({event: name}, extra || {}))});
+}
+setTimeout(function () {
+  document.getElementById('card').innerHTML =
+    '<label for="repo-url">GitHub Repo URL</label><br>' +
+    '<input id="repo-url" type="text" placeholder="https://github.com/username/repo" autocomplete="off">' +
+    '<div id="actions"></div><hr><p>Or select a repo from your account</p>' +
+    '<div class="connect"><p>Connect to GitHub</p><p>Get started by logging in with your GitHub account</p>' +
+    '<button type="button" id="connect">Connect your GitHub account</button></div>';
+  var input = document.getElementById('repo-url');
+  input.addEventListener('input', function () {
+    ev('import_url_typed', {value: input.value});
+    var ok = /^https:\/\/github\.com\/[^\/]+\/[^\/]+/.test(input.value);
+    document.getElementById('actions').innerHTML = ok ? '<button type="button" id="do-import">Import from GitHub</button>' : '';
+    if (ok) { document.getElementById('do-import').addEventListener('click', function () { ev('import_clicked'); }); }
+  });
+  document.getElementById('connect').addEventListener('click', function () { ev('connect_clicked'); });
+}, __HYDRATE_MS__);
+</script></body></html>"""
 
 SETTINGS_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Replit</title>
 <style>body{font:16px sans-serif;margin:0 40px} .filler{height:2600px}

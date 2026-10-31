@@ -8,6 +8,7 @@ from colorama import Fore, Style, init
 
 import account_ledger
 import operator_alert
+import repo_link
 from android_automation import AndroidAutomation
 from config import (
     ANDROID_DEVICE_ID,
@@ -25,6 +26,11 @@ from config import (
 )
 from pc_automation import PCAutomation
 from stage_detect import PHONE_PAST_LOGIN, Position, infer_position
+
+try:
+    from config import OPEN_GITHUB_IMPORT_PAGE
+except ImportError:  # a config.py written before this setting existed
+    OPEN_GITHUB_IMPORT_PAGE = True
 
 init(autoreset=True)
 
@@ -63,6 +69,9 @@ class ReplitAutomationOrchestrator:
         # sign-up apart from a fresh one.
         self._resumed_stage = (self.state.get("in_progress") or {}).get("stage")
         self._stage_attempts = {}
+        # True once the GITHUB stage imported a repository by itself; the import
+        # page is then not opened at the end (it would leave the new project).
+        self._github_imported = False
         # An address saved by an earlier run belongs to an account this tool made.
         self._remember_account()
 
@@ -376,7 +385,99 @@ class ReplitAutomationOrchestrator:
         if not repo:
             self.log("ℹ️ Skipping GitHub import.", Fore.YELLOW)
             return True
-        return bool(self.pc.import_github_repo(repo))
+        imported = bool(self.pc.import_github_repo(repo))
+        if imported:
+            self._github_imported = True
+        return imported
+
+    # ---------------- last step: the GitHub import page ----------------
+
+    def _ask_for_repo_link(self):
+        """Ask in the terminal for the GitHub link. "" when the person skips."""
+
+        self.log("\n📥 Which GitHub repository should be imported into Replit?", Fore.CYAN)
+        self.log(
+            "   Paste its link (https://github.com/<owner>/<repo>). It is saved to\n"
+            f"   {repo_link.path()}\n"
+            "   so you are not asked again. Press ENTER to skip.",
+            Fore.CYAN,
+        )
+        for _attempt in range(5):
+            operator_alert.beep()
+            operator_alert.discard_pending_input()  # an old ENTER must not count as "skip"
+            try:
+                answer = input("   GitHub link: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return ""
+            if not answer:
+                return ""
+            link = repo_link.normalize(answer)
+            if link:
+                return link
+            self.log(
+                "   That is not a GitHub repository link. Try again, or press ENTER to skip.",
+                Fore.YELLOW,
+            )
+        return ""
+
+    def _repo_link_for_import(self):
+        """The link to type into the import page: repo.txt first, else ask once and save it."""
+
+        link, problem = repo_link.load()
+        if link:
+            self.log(f"📄 GitHub link taken from {repo_link.path()}", Fore.CYAN)
+            return link
+        if problem == "invalid":
+            self.log(f"⚠️ {repo_link.path()} does not start with a GitHub repository link.", Fore.YELLOW)
+        elif problem == "unreadable":
+            self.log(f"⚠️ {repo_link.path()} could not be read.", Fore.YELLOW)
+        link = self._ask_for_repo_link()
+        if not link:
+            self.log("ℹ️ No GitHub link entered; the import page is left empty for you.", Fore.YELLOW)
+            return ""
+        if repo_link.save(link):
+            self.log(
+                f"💾 Saved to {repo_link.path()} (edit or delete that file to change the link).",
+                Fore.GREEN,
+            )
+        else:
+            self.log(
+                f"⚠️ Could not write {repo_link.path()}; the link is used this time only.",
+                Fore.YELLOW,
+            )
+        return link
+
+    def _open_github_import_page_at_end(self):
+        """Take the browser to replit.com/import/github and type the repo link in.
+
+        Runs after the temporary mailbox is deleted and the run is recorded as
+        DONE. Nothing is clicked on that page, and nothing here can fail the run.
+        """
+
+        if not OPEN_GITHUB_IMPORT_PAGE or self._github_imported:
+            return
+        self.log("\n" + "=" * 60, Fore.MAGENTA)
+        self.log("📥 Last step: GitHub import page", Fore.MAGENTA)
+        self.log("=" * 60, Fore.MAGENTA)
+        try:
+            self._ensure_browser()
+            if not self.pc.open_github_import_page():
+                self.log(
+                    "⚠️ Open https://replit.com/import/github yourself to import your repository.",
+                    Fore.YELLOW,
+                )
+                link, _problem = repo_link.load()
+                if link:
+                    self.log(f"   Your link (from {repo_link.path()}): {link}", Fore.YELLOW)
+                return
+            link = self._repo_link_for_import()
+            if link:
+                self.pc.enter_github_repo_url(link)
+        except KeyboardInterrupt:
+            self.log("\nℹ️ Skipped the rest of the GitHub import step.", Fore.YELLOW)
+        except Exception as exc:
+            self.log(f"⚠️ The GitHub import page step stopped ({exc}); the run itself is done.", Fore.YELLOW)
 
     # ---------------- stage runner with recovery menu ----------------
 
@@ -546,6 +647,7 @@ class ReplitAutomationOrchestrator:
             if self.state.get("github_repo"):
                 self.log(f"📥 GitHub: {self.state['github_repo']}")
             self.log("\n💡 For a FRESH account next run, delete state.json and auth_state.json", Fore.CYAN)
+            self._open_github_import_page_at_end()
             if self.pc is not None and self.pc.keeps_browser_open:
                 self.log("🪟 The browser window stays open; its login is kept.", Fore.CYAN)
             else:

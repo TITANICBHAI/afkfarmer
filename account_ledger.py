@@ -2,10 +2,9 @@
 
 Why it exists: at the start of a run the browser may still be signed in to an
 OLD Replit account, and the run deletes that account (Settings > Profile >
-Request account deletion). Deleting an account is permanent, so the run only
-does it without asking when the account is one this tool created. Anything
-else (for example your own account, signed in by hand) needs the e-mail typed
-as a confirmation.
+Request account deletion). The deletion no longer asks for a confirmation, so
+this list is only a record: it lets the log say whether the account being
+deleted is one this tool created.
 
 Standard library only. The file is ``created_accounts.json`` in the working
 folder (override with ``AFK_ACCOUNT_LEDGER``). Only addresses are stored, never

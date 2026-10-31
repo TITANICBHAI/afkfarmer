@@ -198,18 +198,113 @@ class SimulatedOldAccountTests(unittest.TestCase):
         self.assertEqual(sim.count("account_deleted"), 1)
         self.assertEqual(sim.count("signup_submit"), 1)
 
-    def test_an_account_the_tool_did_not_create_is_kept_when_the_email_is_not_typed(self):
-        ok, sim, prompts, _log = self.run_signup(known=False, answers=[""])
-        self.assertFalse(ok)
-        self.assertEqual(len(prompts), 1)
-        self.assertEqual(sim.count("account_deleted"), 0)
-        self.assertEqual(sim.count("signup_submit"), 0)
+    def test_an_account_the_tool_did_not_create_is_deleted_without_asking(self):
+        # No confirmation prompt: an account missing from the ledger goes the same way.
+        ok, sim, prompts, log = self.run_signup(known=False)
+        self.assertTrue(ok, log)
+        self.assertEqual(prompts, [])
+        self.assertNotIn("About to DELETE", log)
+        self.assertEqual(sim.count("account_deleted", email=self.OLD), 1)
+        self.assertEqual(sim.count("signup_submit", email=self.EMAIL), 1)
 
-    def test_typing_the_email_of_an_unknown_account_deletes_it(self):
-        ok, sim, prompts, _log = self.run_signup(known=False, answers=[self.OLD])
-        self.assertTrue(ok)
-        self.assertEqual(len(prompts), 1)
-        self.assertEqual(sim.count("account_deleted"), 1)
+
+class SimulatedImportPageTests(unittest.TestCase):
+    """replit.com/import/github (attached_assets/import_from_github_page.png) in a real browser.
+
+    The "GitHub Repo URL" box is found and filled, and nothing on the page is
+    clicked: not "Connect your GitHub account", not the "Import from GitHub"
+    button that appears once a link is in the box.
+    """
+
+    SIGNED_IN = "signed.in@example.test"
+    LINK = "https://github.com/someone/some-repo"
+
+    def setUp(self):
+        if _skip_reason:
+            self.skipTest(_skip_reason)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+
+    @contextlib.contextmanager
+    def session(self, **sim_options):
+        options = dict(FAST)
+        options.update(sim_options)
+        sim = Sim(**options)
+        context = _browser.new_context(viewport={"width": 1366, "height": 700})
+        sim.install(context)
+        output = io.StringIO()
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(self.temp.name)  # failure screenshots land here, not in the project
+            with patch("operator_alert.beep"), contextlib.redirect_stdout(output):
+                pc = PCAutomation("new.account@example.test", "12345678")
+                pc.context = context
+                pc.page = context.new_page()
+                pc._owns_browser = True
+                yield sim, pc, output
+        finally:
+            os.chdir(original_cwd)
+            context.close()
+
+    @staticmethod
+    def typed_values(sim):
+        with sim.lock:
+            return [
+                e.get("value")
+                for e in sim.events
+                if e["kind"] == "replit_ui" and e.get("event") == "import_url_typed"
+            ]
+
+    def test_the_page_opens_and_the_link_is_typed_into_the_box_without_clicking_anything(self):
+        with self.session(old_account=self.SIGNED_IN) as (sim, pc, output):
+            self.assertTrue(pc.open_github_import_page(), output.getvalue())
+            self.assertTrue(pc.enter_github_repo_url(self.LINK), output.getvalue())
+            self.assertEqual(pc.page.input_value("#repo-url"), self.LINK)
+            # the page reacted like the real one: an Import button is now offered...
+            self.assertTrue(pc.page.locator("#do-import").is_visible())
+            pc.page.wait_for_timeout(600)  # let the page's own events reach the simulator
+            self.assertEqual(sim.errors, [])
+            self.assertEqual(sim.count("blocked_request"), 0)
+            self.assertEqual(sim.count("import_page", email=self.SIGNED_IN), 1)
+            self.assertEqual(self.typed_values(sim)[-1], self.LINK)
+            # ...and nobody pressed it, nor the GitHub connect button
+            self.assertEqual(sim.count("replit_ui", event="import_clicked"), 0)
+            self.assertEqual(sim.count("replit_ui", event="connect_clicked"), 0)
+            self.assertIn(self.LINK, output.getvalue())
+
+    def test_a_box_that_renders_late_is_waited_for(self):
+        with self.session(old_account=self.SIGNED_IN, hydrate_ms=3500) as (sim, pc, output):
+            self.assertTrue(pc.open_github_import_page(), output.getvalue())
+            self.assertTrue(pc.enter_github_repo_url(self.LINK), output.getvalue())
+            self.assertEqual(pc.page.input_value("#repo-url"), self.LINK)
+
+    def test_when_nobody_is_signed_in_replit_sends_the_tab_to_login_and_nothing_is_typed(self):
+        with self.session(old_account="", redirect_ms=100) as (sim, pc, output):
+            self.assertFalse(pc.open_github_import_page(), output.getvalue())
+            self.assertIn("/login", pc.page.url)
+            started = time.monotonic()
+            self.assertFalse(pc.enter_github_repo_url(self.LINK))
+            self.assertLess(time.monotonic() - started, 10)  # no 30 second wait on the login page
+            self.assertEqual(sim.count("import_page"), 0)
+            self.assertEqual(sim.count("import_page_signed_out"), 1)
+            self.assertEqual(self.typed_values(sim), [])
+            self.assertIn("instead of the import page", output.getvalue())
+            self.assertIn(self.LINK, output.getvalue())  # printed so it can be pasted by hand
+
+    def test_a_redirect_that_comes_a_second_or_two_after_the_load_is_still_noticed(self):
+        with self.session(old_account="", redirect_ms=1800) as (sim, pc, output):
+            self.assertFalse(pc.open_github_import_page(), output.getvalue())
+            self.assertIn("/login", pc.page.url)
+
+    def test_a_box_that_never_appears_gives_the_link_back(self):
+        with patch.object(PCAutomation, "GITHUB_IMPORT_LOAD_WAIT_MS", 1500), \
+                patch.object(PCAutomation, "GITHUB_IMPORT_SETTLE_MS", 1000):
+            with self.session(old_account=self.SIGNED_IN, hydrate_ms=60_000) as (sim, pc, output):
+                self.assertTrue(pc.open_github_import_page())
+                self.assertFalse(pc.enter_github_repo_url(self.LINK))
+                self.assertEqual(self.typed_values(sim), [])
+                self.assertIn("Paste the link yourself", output.getvalue())
+                self.assertIn(self.LINK, output.getvalue())
 
 
 class SimulatedSiteFlowTests(unittest.TestCase):

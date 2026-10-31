@@ -68,11 +68,20 @@ Required operations:
 - `verify_email()`;
 - `login_after_mobile()`;
 - `import_github_repo(url)`;
+- `open_github_import_page()` and `enter_github_repo_url(url)` (the last step of a
+  run: they never raise, and they click nothing);
 - `save_state()` and `close_browser()`.
 
 All methods return a result that distinguishes success, a recoverable timeout,
 and manual takeover. A successful click is not the same as a successful state
 transition.
+
+### `repo_link.py`
+
+Reads and writes `repo.txt`, the one-line file holding the GitHub repository link
+that is typed into the import page (`load()`, `save()`, `normalize()`, `path()`).
+Standard library only. A missing or damaged file means "no link yet" and never
+stops a run; a link carrying a user name or password is refused.
 
 ### `android_automation.py`
 
@@ -156,9 +165,9 @@ When the workspace shows, an old account is still logged in and
 Guards, because the deletion is permanent: it is only reachable from the start of
 `create_account` (a test reads the source to check that), never after the new
 account was submitted; the account whose e-mail equals the current run's address is
-never deleted; an account the tool created itself (`account_ledger`, file
-`created_accounts.json`) is deleted without asking, any other account only after its
-e-mail is typed; a resumed sign-up never deletes by itself. Reference screenshots:
+never deleted; whichever account is signed in is deleted without asking (no confirmation prompt;
+`account_ledger`, file `created_accounts.json`, only labels the log line); a resumed
+sign-up never deletes by itself. Reference screenshots:
 `attached_assets/step_2.1a` to `step_2.1e`.
 
 ### Email verification

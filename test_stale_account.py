@@ -160,36 +160,31 @@ class DeleteAtTheStartTests(StaleAccountTestCase):
 
 
 class DeletionGuardTests(StaleAccountTestCase):
-    def test_an_account_this_tool_did_not_create_needs_its_email_typed(self):
-        ok, page, _pc, prompts = self.run_signup(answers=[self.OLD])
+    def test_an_account_this_tool_did_not_create_is_deleted_without_asking(self):
+        # There is no confirmation prompt any more: whatever account is signed
+        # in at the start is deleted, then sign-up carries on.
+        ok, page, _pc, prompts = self.run_signup()
         self.assertTrue(ok)
-        self.assertEqual(len(prompts), 1)
-        self.assertIn(self.OLD, prompts[0])
+        self.assertEqual(prompts, [])
         self.assertTrue(page.deleted)
+        self.assertEqual(page.delete_request.clicks, 1)
+        self.assertEqual(page.delete_confirm.clicks, 1)
+        self.assertEqual(page.email.value, self.EMAIL)
 
-    def test_the_typed_email_is_compared_without_regard_to_case(self):
-        ok, page, _pc, _prompts = self.run_signup(answers=[self.OLD.upper()])
+    def test_no_prompt_is_shown_whatever_the_account_list_holds(self):
+        for known in ((), ("someone.else@example.test",), (self.OLD,)):
+            with self.subTest(known=known):
+                ok, page, _pc, prompts = self.run_signup(known=known)
+                self.assertTrue(ok)
+                self.assertEqual(prompts, [])
+                self.assertFalse([line for line in self.logs if "About to DELETE" in line])
+                self.assertTrue(page.deleted)
+
+    def test_an_account_whose_address_cannot_be_read_is_deleted_without_asking(self):
+        ok, page, _pc, prompts = self.run_signup(settings_email="")
         self.assertTrue(ok)
+        self.assertEqual(prompts, [])
         self.assertTrue(page.deleted)
-
-    def test_a_wrong_or_empty_answer_keeps_the_account_and_stops_the_run(self):
-        for answer in ("", "no", "yes", "someone.else@example.test"):
-            with self.subTest(answer=answer):
-                ok, page, pc, prompts = self.run_signup(answers=[answer])
-                self.assertFalse(ok)
-                self.assertEqual(len(prompts), 1)
-                self.assertFalse(page.deleted)
-                self.assertEqual(page.delete_request.clicks, 0)
-                self.assertEqual(page.email.value, "")
-
-    def test_an_unreadable_address_falls_back_to_the_username_as_the_confirmation(self):
-        ok, page, _pc, prompts = self.run_signup(settings_email="", answers=["@oldaccount"])
-        self.assertTrue(ok)
-        self.assertIn("@oldaccount", prompts[0])
-        self.assertTrue(page.deleted)
-        ok, page, _pc, _prompts = self.run_signup(settings_email="", answers=["oldaccount-typo"])
-        self.assertFalse(ok)
-        self.assertFalse(page.deleted)
 
     def test_the_account_of_this_run_is_never_deleted(self):
         # Even when the ledger knows the address: it is the account being created.

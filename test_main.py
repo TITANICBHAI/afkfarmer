@@ -1,11 +1,14 @@
+import contextlib
+import io
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, create_autospec, patch
 
 import main
+from pc_automation import PCAutomation
 
 
 class CheckpointTests(unittest.TestCase):
@@ -16,9 +19,20 @@ class CheckpointTests(unittest.TestCase):
         main.STATE_FILE = str(self.state_path)
         # The list of accounts this tool created must stay inside the test folder.
         self.ledger_path = Path(self.temp_dir.name) / "created_accounts.json"
-        env = patch.dict(os.environ, {"AFK_ACCOUNT_LEDGER": str(self.ledger_path)})
+        # ...and so must the file holding the GitHub repository link (repo.txt).
+        self.repo_path = Path(self.temp_dir.name) / "repo.txt"
+        env = patch.dict(
+            os.environ,
+            {"AFK_ACCOUNT_LEDGER": str(self.ledger_path), "AFK_REPO_FILE": str(self.repo_path)},
+        )
         env.start()
         self.addCleanup(env.stop)
+        # The last step of a run (the GitHub import page) is covered by
+        # GithubImportPageTests at the end of this file; every other test is about
+        # what happens before it.
+        import_page = patch("main.OPEN_GITHUB_IMPORT_PAGE", False)
+        import_page.start()
+        self.addCleanup(import_page.stop)
         # The failed-stage menu makes a sound; the tests must stay silent.
         beep = patch("operator_alert.beep")
         self.beep = beep.start()
@@ -451,6 +465,209 @@ class DetectionTests(CheckpointTests):
                 patch("main.time.sleep") as sleep:
             orchestrator.run()
         sleep.assert_not_called()
+
+
+class GithubImportPageTests(unittest.TestCase):
+    """The last step of a run: open replit.com/import/github and type the repo link in."""
+
+    LINK = "https://github.com/someone/some-repo"
+    STEPS = ("discard_mailbox", "open_github_import_page", "enter_github_repo_url")
+
+    # The same isolated fixture as the checkpoint tests: temporary state, ledger and
+    # repo.txt, no sound, no phone, no browser window.
+    make_orchestrator = CheckpointTests.make_orchestrator
+    read_state = CheckpointTests.read_state
+
+    def setUp(self):
+        CheckpointTests.setUp(self)
+        on = patch("main.OPEN_GITHUB_IMPORT_PAGE", True)
+        on.start()
+        self.addCleanup(on.stop)
+
+    def tearDown(self):
+        CheckpointTests.tearDown(self)
+
+    def ready(self):
+        orchestrator = self.make_orchestrator()
+        orchestrator.state.update(
+            {
+                "stage": "ANDROID",
+                "temp_email": "mail@example.test",
+                "username": "mail",
+                "email_provider": "temp-mail.org",
+            }
+        )
+        orchestrator._save_state("ANDROID")
+        return orchestrator
+
+    @staticmethod
+    def browser(opened=True, typed=True):
+        # autospec: a misspelt method or a wrong argument list fails here, as it would live
+        pc = create_autospec(PCAutomation, instance=True)
+        pc.context = object()
+        pc.keeps_browser_open = True
+        pc.discard_mailbox.return_value = True
+        pc.open_github_import_page.return_value = opened
+        pc.enter_github_repo_url.return_value = typed
+        return pc
+
+    def finish(self, answers=(), pc="mock", orchestrator=None, on_prompt=None):
+        """Run to the end. ``answers`` follow the "resume?" question; an exception is raised."""
+
+        orchestrator = orchestrator or self.ready()
+        orchestrator.pc = self.browser() if pc == "mock" else pc
+        prompts, queue = [], ["y", *answers]
+
+        def ask(prompt=""):
+            prompts.append(str(prompt))
+            if on_prompt:
+                on_prompt(str(prompt))
+            item = queue.pop(0) if queue else ""
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+        output = io.StringIO()
+        with patch("main.DELETE_TEMP_MAIL", "after_android"), \
+                patch("main.RUN_POST_ANDROID_STAGES", False), \
+                patch("builtins.input", ask), \
+                patch("main.time.sleep"), \
+                patch.object(orchestrator, "run_stage", return_value=True), \
+                contextlib.redirect_stdout(output):
+            orchestrator.run()
+        return orchestrator, prompts[1:], output.getvalue()
+
+    def steps(self, orchestrator):
+        return [call[0] for call in orchestrator.pc.mock_calls if call[0] in self.STEPS]
+
+    def test_the_page_is_opened_after_the_mailbox_is_deleted_and_the_link_from_repo_txt_is_typed(self):
+        self.repo_path.write_text(self.LINK + "\n", encoding="utf-8")
+        orchestrator, prompts, log = self.finish()
+        self.assertEqual(self.steps(orchestrator), list(self.STEPS))
+        orchestrator.pc.enter_github_repo_url.assert_called_once_with(self.LINK)
+        self.assertEqual(prompts, [])  # a file that is already there is never asked about
+        self.assertIn("repo.txt", log)
+
+    def test_without_repo_txt_the_link_is_asked_for_once_and_saved(self):
+        orchestrator, prompts, _log = self.finish(answers=(self.LINK,))
+        self.assertEqual(len(prompts), 1)
+        orchestrator.pc.enter_github_repo_url.assert_called_once_with(self.LINK)
+        self.assertEqual(self.repo_path.read_text(encoding="utf-8").strip(), self.LINK)
+        # the next run finds the file and does not ask again
+        second, prompts, _log = self.finish()
+        self.assertEqual(prompts, [])
+        second.pc.enter_github_repo_url.assert_called_once_with(self.LINK)
+
+    def test_enter_skips_the_link_but_the_page_is_still_opened_and_no_file_is_made(self):
+        orchestrator, prompts, _log = self.finish(answers=("",))
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(self.steps(orchestrator), ["discard_mailbox", "open_github_import_page"])
+        self.assertFalse(self.repo_path.exists())
+        self.assertEqual(orchestrator.state["completion_status"], "AUTOMATED_SUCCESS")
+
+    def test_an_answer_that_is_not_a_github_link_is_asked_again(self):
+        orchestrator, prompts, log = self.finish(answers=("not a link", "https://example.test/x/y", self.LINK))
+        self.assertEqual(len(prompts), 3)
+        orchestrator.pc.enter_github_repo_url.assert_called_once_with(self.LINK)
+        self.assertIn("not a GitHub repository link", log)
+
+    def test_a_link_typed_without_https_is_saved_in_full(self):
+        orchestrator, _prompts, _log = self.finish(answers=("github.com/someone/some-repo",))
+        orchestrator.pc.enter_github_repo_url.assert_called_once_with(self.LINK)
+        self.assertEqual(self.repo_path.read_text(encoding="utf-8").strip(), self.LINK)
+
+    def test_a_repo_txt_without_a_link_in_it_is_replaced_after_asking(self):
+        self.repo_path.write_text("this is not a link\n", encoding="utf-8")
+        orchestrator, prompts, log = self.finish(answers=(self.LINK,))
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("does not start with a GitHub repository link", log)
+        orchestrator.pc.enter_github_repo_url.assert_called_once_with(self.LINK)
+        self.assertEqual(self.repo_path.read_text(encoding="utf-8").strip(), self.LINK)
+
+    def test_end_of_input_or_ctrl_c_at_the_question_means_skip_and_never_fails_the_run(self):
+        for interruption in (EOFError(), KeyboardInterrupt()):
+            with self.subTest(interruption=type(interruption).__name__):
+                orchestrator, _prompts, _log = self.finish(answers=(interruption,))
+                orchestrator.pc.enter_github_repo_url.assert_not_called()
+                self.assertEqual(orchestrator.state["stage"], "DONE")
+                self.assertEqual(orchestrator.state["completion_status"], "AUTOMATED_SUCCESS")
+
+    def test_the_run_is_already_recorded_as_done_when_the_question_appears(self):
+        seen = {}
+
+        def look(prompt):
+            if "GitHub link" in prompt:
+                seen["state"] = self.read_state()
+
+        self.finish(answers=(self.LINK,), on_prompt=look)
+        self.assertEqual(seen["state"]["stage"], "DONE")
+        self.assertEqual(seen["state"]["completion_status"], "AUTOMATED_SUCCESS")
+
+    def test_it_can_be_switched_off(self):
+        self.repo_path.write_text(self.LINK + "\n", encoding="utf-8")
+        orchestrator = self.ready()
+        with patch("main.OPEN_GITHUB_IMPORT_PAGE", False):
+            orchestrator, prompts, _log = self.finish(orchestrator=orchestrator)
+        self.assertEqual(self.steps(orchestrator), ["discard_mailbox"])
+        self.assertEqual(prompts, [])
+
+    def test_a_page_that_did_not_open_is_reported_and_nothing_is_typed_or_asked(self):
+        self.repo_path.write_text(self.LINK + "\n", encoding="utf-8")
+        orchestrator = self.ready()
+        pc = self.browser(opened=False)
+        orchestrator, prompts, log = self.finish(orchestrator=orchestrator, pc=pc)
+        pc.enter_github_repo_url.assert_not_called()
+        self.assertEqual(prompts, [])
+        self.assertIn("https://replit.com/import/github", log)
+        self.assertIn(self.LINK, log)  # the link is shown so it can be pasted by hand
+        self.assertEqual(orchestrator.state["completion_status"], "AUTOMATED_SUCCESS")
+
+    def test_an_error_in_this_step_never_fails_the_run(self):
+        pc = self.browser()
+        pc.open_github_import_page.side_effect = RuntimeError("the tab was closed")
+        orchestrator, _prompts, log = self.finish(pc=pc)
+        self.assertEqual(orchestrator.state["stage"], "DONE")
+        self.assertEqual(orchestrator.state["completion_status"], "AUTOMATED_SUCCESS")
+        self.assertIn("the tab was closed", log)
+
+    def test_a_browser_that_cannot_be_started_never_fails_the_run(self):
+        # setUp makes PCAutomation.setup_browser raise, like a machine without a browser.
+        orchestrator, _prompts, log = self.finish(pc=None)
+        self.assertEqual(orchestrator.state["stage"], "DONE")
+        self.assertEqual(orchestrator.state["completion_status"], "AUTOMATED_SUCCESS")
+        self.assertIn("run itself is done", log)
+
+    def test_a_repository_the_github_stage_already_imported_is_not_left_for_the_page(self):
+        orchestrator = self.ready()
+        orchestrator.pc = self.browser()
+        orchestrator.pc.import_github_repo.return_value = True
+        orchestrator.state["github_repo"] = self.LINK
+        self.assertTrue(orchestrator.stage_github())
+        orchestrator, prompts, _log = self.finish(orchestrator=orchestrator, pc=orchestrator.pc)
+        self.assertEqual(self.steps(orchestrator), ["discard_mailbox"])
+        self.assertEqual(prompts, [])
+
+    def test_a_failed_import_by_the_github_stage_does_not_count_as_imported(self):
+        orchestrator = self.ready()
+        orchestrator.pc = self.browser()
+        orchestrator.pc.import_github_repo.return_value = False
+        orchestrator.state["github_repo"] = self.LINK
+        self.assertFalse(orchestrator.stage_github())
+        orchestrator, _prompts, _log = self.finish(
+            orchestrator=orchestrator, pc=orchestrator.pc, answers=(self.LINK,)
+        )
+        self.assertIn("open_github_import_page", self.steps(orchestrator))
+
+    def test_a_run_that_is_aborted_never_reaches_this_step(self):
+        orchestrator = self.ready()
+        orchestrator.pc = self.browser()
+        output = io.StringIO()
+        with patch("main.RUN_POST_ANDROID_STAGES", False), \
+                patch("builtins.input", return_value="y"), \
+                patch.object(orchestrator, "run_stage", return_value=False), \
+                contextlib.redirect_stdout(output):
+            orchestrator.run()
+        orchestrator.pc.open_github_import_page.assert_not_called()
 
 
 if __name__ == "__main__":

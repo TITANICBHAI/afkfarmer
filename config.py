@@ -28,6 +28,15 @@ GITHUB_REPO_URL = ""  # Optional: pre-fill a repo URL to skip the manual prompt
 RUN_POST_ANDROID_STAGES = False  # CORE_FLOW.md ends when Replit is closed on the phone;
                                 # set True to also run PC login + optional GitHub import
 
+# Last step of a run, after the temporary mailbox is deleted: the browser is taken to
+# replit.com/import/github and the repository link is typed into its "GitHub Repo URL"
+# box. Nothing is clicked there; starting the import stays with you.
+OPEN_GITHUB_IMPORT_PAGE = True
+# Where that link comes from: this file (in the project folder, next to main.py). Write
+# the link in it yourself, or leave it out and the run asks in the terminal ONCE and
+# creates the file for you. Press ENTER at that question to skip typing a link.
+REPO_FILE = "repo.txt"
+
 # --- PC browser ---
 # "persistent": the run opens its own Chrome/Edge window with a saved profile
 # folder and LEAVES IT OPEN when the script ends, so the account stays logged in.
@@ -45,9 +54,9 @@ AUTO_DETECT_STAGE = True
 # A Replit login that is already open in the browser when a NEW sign-up starts
 # (Replit opens at https://replit.com/~ instead of the logged-out home page):
 #   "delete" (default): delete that old account (Settings > Profile > Request
-#            account deletion). Permanent. It is done without asking only for an
-#            account this tool created (created_accounts.json) and never for the
-#            account of the current run; any other account needs its e-mail typed.
+#            account deletion). Permanent, and there is NO confirmation prompt:
+#            whichever account is signed in is deleted. The only account never
+#            deleted is the one of the current run.
 #   "signout": only end the login (own browser profile only; the account stays).
 #   "ask":     ask every time.   "keep": leave it as it is.
 # A resumed sign-up never deletes by itself. Override with AFK_EXISTING_SESSION_ACTION.

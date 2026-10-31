@@ -68,6 +68,11 @@ class PCAutomation:
     SETTINGS_EMAIL_WAIT_MS = 6_000      # its e-mail line fills in a moment after the labels
     DELETE_STEP_WAIT_MS = 15_000        # the delete button / the confirmation dialog appear
     LOGGED_OUT_WAIT_MS = 90_000         # after confirming: back to the logged-out home page
+    # The "Import from GitHub" page (attached_assets/import_from_github_page.png)
+    GITHUB_IMPORT_URL = "https://replit.com/import/github"
+    GITHUB_IMPORT_SETTLE_MS = 4_000      # watch this long for a redirect (login) or the rendered page
+    GITHUB_IMPORT_LOAD_WAIT_MS = 30_000  # until its "GitHub Repo URL" box shows (or Replit redirects away)
+    GITHUB_IMPORT_POLL_MS = 250
     POLL_MS = 250
 
     # Challenge widgets only. Sites using reCAPTCHA Enterprise also inject an
@@ -602,9 +607,6 @@ class PCAutomation:
                     Fore.GREEN,
                 )
                 return True
-            if verdict == "declined":
-                self.log("ℹ️ The old account was not deleted, so sign-up stops here.", Fore.YELLOW)
-                return False
             if verdict == "failed":
                 self.log("❌ The old Replit account could not be removed.", Fore.RED)
                 return False
@@ -664,26 +666,6 @@ class PCAutomation:
             identity = parse_account_identity(self._page_text())
         return identity
 
-    def _confirm_account_deletion(self, identity: dict, known: bool) -> bool:
-        """Ask a person to type the e-mail of an account this tool did not create."""
-
-        email, username = identity.get("email"), identity.get("username")
-        expected = email or (f"@{username}" if username else "DELETE")
-        self.log("\n⚠️ About to DELETE the Replit account that is signed in here:", Fore.YELLOW)
-        self.log(
-            f"   e-mail: {email or 'not readable'}   "
-            f"username: {('@' + username) if username else 'not readable'}",
-            Fore.YELLOW,
-        )
-        self.log(
-            "   " + ("This script created it." if known else "This script did NOT create it, or cannot tell."),
-            Fore.YELLOW,
-        )
-        self.log("   Deleting is permanent: all of its projects are destroyed.", Fore.YELLOW)
-        operator_alert.beep()
-        answer = input(f"   Type {expected} to delete it, or just press ENTER to keep it: ").strip()
-        return answer.casefold() == expected.casefold()
-
     def _delete_stale_account(self) -> str:
         """Delete the old Replit account this browser is signed in to.
 
@@ -693,11 +675,12 @@ class PCAutomation:
 
         Returns "deleted", "signed_out" (there was no login after all),
         "own_account" (it is the account this run is creating: nothing is
-        touched), "declined" (a person said no) or "failed".
+        touched) or "failed".
 
-        Guards, because deleting is permanent: the account whose e-mail is the
-        address of THIS run is never deleted; an account this tool did not
-        create (see account_ledger) is only deleted after its e-mail is typed.
+        Whatever account is signed in is deleted WITHOUT asking (there is no
+        confirmation prompt). The one guard left, because deleting is
+        permanent: the account whose e-mail is the address of THIS run is
+        never deleted.
         """
 
         self.log("\n🧹 Replit opened already signed in (an old account). Opening its settings...", Fore.CYAN)
@@ -723,11 +706,10 @@ class PCAutomation:
         self.log(
             f"   Signed in as {email or 'an unreadable address'}"
             + (f" (@{identity['username']})" if identity.get("username") else "")
-            + (" - an account this script created." if known else "."),
+            + (" - an account this script created." if known else ".")
+            + " Deleting it.",
             Fore.CYAN,
         )
-        if not known and not self._confirm_account_deletion(identity, known):
-            return "declined"
 
         button = self._wait_for_control(self.REQUEST_DELETION_SELECTORS, timeout=self.DELETE_STEP_WAIT_MS)
         if button is None:
@@ -1609,6 +1591,111 @@ class PCAutomation:
         except Exception as e:
             self.log(f"\n❌ Error logging in: {e}", Fore.RED)
             return False
+
+    def _on_import_page(self, page) -> bool:
+        """True while the tab shows replit.com/import/... (a signed-out visitor is sent to /login)."""
+
+        try:
+            parts = urlsplit(page.url)
+        except Exception:
+            return True  # cannot tell: do not give up on it
+        host = (parts.hostname or "").casefold()
+        return host in ("replit.com", "www.replit.com") and parts.path.startswith("/import")
+
+    def _github_url_box(self, page):
+        """The visible "GitHub Repo URL" input of the import page, or None."""
+
+        finders = [
+            # placeholder: https://github.com/username/repo
+            lambda: page.locator('input[placeholder*="github.com" i]').first,
+            lambda: page.locator('input[aria-label*="GitHub Repo" i]').first,
+            lambda: page.get_by_label("GitHub Repo URL").first,
+        ]
+        for find in finders:
+            try:
+                box = find()
+                if box.is_visible():
+                    return box
+            except Exception:
+                continue
+        return None
+
+    def open_github_import_page(self) -> bool:
+        """Take the Replit tab to replit.com/import/github. Never raises.
+
+        True when the tab is on that page. False when it could not be opened or
+        Replit sent it elsewhere (usually the login page, because nobody is
+        signed in): the reason is logged and the tab is left where it is. A
+        signed-out visitor is redirected a moment after the page loads, so the
+        tab is watched for a few seconds, ending as soon as the page has
+        rendered its box or has been sent away.
+        """
+
+        try:
+            page = self._page_for_replit()
+            self.log(f"\n🌐 Opening {self.GITHUB_IMPORT_URL}", Fore.CYAN)
+            page.goto(self.GITHUB_IMPORT_URL, wait_until="domcontentloaded")
+            waited = 0
+            while True:
+                if not self._on_import_page(page):
+                    self.log(
+                        f"⚠️ Replit sent the browser to {page.url} instead of the import page "
+                        "(is the account still signed in?).",
+                        Fore.YELLOW,
+                    )
+                    return False
+                if self._github_url_box(page) is not None or waited >= self.GITHUB_IMPORT_SETTLE_MS:
+                    break  # rendered, or still loading: enter_github_repo_url keeps watching
+                page.wait_for_timeout(self.GITHUB_IMPORT_POLL_MS)
+                waited += self.GITHUB_IMPORT_POLL_MS
+        except Exception as exc:
+            self.log(f"⚠️ Could not open the GitHub import page ({exc}).", Fore.YELLOW)
+            return False
+        self.log("✅ The GitHub import page is open.", Fore.GREEN)
+        return True
+
+    def enter_github_repo_url(self, repo_url: str) -> bool:
+        """Type ``repo_url`` into the import page's "GitHub Repo URL" box. Never raises.
+
+        Only that box is filled. Nothing is clicked, so starting the import (and
+        connecting a GitHub account, which a private repository needs) stays
+        with the person at the keyboard. When the box cannot be filled the link
+        is printed so it can be pasted by hand.
+        """
+
+        try:
+            page = self._page_for_replit()
+            box = None
+            waited = 0
+            while waited <= self.GITHUB_IMPORT_LOAD_WAIT_MS:
+                if not self._on_import_page(page):
+                    self.log(
+                        f"⚠️ The browser is on {page.url}, not on the import page "
+                        "(is the account still signed in?).",
+                        Fore.YELLOW,
+                    )
+                    break
+                box = self._github_url_box(page)
+                if box is not None:
+                    break
+                page.wait_for_timeout(self.GITHUB_IMPORT_POLL_MS)
+                waited += self.GITHUB_IMPORT_POLL_MS
+            if box is None:
+                self._save_failure("github_import_box_not_found")
+                self.log('⚠️ Could not find the "GitHub Repo URL" box. Paste the link yourself:', Fore.YELLOW)
+                self.log(f"   {repo_url}", Fore.YELLOW)
+                return False
+            if not self._fill_field(box, repo_url):
+                self.log("⚠️ The page did not keep the link. Paste it yourself:", Fore.YELLOW)
+                self.log(f"   {repo_url}", Fore.YELLOW)
+                return False
+        except Exception as exc:
+            self.log(f"⚠️ Could not type the link into the import page ({exc}).", Fore.YELLOW)
+            self.log(f"   Paste it yourself: {repo_url}", Fore.YELLOW)
+            return False
+        self.log(f"✅ GitHub link typed into the import page: {repo_url}", Fore.GREEN)
+        self.log("   Finish the import in the browser; nothing was clicked for you.", Fore.CYAN)
+        return True
 
     def import_github_repo(self, repo_url):
         self.log("\n" + "="*60, Fore.MAGENTA)
